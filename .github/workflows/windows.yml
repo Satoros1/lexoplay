@@ -1,0 +1,82 @@
+name: windows
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Unit tests
+        run: pytest -q
+
+      # На серверной Windows английского OCR может не быть. Пробуем поставить, но не падаем:
+      # без него самопроверка пометит OCR как warn.
+      - name: English OCR language pack (best effort)
+        continue-on-error: true
+        timeout-minutes: 10
+        shell: pwsh
+        run: |
+          Get-WindowsCapability -Online -Name "Language.OCR*" | Where-Object Name -like "*en-US*" | Format-Table Name, State
+          Add-WindowsCapability -Online -Name "Language.OCR~~~en-US~0.0.1.0"
+
+      - name: Self-test (from source)
+        run: python -m lexoplay --selftest --report selftest/source/report.json
+
+      - name: Build exe
+        run: |
+          python packaging/make_icon.py packaging/lexoplay.ico
+          pyinstaller --noconfirm --clean --onefile --windowed --name LexoPlay `
+            --icon packaging/lexoplay.ico `
+            --collect-all winrt `
+            --collect-submodules lexoplay `
+            --hidden-import keyring.backends.Windows `
+            --copy-metadata keyring `
+            packaging/entry.py
+
+      - name: Self-test (built exe)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force selftest/exe | Out-Null
+          $report = Join-Path $PWD "selftest/exe/report.json"
+          $p = Start-Process -FilePath dist/LexoPlay.exe -ArgumentList "--selftest","--report",$report -Wait -PassThru
+          Get-Content $report
+          exit $p.ExitCode
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: selftest
+          path: selftest/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LexoPlay-exe
+          path: dist/LexoPlay.exe
+
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/LexoPlay.exe
+          generate_release_notes: true
