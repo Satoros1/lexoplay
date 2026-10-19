@@ -9,3 +9,4 @@ packaging/lexoplay.ico
 selftest/
 .pytest_cache/
 .ruff_cache/
+/*.png
