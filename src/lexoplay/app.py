@@ -1100,8 +1100,18 @@ class App(QObject):
         if self.settings.debug:
             self.dump.new_shot()
         target = Target(game.title, game.region, game.name_region, game.binarize, game.exe, session.id)
-        fut = self.bg.submit(pipeline.run(self._make_grab(self.active, game, display), target))
+        region = game.region
+
+        def partial(text: str, t: int = token) -> None:
+            # из фонового потока: перевод дописывается, показываем как есть
+            self.bridge.call.emit(lambda: self._show_partial(t, region, text))
+
+        fut = self.bg.submit(pipeline.run(self._make_grab(self.active, game, display), target, on_partial=partial))
         fut.add_done_callback(lambda f, t=token: self.bridge.f2_done.emit(f, t))
+
+    def _show_partial(self, token: int, region: Rect, text: str) -> None:
+        if token == self.token and self.state == "busy" and text:
+            self.overlay.show_text(region, text)
 
     def _on_f2_done(self, fut: concurrent.futures.Future, token: int) -> None:
         if token != self.token:

@@ -81,7 +81,7 @@ class Pipeline:
         target_lang: str = "ru",
         source_lang: str = "en",
         context_size: int = 8,
-        stable_wait: float = 0.15,
+        stable_wait: float = 0.1,
         max_wait: float = 1.5,
         stable_threshold: float = 0.001,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
@@ -100,6 +100,7 @@ class Pipeline:
         self._sleep = sleep
         self._run_sync = run_sync or (lambda fn: asyncio.to_thread(fn))
         self._debug = debug
+        self._warm_task: asyncio.Future | None = None
 
     async def _grab(self, grab: Grab) -> Image.Image:
         try:
@@ -135,8 +136,11 @@ class Pipeline:
             name_text = name_res.raw_text
         return result, name_text
 
-    async def run(self, grab: Grab, target: Target) -> F2Outcome:
+    async def run(self, grab: Grab, target: Target, on_partial: Callable[[str], None] | None = None) -> F2Outcome:
         t0 = time.perf_counter()
+        # соединение с сервером перевода открываем сразу, пока идут захват и OCR
+        warm = getattr(self.translator, "warm", None)
+        self._warm_task = asyncio.ensure_future(warm()) if warm is not None else None
         timings: dict[str, float] = {}
         try:
             frame = await self.stable_frame(grab, target.region)
@@ -174,8 +178,13 @@ class Pipeline:
             line_id=line_id,
             session_id=target.session_id,
             game_exe=target.game_exe,
+            on_partial=on_partial,
         )
         t2 = time.perf_counter()
+        warm_task = getattr(self, "_warm_task", None)
+        if warm_task is not None and not warm_task.done():
+            # соединение почти открыто: чуть подождать дешевле, чем открывать второе
+            await asyncio.wait({warm_task}, timeout=0.15)
         try:
             res = await self.translator.translate(req)
         except TranslationError as exc:

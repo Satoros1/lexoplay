@@ -57,7 +57,6 @@ jobs:
             --icon packaging/lexoplay.ico `
             --collect-all winrt `
             --collect-submodules lexoplay `
-            --collect-data lexoplay `
             --hidden-import keyring.backends.Windows `
             --copy-metadata keyring `
             packaging/entry.py 2>&1 | Tee-Object -FilePath selftest/logs/pyinstaller.txt

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lexoplay"
-version = "0.3.2"
+version = "0.3.3"
 description = "Перевод реплик в играх по клавише + слова в Lexo"
 requires-python = ">=3.11,<3.14"
 dependencies = [
@@ -32,8 +32,6 @@ lexoplay = "lexoplay.__main__:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
-[tool.setuptools.package-data]
-lexoplay = ["assets/fonts/*.ttf", "assets/fonts/*.txt"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

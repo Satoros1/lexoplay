@@ -416,7 +416,7 @@ def _qt_checks(out_dir: Path) -> None:
             saved.append(name)
         w.hide()
         store.close()
-        return ("ok" if family == "Manrope" else "warn"), {"font": family, "pages": saved}
+        return ("ok" if family.startswith("Segoe UI") else "warn"), {"font": family, "display": theme.DISPLAY_FAMILY, "pages": saved}
 
     _check("main_window_render", main_window)
 

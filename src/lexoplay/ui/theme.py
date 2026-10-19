@@ -1,7 +1,7 @@
 """Внешний вид: цвета, шрифт, стили окна, иконки. Всё рисуется кодом, файлы только шрифт.
 
 Окно LexoPlay в духе макета «Lexo для игр»: тёплый светлый фон, белые карточки,
-зелёный акцент Lexo, шрифт Manrope. Поверх игры (строка перевода, режим слов)
+зелёный акцент Lexo, системный шрифт Segoe UI. Поверх игры (строка перевода, режим слов)
 остаются тёмные полупрозрачные плашки, чтобы не спорить с игрой.
 """
 
@@ -30,7 +30,7 @@ CARD = "#FFFFFF"
 BORDER = "#E2DFD7"
 BORDER_STRONG = "#C9C6BC"
 INK = "#1F1F1D"
-MUTED = "#6E6C66"
+MUTED = "#5F5D57"
 GREEN = "#0F6E56"
 GREEN_HOVER = "#0C5A47"
 GREEN_SOFT = "#DCEFE8"
@@ -39,7 +39,8 @@ WARN = "#8A6A1F"
 WARN_SOFT = "#FBF1D9"
 DANGER = "#B3261E"
 
-FONT_FAMILY = "Segoe UI"  # до загрузки Manrope; load_fonts() заменит
+FONT_FAMILY = "Segoe UI"  # обычный текст окна; load_fonts() выберет лучший из системных
+DISPLAY_FAMILY = "Segoe UI"  # заголовки
 _FONTS_LOADED = False
 
 
@@ -48,21 +49,26 @@ def assets_dir() -> Path:
 
 
 def load_fonts() -> str:
-    """Подключить Manrope из assets (OFL). Не нашёлся → системный Segoe UI."""
-    global FONT_FAMILY, _FONTS_LOADED
+    """Системный шрифт Windows 11 (Segoe UI Variable), на Windows 10 обычный Segoe UI.
+
+    Свои шрифты в exe не возим: у Windows хинтинг системных шрифтов лучший, текст
+    получается чётким при любом масштабе экрана (100–200%). Manrope из 0.3 после
+    обрезки вариативного шрифта потерял хинтинг и рисовался «с дырками».
+    """
+    global FONT_FAMILY, DISPLAY_FAMILY, _FONTS_LOADED
     if _FONTS_LOADED:
         return FONT_FAMILY
     _FONTS_LOADED = True
-    families: set[str] = set()
-    folder = assets_dir() / "fonts"
-    for path in sorted(folder.glob("Manrope-*.ttf")):
-        fid = QFontDatabase.addApplicationFont(str(path))
-        if fid >= 0:
-            families.update(QFontDatabase.applicationFontFamilies(fid))
-    if "Manrope" in families:
-        FONT_FAMILY = "Manrope"
-    else:
-        log.warning("Manrope не загрузился из %s, шрифт по умолчанию", folder)
+    families = set(QFontDatabase.families())
+    for name in ("Segoe UI Variable Text", "Segoe UI"):
+        if name in families:
+            FONT_FAMILY = name
+            break
+    for name in ("Segoe UI Variable Display", FONT_FAMILY):
+        if name in families:
+            DISPLAY_FAMILY = name
+            break
+    log.info("шрифт окна: %s, заголовки: %s", FONT_FAMILY, DISPLAY_FAMILY)
     return FONT_FAMILY
 
 
@@ -75,17 +81,18 @@ def ui_font(size: float = 10.5, weight: QFont.Weight = QFont.Weight.Normal) -> Q
 
 def stylesheet() -> str:
     f = FONT_FAMILY
+    d = DISPLAY_FAMILY
     return f"""
 * {{ font-family: "{f}", "Segoe UI", sans-serif; color: {INK}; }}
 QWidget#root, QWidget#page, QScrollArea, QScrollArea > QWidget > QWidget {{ background: {BG}; }}
 QWidget#sidebar {{ background: {SIDEBAR}; border-right: 1px solid {BORDER}; }}
 QLabel {{ background: transparent; font-size: 10.5pt; }}
-QLabel#h1 {{ font-size: 18pt; font-weight: 700; }}
-QLabel#h2 {{ font-size: 12pt; font-weight: 700; }}
+QLabel#h1 {{ font-family: "{d}", "Segoe UI"; font-size: 20pt; font-weight: 700; }}
+QLabel#h2 {{ font-family: "{d}", "Segoe UI"; font-size: 13pt; font-weight: 700; }}
 QLabel#section {{ font-size: 8.5pt; font-weight: 700; color: {MUTED}; letter-spacing: 1px; }}
-QLabel#muted {{ color: {MUTED}; font-size: 9.5pt; }}
-QLabel#title {{ font-size: 11.5pt; font-weight: 700; }}
-QLabel#brand {{ font-size: 13pt; font-weight: 800; }}
+QLabel#muted {{ color: {MUTED}; font-size: 10pt; }}
+QLabel#title {{ font-size: 11.5pt; font-weight: 600; }}
+QLabel#brand {{ font-family: "{d}", "Segoe UI"; font-size: 14pt; font-weight: 700; }}
 QLabel#version {{ color: {MUTED}; font-size: 8.5pt; }}
 QLabel#ok {{ color: {GREEN}; font-size: 9.5pt; font-weight: 600; }}
 QLabel#warn {{ color: {WARN}; font-size: 9pt; }}

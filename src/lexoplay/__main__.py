@@ -84,12 +84,15 @@ def main() -> None:
     setup_logging(settings.debug)
     settings.save()  # новые поля и перенесённые клавиши сразу на диск
 
+    from PySide6.QtGui import QFont
+
     from lexoplay.app import App
     from lexoplay.bg import BackgroundLoop
     from lexoplay.store import Store
     from lexoplay.ui.theme import app_icon, load_fonts
 
-    load_fonts()
+    family = load_fonts()
+    qapp.setFont(QFont(family, 10))  # меню трея и системные окна тем же шрифтом
     qapp.setWindowIcon(app_icon())
     bg = BackgroundLoop()
     store = Store(data_dir() / "local.db")
