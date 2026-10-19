@@ -18,7 +18,7 @@ from lexoplay.dedupe import LineMemory, LineRecord, normalize_text
 from lexoplay.geometry import Rect
 from lexoplay.ocr_model import OcrResult
 from lexoplay.preprocess import Prepared, changed, prepare, thumbnail
-from lexoplay.textproc import has_text, to_utterance
+from lexoplay.textproc import Utterance, has_text, to_utterance
 from lexoplay.translate import ContextLine, TranslateRequest, TranslationError, Translator
 
 
@@ -42,6 +42,20 @@ class F2Outcome:
     ocr: OcrResult | None = None
     thumb: Image.Image | None = None  # слепок области: по нему поймём, что реплика сменилась
     timings: dict[str, float] = field(default_factory=dict)
+    code: str | None = None  # для error: limit_reached, device_revoked, offline…
+    utterance: Utterance | None = None
+
+
+@dataclass(slots=True)
+class ScanOutcome:
+    """F3 без перевода: только текст и рамки слов (и перевод, если реплику уже переводили)."""
+
+    ok: bool
+    ocr: OcrResult | None = None
+    utterance: Utterance | None = None
+    record: LineRecord | None = None
+    thumb: Image.Image | None = None
+    message: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,6 +64,8 @@ class Target:
     region: Rect
     name_region: Rect | None = None
     binarize: bool = False
+    game_exe: str = ""
+    session_id: str = ""
 
 
 class Pipeline:
@@ -135,11 +151,13 @@ class Pipeline:
         if self._debug:
             self._debug("ocr", {"raw": result.raw_text, "speaker": utt.speaker, "text": utt.text})
         if not has_text(utt.text):
-            return F2Outcome("no_text", ocr=result, thumb=thumb, timings=timings)
+            return F2Outcome("no_text", ocr=result, thumb=thumb, timings=timings, utterance=utt)
 
         known = self.memory.find(utt.text)
         if known is not None:
-            return F2Outcome("repeat", record=known, ocr=result, thumb=thumb, timings=timings)
+            return F2Outcome("repeat", record=known, ocr=result, thumb=thumb, timings=timings, utterance=utt)
+
+        line_id = str(uuid.uuid4())
 
         req = TranslateRequest(
             text=utt.text,
@@ -150,15 +168,26 @@ class Pipeline:
             context=tuple(
                 ContextLine(r.speaker, r.source, r.translation) for r in self.memory.context(self._context_size)
             ),
+            line_id=line_id,
+            session_id=target.session_id,
+            game_exe=target.game_exe,
         )
         t2 = time.perf_counter()
         try:
             res = await self.translator.translate(req)
         except TranslationError as exc:
-            return F2Outcome("error", message=str(exc), ocr=result, thumb=thumb, timings=timings)
+            return F2Outcome(
+                "error",
+                message=str(exc),
+                ocr=result,
+                thumb=thumb,
+                timings=timings,
+                code=getattr(exc, "code", "error"),
+                utterance=utt,
+            )
         timings["translate"] = time.perf_counter() - t2
         rec = LineRecord(
-            line_id=str(uuid.uuid4()),
+            line_id=line_id,
             speaker=utt.speaker,
             source=res.source,
             translation=res.translation,
@@ -166,4 +195,19 @@ class Pipeline:
         )
         self.memory.add(rec)
         timings["total"] = time.perf_counter() - t0
-        return F2Outcome("translated", record=rec, ocr=result, thumb=thumb, timings=timings)
+        return F2Outcome("translated", record=rec, ocr=result, thumb=thumb, timings=timings, utterance=utt)
+
+    async def scan(self, grab: Grab, target: Target) -> ScanOutcome:
+        """Для F3: дождаться стабильного кадра и распознать, без запроса перевода."""
+        try:
+            frame = await self.stable_frame(grab, target.region)
+        except CaptureError as exc:
+            return ScanOutcome(False, message=f"Не получилось захватить окно игры ({exc}).")
+        if self._debug:
+            self._debug("frame", frame)
+        result, name_text = await self.recognize(frame, target)
+        utt = to_utterance(result, name_text)
+        thumb = thumbnail(frame, target.region)
+        if not has_text(utt.text) or not result.words:
+            return ScanOutcome(False, ocr=result, utterance=utt, thumb=thumb)
+        return ScanOutcome(True, ocr=result, utterance=utt, record=self.memory.find(utt.text), thumb=thumb)

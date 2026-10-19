@@ -117,3 +117,39 @@ def test_capture_error():
     p, _, _ = make(result("x"))
     out = run(p.run(bad, Target("G", REGION)))
     assert out.kind == "error" and "окно закрыто" in out.message
+
+
+def test_request_carries_line_and_session_ids():
+    tr = FakeTranslator()
+    p, grab, _ = make(result("Hello there."), tr)
+    out = run(p.run(grab, Target("G", REGION, game_exe="g.exe", session_id="sess-123456")))
+    req = tr.requests[0]
+    assert req.session_id == "sess-123456" and req.game_exe == "g.exe"
+    assert req.line_id and req.line_id == out.record.line_id  # тот же id и в истории, и на сервере
+
+
+def test_error_code_is_kept_for_the_app():
+    class Limited(FakeTranslator):
+        async def translate(self, req):
+            raise TranslationError("Лимит переводов на сегодня закончился.", "limit_reached")
+
+    p, grab, _ = make(result("Hello there."), Limited())
+    out = run(p.run(grab, Target("G", REGION)))
+    assert out.kind == "error" and out.code == "limit_reached"
+    assert out.ocr is not None and out.utterance.text == "Hello there."  # F3 работает и без перевода
+
+
+def test_scan_reads_words_without_translating():
+    tr = FakeTranslator()
+    p, grab, _ = make(result("Mira", "This place feels eerie."), tr)
+    scan = run(p.scan(grab, Target("G", REGION)))
+    assert scan.ok and scan.utterance.speaker == "Mira" and len(scan.ocr.words) == 5
+    assert scan.record is None and tr.requests == []
+    run(p.run(grab, Target("G", REGION)))
+    again = run(p.scan(grab, Target("G", REGION)))
+    assert again.record is not None and again.record.translation.startswith("RU:")
+
+
+def test_scan_without_text():
+    p, grab, _ = make(result("|"))
+    assert not run(p.scan(grab, Target("G", REGION))).ok

@@ -62,3 +62,105 @@ def test_overlay_states(qapp):
     ov.toast("тост")
     assert ov.isVisible()
     ov.close()
+
+
+# ---------------------------------------------------------------- режим слов и настройки
+from lexoplay.ocr_model import Line, OcrResult, Word  # noqa: E402
+from lexoplay.ui.settings_dialog import AccountStatus, SettingsDialog  # noqa: E402
+from lexoplay.ui.word_layer import WordLayer  # noqa: E402
+from lexoplay.wordmode import CardState, build_views  # noqa: E402
+
+
+def _ocr_line(text, y=0.85):
+    words, x = [], 0.08
+    for w in text.split():
+        words.append(Word(w, Rect(x, y, 0.012 * len(w), 0.035)))
+        x += 0.012 * len(w) + 0.012
+    return Line(tuple(words))
+
+
+def test_word_layer_click_select_and_add(qapp):
+    res = OcrResult((_ocr_line("This place feels eerie after dark."),))
+    views = build_views(res, lambda w: w.lower().startswith("eerie"))
+    layer = WordLayer()
+    picked, added, done = [], [], []
+    layer.selected.connect(picked.append)
+    layer.add_clicked.connect(lambda: added.append(1))
+    layer.finished.connect(done.append)
+    layer.open(Rect(0, 0, 1000, 700), Rect(0.05, 0.8, 0.9, 0.15), views)
+    qapp.processEvents()
+    eerie = views[3]
+    cx = int((eerie.rect.x + eerie.rect.w / 2) * layer.width())
+    cy = int((eerie.rect.y + eerie.rect.h / 2) * layer.height())
+    QTest.mouseClick(layer, Qt.MouseButton.LeftButton, pos=QPoint(cx, cy))
+    assert picked == [[3]]
+    after = views[4]
+    ax = int((after.rect.x + after.rect.w / 2) * layer.width())
+    QTest.mouseClick(layer, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.ShiftModifier, QPoint(ax, cy))
+    assert picked[-1] == [3, 4]
+    layer.set_card(CardState("ready", "eerie", "ˈɪəri", "adj", ["жуткий", "зловещий"]))
+    img = layer.grab().toImage()
+    assert layer._button_rect is not None
+    b = layer._button_rect.center()
+    QTest.mouseClick(layer, Qt.MouseButton.LeftButton, pos=QPoint(int(b.x()), int(b.y())))
+    QTest.keyClick(layer, Qt.Key.Key_Return)
+    assert added == [1, 1]
+    layer.set_card(CardState("loading", "eerie"))
+    QTest.keyClick(layer, Qt.Key.Key_Return)
+    assert added == [1, 1]  # пока значение грузится, добавлять нечего
+    QTest.keyClick(layer, Qt.Key.Key_Escape)
+    assert done == ["esc"] and not layer.is_open
+    assert img.width() == 1000
+    layer.close()
+    layer.deleteLater()
+    qapp.processEvents()
+
+
+class FakeAccount:
+    def __init__(self) -> None:
+        self.linked = False
+        self.codes = []
+
+    def account_status(self):
+        if self.linked:
+            return AccountStatus(True, "@ruslan", "сегодня 3 из 50 переводов")
+        return AccountStatus(False, queue="в очереди на отправку: 2")
+
+    def link(self, code, done):
+        self.codes.append(code)
+        if code == "BADBAD":
+            done("Код не подошёл.")
+        else:
+            self.linked = True
+            done(None)
+
+    def unlink(self, done):
+        self.linked = False
+        done()
+
+
+def test_settings_account_link_flow(qapp, tmp_path, monkeypatch):
+    monkeypatch.setenv("LEXOPLAY_HOME", str(tmp_path))
+    from lexoplay.config import Settings
+    from lexoplay.store import Store
+
+    store = Store(tmp_path / "local.db")
+    acc = FakeAccount()
+    dlg = SettingsDialog(Settings(), store, account=acc, tab="account")
+    tab = dlg.account
+    assert not tab.link_box.isHidden() and tab.linked_box.isHidden()
+    assert "очереди" in tab.details.text()
+    QTest.keyClicks(tab.code, "badbad")
+    assert tab.code.text() == "BADBAD"
+    QTest.keyClick(tab.code, Qt.Key.Key_Return)  # Enter привязывает, а не закрывает окно
+    assert acc.codes == ["BADBAD"] and "не подошёл" in tab.status.text() and dlg.result() == 0
+    tab.code.setText("K7QX2M")
+    tab.link_btn.click()
+    assert acc.linked and tab.link_box.isHidden() and not tab.linked_box.isHidden()
+    assert tab.title.text() == "Lexo: @ruslan"
+    tab.unlink_btn.click()
+    assert not tab.link_box.isHidden()
+    dlg.reject()
+    dlg.deleteLater()
+    qapp.processEvents()
+    store.close()

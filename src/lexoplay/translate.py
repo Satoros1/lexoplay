@@ -1,7 +1,7 @@
-"""Перевод реплики через Claude Haiku.
+"""Перевод реплики.
 
-В MVP клиент ходит в Anthropic напрямую ключом игрока. С v2 этот же промпт переезжает
-на сервер Lexo (services/providers/game.py), а клиент будет звать /desktop/translate.
+Основной путь: сервер Lexo (/desktop/translate), там тот же промпт, кеш и лимит.
+Запасной путь без привязки: Claude Haiku напрямую своим ключом Anthropic.
 """
 
 from __future__ import annotations
@@ -29,11 +29,20 @@ Game: {game}. Keep the speaker's tone, slang and politeness level.
 The source comes from OCR and may contain recognition errors
 (l/I, 0/O, rn/m, missing spaces, stray symbols). Silently fix them before translating.
 Use the glossary for names and terms. Do not explain, do not add notes.
+Never use the em dash character in the translation; use a comma, a colon or a new sentence instead.
 Return only JSON: {{"source": "<corrected {source_lang} text>", "translation": "<translation>"}}"""
 
 
 class TranslationError(Exception):
-    """Сеть, ключ, лимиты, кривой ответ. message можно показывать игроку."""
+    """Сеть, ключ, лимиты, кривой ответ. message можно показывать игроку.
+
+    code различает случаи, на которые приложение реагирует по-разному:
+    limit_reached, device_revoked/unauthorized, update_required, offline.
+    """
+
+    def __init__(self, message: str, code: str = "error") -> None:
+        super().__init__(message)
+        self.code = code
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,6 +61,9 @@ class TranslateRequest:
     source_lang: str = "en"
     context: tuple[ContextLine, ...] = ()
     glossary: dict[str, str] = field(default_factory=dict)
+    line_id: str = ""
+    session_id: str = ""
+    game_exe: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,13 +100,18 @@ def build_user(req: TranslateRequest) -> str:
     return "\n".join(parts)
 
 
+def no_dash(text: str) -> str:
+    """Длинное тире в переводе читается как машинный текст: в Lexo его нет нигде."""
+    return text.replace(" \u2014 ", ", ").replace("\u2014", ", ").strip()
+
+
 def parse_reply(raw: str, original: str) -> TranslateResult:
     """Достаём JSON из ответа модели. Пустой перевод = ошибка, чтобы сработал повтор."""
     match = re.search(r"\{.*\}", raw, re.S)
     if not match:
         raise ValueError(f"no JSON in reply: {raw[:80]!r}")
     data = json.loads(match.group(0))
-    translation = str(data.get("translation", "")).strip()
+    translation = no_dash(str(data.get("translation", "")))
     if not translation:
         raise ValueError("empty translation")
     source = str(data.get("source", "")).strip() or original
@@ -141,3 +158,32 @@ class AnthropicTranslator:
             except (ValueError, json.JSONDecodeError) as exc:
                 last_err = exc
         raise TranslationError("Модель ответила непонятно, попробуй ещё раз.") from last_err
+
+
+class LexoTranslator:
+    """Перевод через сервер Lexo. Повтор того же line_id сервер не списывает с лимита дважды."""
+
+    def __init__(self, client, on_usage=None) -> None:  # type: ignore[no-untyped-def]
+        self._client = client
+        self._on_usage = on_usage
+
+    async def translate(self, req: TranslateRequest) -> TranslateResult:
+        from lexoplay.lexo import GameRef, LexoError, LexoOffline
+
+        try:
+            source, translation, _cached, usage = await self._client.translate(
+                session_id=req.session_id,
+                line_id=req.line_id,
+                game=GameRef(req.game, req.game_exe),
+                text=req.text,
+                speaker=req.speaker,
+                context=[{"speaker": c.speaker, "source": c.source, "translation": c.translation} for c in req.context],
+            )
+        except LexoOffline as exc:
+            msg = "Не успел перевести, попробуй ещё раз." if str(exc) == "timeout" else "Нет связи с Lexo."
+            raise TranslationError(msg, "offline") from exc
+        except LexoError as exc:
+            raise TranslationError(exc.message, exc.code) from exc
+        if usage and self._on_usage:
+            self._on_usage(usage)
+        return TranslateResult(source=source or req.text, translation=no_dash(translation))

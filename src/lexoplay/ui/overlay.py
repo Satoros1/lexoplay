@@ -75,6 +75,13 @@ class Overlay(QWidget):
         self._text, self._busy = None, False
         self._refresh()
 
+    def strip_rect(self) -> Rect | None:
+        """Где сейчас строка перевода, в координатах окна (оно совпадает с display_rect)."""
+        if not self.strip_visible:
+            return None
+        box, _font, _text = self._strip_geometry(self._text if self._text is not None else "…")
+        return Rect(box.x(), box.y(), box.width(), box.height())
+
     def toast(self, text: str, ms: int = 2400) -> None:
         self._toast = text
         self._toast_timer.start(ms)

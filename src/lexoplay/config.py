@@ -1,4 +1,5 @@
-"""Настройки (%APPDATA%\\LexoPlay\\settings.json) и ключ Anthropic (Windows Credential Manager)."""
+"""Настройки (%APPDATA%\\LexoPlay\\settings.json) и секреты в Windows Credential Manager:
+токен устройства Lexo и, для работы без Lexo, свой ключ Anthropic."""
 
 from __future__ import annotations
 
@@ -15,6 +16,7 @@ log = logging.getLogger(__name__)
 
 KEYRING_SERVICE = APP_NAME
 KEYRING_USER = "anthropic_api_key"
+KEYRING_TOKEN = "lexo_device_token"
 
 
 def data_dir() -> Path:
@@ -46,6 +48,8 @@ class Hotkeys:
 
 @dataclass
 class Settings:
+    server_url: str = "https://api.lexovium.study"
+    deck: str = "game"  # game: колода с названием игры | current: текущая колода в Lexo
     model: str = "claude-haiku-5-5"
     target_lang: str = "ru"
     source_lang: str = "en"
@@ -96,31 +100,48 @@ def _keyring():  # type: ignore[no-untyped-def]
     return keyring
 
 
-def get_api_key() -> str | None:
-    env = os.environ.get("ANTHROPIC_API_KEY")
-    if env:
-        return env
+def _get_secret(user: str, env: str) -> str | None:
+    value = os.environ.get(env)
+    if value:
+        return value
     try:
-        keyring = _keyring()
-
-        return keyring.get_password(KEYRING_SERVICE, KEYRING_USER)
+        return _keyring().get_password(KEYRING_SERVICE, user)
     except Exception:
         log.exception("keyring недоступен")
         return None
 
 
-def set_api_key(value: str) -> bool:
+def _set_secret(user: str, value: str | None) -> bool:
     try:
         keyring = _keyring()
-
         if value:
-            keyring.set_password(KEYRING_SERVICE, KEYRING_USER, value)
+            keyring.set_password(KEYRING_SERVICE, user, value)
         else:
             try:
-                keyring.delete_password(KEYRING_SERVICE, KEYRING_USER)
+                keyring.delete_password(KEYRING_SERVICE, user)
             except Exception:
                 pass
         return True
     except Exception:
-        log.exception("не удалось сохранить ключ в keyring")
+        log.exception("не удалось сохранить секрет в keyring")
         return False
+
+
+def get_token() -> str | None:
+    return _get_secret(KEYRING_TOKEN, "LEXOPLAY_TOKEN")
+
+
+def set_token(value: str | None) -> bool:
+    return _set_secret(KEYRING_TOKEN, value)
+
+
+def server_url(settings: Settings) -> str:
+    return (os.environ.get("LEXOPLAY_SERVER") or settings.server_url).rstrip("/")
+
+
+def get_api_key() -> str | None:
+    return _get_secret(KEYRING_USER, "ANTHROPIC_API_KEY")
+
+
+def set_api_key(value: str) -> bool:
+    return _set_secret(KEYRING_USER, value)
