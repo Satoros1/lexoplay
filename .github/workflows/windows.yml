@@ -102,9 +102,25 @@ jobs:
           name: LexoPlay-exe
           path: dist/LexoPlay.exe
 
-      - name: Release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/LexoPlay.exe
-          generate_release_notes: true
+      # Релиз выходит сам, когда на main приходит новая версия (lexoplay.__version__):
+      # тег v<версия> и LexoPlay.exe в Releases. Та же версия второй раз не выпускается.
+      - name: Release new version
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ver = (python -c "import lexoplay; print(lexoplay.__version__)").Trim()
+          $tag = "v$ver"
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "$tag уже выпущен, пропускаю"
+            exit 0
+          }
+          $notes = "packaging/notes/$tag.md"
+          if (Test-Path $notes) {
+            gh release create $tag dist/LexoPlay.exe --target $env:GITHUB_SHA --title "LexoPlay $ver" --notes-file $notes
+          } else {
+            gh release create $tag dist/LexoPlay.exe --target $env:GITHUB_SHA --title "LexoPlay $ver" --generate-notes
+          }
+          exit $LASTEXITCODE
