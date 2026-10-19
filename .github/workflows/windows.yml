@@ -24,11 +24,16 @@ jobs:
 
       - name: Install
         run: |
+          New-Item -ItemType Directory -Force selftest/logs | Out-Null
           python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+          pip install -e ".[dev]" 2>&1 | Tee-Object -FilePath selftest/logs/install.txt
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          pip freeze | Out-File selftest/logs/freeze.txt
 
       - name: Unit tests
-        run: pytest -q
+        run: |
+          pytest -q 2>&1 | Tee-Object -FilePath selftest/logs/pytest.txt
+          exit $LASTEXITCODE
 
       # На серверной Windows английского OCR может не быть. Пробуем поставить, но не падаем:
       # без него самопроверка пометит OCR как warn.
@@ -41,7 +46,9 @@ jobs:
           Add-WindowsCapability -Online -Name "Language.OCR~~~en-US~0.0.1.0"
 
       - name: Self-test (from source)
-        run: python -m lexoplay --selftest --report selftest/source/report.json
+        run: |
+          python -m lexoplay --selftest --report selftest/source/report.json 2>&1 | Tee-Object -FilePath selftest/logs/selftest-source.txt
+          exit $LASTEXITCODE
 
       - name: Build exe
         run: |
@@ -52,7 +59,8 @@ jobs:
             --collect-submodules lexoplay `
             --hidden-import keyring.backends.Windows `
             --copy-metadata keyring `
-            packaging/entry.py
+            packaging/entry.py 2>&1 | Tee-Object -FilePath selftest/logs/pyinstaller.txt
+          exit $LASTEXITCODE
 
       - name: Self-test (built exe)
         shell: pwsh
@@ -68,6 +76,26 @@ jobs:
         with:
           name: selftest
           path: selftest/
+
+      # Отчёт и логи последней сборки лежат ещё и в ветке ci-results: их можно забрать
+      # обычным git fetch, без доступа к хранилищу артефактов.
+      - name: Publish self-test to ci-results branch
+        if: always() && github.event_name != 'pull_request'
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          $dst = Join-Path $env:RUNNER_TEMP "ci-results"
+          New-Item -ItemType Directory -Force $dst | Out-Null
+          if (Test-Path selftest) { Copy-Item -Recurse -Force selftest/* $dst }
+          if (Test-Path dist/LexoPlay.exe) { (Get-Item dist/LexoPlay.exe).Length | Out-File (Join-Path $dst "exe-size.txt") }
+          Set-Location $dst
+          "sha=${{ github.sha }} run=${{ github.run_id }} ref=${{ github.ref }} status=${{ job.status }} at=$(Get-Date -Format o)" | Out-File RUN.txt
+          git init -q -b ci-results
+          git config user.name "lexoplay-ci"
+          git config user.email "lexoplay-ci@users.noreply.github.com"
+          git add -A
+          git commit -qm "self-test ${{ github.sha }}"
+          git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" ci-results
 
       - uses: actions/upload-artifact@v4
         with:
