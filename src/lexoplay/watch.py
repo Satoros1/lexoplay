@@ -1,9 +1,15 @@
-"""Когда прятать перевод: только когда реплика в игре действительно сменилась.
+"""Когда прятать перевод: после действия игрока, и только если реплика сменилась.
 
 Раньше хватало изменения пикселей в окне диалога. Но в играх там многое шевелится само:
-мигает стрелка «дальше», мерцает рамка, по фону бегут цвета (Hotline Miami), и перевод
-пропадал, хотя реплика та же. Теперь пиксели только будят проверку, а решает текст:
-окно диалога распознаётся заново и сравнивается с переведённой репликой.
+мигает стрелка «дальше», мерцает рамка, буквы «дышат» и меняют цвет (Hotline Miami), и
+перевод пропадал, хотя реплика та же. Теперь:
+
+* проверка просыпается только после действия игрока: клик, колесо, клавиша (gated).
+  Пока игрок ничего не нажимает, перевод не пропадает, что бы ни шевелилось на экране;
+* после действия несколько секунд смотрим на пиксели, а решает текст: окно диалога
+  распознаётся заново и сравнивается с переведённой репликой;
+* похожесть считается и по буквам, и по словам: пиксельный шрифт OCR читает по-разному
+  от кадра к кадру, но большая часть слов совпадает.
 
 * текст тот же (OCR чуть плавает, похожесть ≥ 0.8) → перевод остаётся;
 * совсем другой текст (игрок пропустил реплику, началась следующая) → прячем сразу;
@@ -23,6 +29,20 @@ from lexoplay.preprocess import changed
 
 SAME = 0.8  # не ниже: та же реплика, OCR чуть плавает
 DIFFERENT = 0.5  # ниже: точно другая реплика
+ARMED_FOR = 3.0  # сколько секунд после действия игрока ждём смены реплики
+
+
+def _words(norm: str) -> set[str]:
+    return {w for w in norm.split() if len(w) >= 4}
+
+
+def likeness(a: str, b: str) -> float:
+    """0..1: по буквам (difflib) или по словам, что выше. Нормализованные строки."""
+    score = similarity(a, b)
+    wa, wb = _words(a), _words(b)
+    if wa and wb:
+        score = max(score, len(wa & wb) / min(len(wa), len(wb)))
+    return score
 
 
 class LineWatcher:
@@ -33,9 +53,15 @@ class LineWatcher:
         *,
         pixel_threshold: float = 0.006,
         ocr_every: float = 0.45,
+        gated: bool = False,
+        armed_for: float = ARMED_FOR,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.norm = normalize_text(text)
+        self._gated = gated
+        self._armed_for = armed_for
+        self._armed_until = float("-inf")
+        self.acted = False  # игрок что-то нажимал с момента показа перевода
         self.baseline = baseline
         self._pixel_threshold = pixel_threshold
         self._ocr_every = ocr_every
@@ -43,9 +69,21 @@ class LineWatcher:
         self._last_ocr = float("-inf")
         self._strikes = 0
         self.checks = 0  # сколько раз перечитывали текст (для лога)
+        self.last_score: float | None = None
+
+    def arm(self) -> None:
+        """Игрок кликнул или нажал клавишу: ближайшие секунды ждём смену реплики."""
+        self.acted = True
+        self._armed_until = self._clock() + self._armed_for
+
+    @property
+    def armed(self) -> bool:
+        return not self._gated or self._clock() <= self._armed_until
 
     def needs_ocr(self, thumb: Image.Image) -> bool:
-        """Пиксели окна диалога сдвинулись настолько, что стоит перечитать текст."""
+        """Игрок действовал и пиксели окна диалога сдвинулись: стоит перечитать текст."""
+        if not self.armed:
+            return False
         if not changed(self.baseline, thumb, self._pixel_threshold):
             self._strikes = 0
             return False
@@ -62,7 +100,8 @@ class LineWatcher:
         if not now:
             self._strikes += 1
             return self._strikes >= 2
-        score = similarity(self.norm, now)
+        score = likeness(self.norm, now)
+        self.last_score = score
         if score >= SAME:
             self._strikes = 0
             if thumb is not None:

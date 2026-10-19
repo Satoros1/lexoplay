@@ -86,3 +86,21 @@ def test_ocr_is_throttled():
     clock.t += 0.3
     assert w.needs_ocr(moving)
     assert w.checks == 2
+
+
+def test_without_player_action_nothing_is_checked():
+    clock = Clock()
+    w = LineWatcher(LINE, thumbnail(frame(LINE), REGION), gated=True, clock=clock)
+    moving = thumbnail(frame(LINE, bg=120), REGION)  # фон «дышит» сам по себе
+    assert not w.needs_ocr(moving)
+    w.arm()  # игрок нажал клавишу
+    assert w.acted and w.needs_ocr(moving)
+    clock.t += 3.5  # прошло больше трёх секунд: снова спим
+    assert not w.needs_ocr(moving)
+
+
+def test_noisy_pixel_font_ocr_is_the_same_line():
+    w = watcher(Clock())
+    # OCR пиксельного шрифта: часть букв съехала, но слова те же
+    assert not w.line_changed("SUSPECTS CLAIN T0 HAVE BEEM THREATENED IMTO")
+    assert not w.line_changed("..SUSPECTS CLAIM TO HAUE BEEN THREATENED")

@@ -67,6 +67,7 @@ from lexoplay.vocab import Vocab
 from lexoplay.watch import LineWatcher
 from lexoplay.win import capture, winapi
 from lexoplay.win.hooks import HotkeyManager, WindowEvents
+from lexoplay.win.input import InputWatch
 from lexoplay.win.ocr import INSTALL_HINT, OcrUnavailable, WinOcr
 from lexoplay.wordmode import CardState, WordView, build_views, selected_text
 
@@ -210,6 +211,8 @@ class App(QObject):
         self.vocab_timer.setInterval(10 * 60_000)
         self.vocab_timer.timeout.connect(lambda: self._refresh_vocab(full=False))
 
+        self.input = InputWatch()  # клики и клавиши игрока: после них перевод может смениться
+        self.input.pressed.connect(self._on_user_input)
         self.hotkeys = HotkeyManager()
         self.hotkeys.triggered.connect(self._on_hotkey)
         self.hotkeys.failed.connect(self._on_hotkey_failed)
@@ -271,6 +274,7 @@ class App(QObject):
         except Exception:
             log.info("httpx-клиент не закрылся за 2 с")
         self.hotkeys.clear()
+        self.input.close()
         self.events.close()
         self.tray.hide()
         self.overlay.close()
@@ -531,6 +535,18 @@ class App(QObject):
                 self.hotkeys.define(name, parse(text), group)
             except HotkeyError as exc:
                 log.warning("хоткей %s=%s: %s", name, text, exc)
+        if hasattr(self, "input"):
+            self.input.ignore_vks = self._hotkey_vks()  # наши клавиши не считаются «игрок пропустил реплику»
+
+    def _hotkey_vks(self) -> set[int]:
+        vks = set()
+        for _name, text in self.settings.hotkeys.items():
+            try:
+                if text:
+                    vks.add(parse(text).vk)
+            except HotkeyError:
+                pass
+        return vks | {0x1B, 0x0D}  # Esc и Enter режима слов
 
     def _apply_hotkey_groups(self) -> None:
         paused = self._hotkeys_paused
@@ -1072,8 +1088,11 @@ class App(QObject):
         if self.state != "idle" or not self.active:
             return
         if self.overlay.strip_visible:
+            if self.watcher is None or not self.watcher.acted:
+                self._hide_strip()  # ничего не нажимал: F2 просто прячет перевод
+                return
+            # игрок что-то нажимал, а перевод ещё висит: возможно, реплика уже другая
             self._hide_strip()
-            return
         game = self.store.get_game(self.active.exe)
         if game is None:
             return
@@ -1167,15 +1186,26 @@ class App(QObject):
             self.state = "idle"
         self.overlay.hide_strip()
         if not self.word_layer.is_open:
-            self.watch_timer.stop()
-            self.watcher = None
+            self._stop_watch()
 
     # ------------------------------------------------------------------ смена реплики
     def _watch_line(self, text: str, thumb: Image.Image | None) -> None:
-        """Следить за показанной репликой: перевод уберём, когда она сменится."""
-        self.watcher = LineWatcher(text, thumb) if thumb is not None else None
+        """Следить за показанной репликой: перевод уберём, когда игрок её пропустит."""
+        if thumb is None:
+            self.watcher = None
+            return
+        gated = self.input.start()  # не включился Raw Input: следим без него, как раньше
+        self.watcher = LineWatcher(text, thumb, gated=gated)
+        self.watch_timer.start()
+
+    def _stop_watch(self) -> None:
+        self.watch_timer.stop()
+        self.watcher = None
+        self.input.stop()
+
+    def _on_user_input(self) -> None:
         if self.watcher is not None:
-            self.watch_timer.start()
+            self.watcher.arm()
 
     def _watch_tick(self) -> None:
         watching = self.overlay.strip_visible or self.word_layer.is_open
@@ -1197,9 +1227,14 @@ class App(QObject):
             if pipeline is None:
                 return True  # перечитать текст нечем: как раньше, по пикселям
             result, name_text = await pipeline.recognize(img, target)
-            gone = watcher.line_changed(to_utterance(result, name_text).text, thumb)
+            text = to_utterance(result, name_text).text
+            gone = watcher.line_changed(text, thumb)
+            log.debug("проверка реплики: похожесть %s, %r", watcher.last_score, text[:80])
             if gone:
-                log.info("реплика сменилась (перечитывал текст %s раз)", watcher.checks)
+                log.info(
+                    "реплика сменилась: было %r, стало %r (похожесть %s, проверок %s)",
+                    watcher.norm[:60], text[:60], watcher.last_score, watcher.checks,
+                )
             return gone
 
         self._watch_pending = True
@@ -1404,5 +1439,4 @@ class App(QObject):
         self.hotkeys.set_group("words", False)
         log.debug("режим слов закрыт: %s", reason)
         if not self.overlay.strip_visible:
-            self.watch_timer.stop()
-            self.watcher = None
+            self._stop_watch()

@@ -514,6 +514,45 @@ def _qt_checks(out_dir: Path) -> None:
 
     _check("word_mode_keys", words_keys)
 
+    def raw_input() -> tuple[str, object]:
+        import ctypes
+
+        from lexoplay.win import input as rawin
+
+        info: dict[str, object] = {
+            "sizes": [ctypes.sizeof(rawin.RAWINPUTHEADER), ctypes.sizeof(rawin.RAWMOUSE), ctypes.sizeof(rawin.RAWKEYBOARD)]
+        }
+        iw = rawin.InputWatch()
+        got: list[int] = []
+        iw.pressed.connect(lambda: got.append(1))
+        info["started"] = iw.start()
+        u32 = ctypes.windll.user32
+
+        def pump(sec: float) -> None:
+            end = time.time() + sec
+            while time.time() < end:
+                app.processEvents()
+                time.sleep(0.01)
+
+        iw.ignore_vks = {0x86}  # F23 считается «нашей» клавишей: игнор
+        u32.keybd_event(0x86, 0, 0, 0)
+        u32.keybd_event(0x86, 0, 2, 0)
+        pump(0.4)
+        info["ignored_key_events"] = len(got)
+        iw.ignore_vks = set()
+        u32.keybd_event(0x86, 0, 0, 0)
+        u32.keybd_event(0x86, 0, 2, 0)
+        pump(0.4)
+        info["key_events"] = len(got)
+        u32.mouse_event(0x0800, 0, 0, 120, 0)  # колесо
+        pump(0.4)
+        info["after_wheel"] = len(got)
+        iw.close()
+        ok = info["started"] and info["ignored_key_events"] == 0 and info["key_events"] >= 1 and info["after_wheel"] >= 2
+        return ("ok" if ok else "warn"), info
+
+    _check("raw_input_player_actions", raw_input)
+
     def no_activate() -> tuple[str, object]:
         import ctypes
 
@@ -575,6 +614,7 @@ def run(report: str) -> int:
         import importlib
 
         mods = [
+            "lexoplay.watch",
             "lexoplay.translate",
             "lexoplay.store",
             "lexoplay.lexo",
@@ -592,7 +632,7 @@ def run(report: str) -> int:
             "lexoplay.games",
         ]
         if sys.platform == "win32":
-            mods += ["lexoplay.app", "lexoplay.win.winapi", "lexoplay.win.capture", "lexoplay.win.hooks", "lexoplay.win.ocr"]
+            mods += ["lexoplay.win.input", "lexoplay.app", "lexoplay.win.winapi", "lexoplay.win.capture", "lexoplay.win.hooks", "lexoplay.win.ocr"]
         for m in mods:
             importlib.import_module(m)
         import anthropic  # noqa: F401
