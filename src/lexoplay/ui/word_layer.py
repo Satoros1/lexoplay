@@ -3,10 +3,11 @@
 Отдельное окно поверх игры размером с display_rect. В отличие от строки перевода, оно
 принимает клики, но только там, где что-то нарисовано: прозрачные пиксели слоистого окна
 Windows пропускает в игру. Поэтому область диалога заливаем почти невидимым цветом
-(альфа 1/255), а всё остальное остаётся игрой. Клик мимо области уходит в игру, наше
-окно теряет фокус, режим закрывается сам.
+(альфа 1/255), а всё остальное остаётся игрой.
 
-Клавиши: Esc выход, Enter добавить слово. Shift+клик выбирает фразу до 5 слов.
+Фокус окно не берёт (WS_EX_NOACTIVATE): полноэкранные игры, потеряв фокус, сворачиваются.
+Поэтому Esc и Enter приходят не сюда, а глобальными клавишами через App, пока режим открыт.
+Клик мимо области уходит в игру: реплика сменится, и App закроет режим.
 """
 
 from __future__ import annotations
@@ -24,7 +25,7 @@ from lexoplay.wordmode import CardState, WordView, place_card, selection_range, 
 Placer = Callable[[QWidget, Rect], None]
 
 KNOWN = QColor("#F2C94C")
-IDLE_MS = 15_000
+IDLE_MS = 30_000
 
 
 def _qt_placer(widget: QWidget, rect: Rect) -> None:
@@ -43,12 +44,14 @@ class WordLayer(QWidget):
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
             | Qt.WindowType.Tool
+            | Qt.WindowType.WindowDoesNotAcceptFocus
             | Qt.WindowType.NoDropShadowWindowHint,
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setMouseTracking(True)
-        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._placer = placer or _qt_placer
         self._display = Rect(0, 0, 1280, 720)
         self._region = Rect(0.05, 0.75, 0.9, 0.2)
@@ -61,8 +64,8 @@ class WordLayer(QWidget):
         self._card_rect: QRectF | None = None
         self._strip: Rect | None = None  # строка перевода: карточка её не закрывает
         self._open = False
-        self._guard = False  # первые мгновения после открытия: фокус ещё «дребезжит»
         self.font_scale = 1.0
+        self.deck_label = ""
         self._idle = QTimer(self)
         self._idle.setSingleShot(True)
         self._idle.setInterval(IDLE_MS)
@@ -84,19 +87,17 @@ class WordLayer(QWidget):
         self._display, self._region, self._views, self._strip = display, region, views, strip
         self._sel, self._anchor, self._hover, self._card = [], None, None, None
         self._open = True
-        self._guard = True
-        QTimer.singleShot(450, self._end_guard)
         self._placer(self, display)
         self.show()
         self._placer(self, display)
-        self.raise_()
-        self.activateWindow()
-        self.setFocus()
         self._idle.start()
         self.update()
 
-    def _end_guard(self) -> None:
-        self._guard = False
+    def press_enter(self) -> None:
+        """Enter с клавиатуры (через глобальную клавишу App, фокуса у окна нет)."""
+        self._idle.start()
+        if self._card and self._card.button_enabled:
+            self.add_clicked.emit()
 
     def set_display_rect(self, rect: Rect) -> None:
         self._display = rect
@@ -175,19 +176,14 @@ class WordLayer(QWidget):
         self.selected.emit(sel)
 
     def keyPressEvent(self, e: QKeyEvent) -> None:  # noqa: N802
+        # обычно сюда не попадает (фокуса нет), но если окно всё же активировали
         self._idle.start()
         if e.key() == Qt.Key.Key_Escape:
             self.finish("esc")
         elif e.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-            if self._card and self._card.button_enabled:
-                self.add_clicked.emit()
+            self.press_enter()
         else:
             super().keyPressEvent(e)
-
-    def changeEvent(self, e) -> None:  # type: ignore[no-untyped-def]  # noqa: N802
-        super().changeEvent(e)
-        if e.type() == e.Type.ActivationChange and self._open and not self._guard and not self.isActiveWindow():
-            self.finish("focus")
 
     # ------------------------------------------------------------------ отрисовка
     def paintEvent(self, _e: QPaintEvent) -> None:  # noqa: N802
@@ -268,6 +264,8 @@ class WordLayer(QWidget):
             blocks.append(("text", f_note, card.note, ACCENT if card.phase == "saved" else TEXT_MUTED))
         if card.button:
             blocks.append(("button",))
+            if self.deck_label and card.phase != "saved":
+                blocks.append(("text", f_note, f"Колода {self.deck_label}", TEXT_MUTED))
         blocks.append(("text", f_note, "Shift+клик: фраза · Esc: выйти", TEXT_MUTED))
 
         gap = px * 0.35

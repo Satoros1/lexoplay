@@ -66,7 +66,6 @@ def test_overlay_states(qapp):
 
 # ---------------------------------------------------------------- режим слов и настройки
 from lexoplay.ocr_model import Line, OcrResult, Word  # noqa: E402
-from lexoplay.ui.settings_dialog import AccountStatus, SettingsDialog  # noqa: E402
 from lexoplay.ui.word_layer import WordLayer  # noqa: E402
 from lexoplay.wordmode import CardState, build_views  # noqa: E402
 
@@ -116,15 +115,24 @@ def test_word_layer_click_select_and_add(qapp):
     qapp.processEvents()
 
 
-class FakeAccount:
-    def __init__(self) -> None:
+class FakeCtl:
+    """Контроллер для окна LexoPlay без Windows и сервера."""
+
+    def __init__(self, store, settings) -> None:
+        self.store, self.settings = store, settings
         self.linked = False
         self.codes = []
+        self.saved = 0
+        self.paused = []
+        self.picked = []
+        self.key = ""
 
     def account_status(self):
+        from lexoplay.ui.main_window import AccountStatus
+
         if self.linked:
-            return AccountStatus(True, "@ruslan", "сегодня 3 из 50 переводов")
-        return AccountStatus(False, queue="в очереди на отправку: 2")
+            return AccountStatus(True, "@ruslan", used=3, limit=50)
+        return AccountStatus(False, queue=2)
 
     def link(self, code, done):
         self.codes.append(code)
@@ -138,29 +146,149 @@ class FakeAccount:
         self.linked = False
         done()
 
+    def load_decks(self, done):
+        from lexoplay.lexo import Deck
 
-def test_settings_account_link_flow(qapp, tmp_path, monkeypatch):
+        done([Deck(5, "Слова из игр", 12, 3, 1)], 5, None)
+
+    def create_deck(self, title, done):
+        from lexoplay.lexo import Deck
+
+        done(Deck(9, title), None)
+
+    def list_windows(self):
+        return []
+
+    def add_game(self, w):
+        pass
+
+    def pick_region(self, exe):
+        self.picked.append(exe)
+
+    def forget_game(self, exe):
+        self.store.delete_game(exe)
+
+    def save_game(self, g):
+        self.store.save_game(g)
+
+    def active_exe(self):
+        return "dr1_us.exe"
+
+    def settings_changed(self):
+        self.saved += 1
+
+    def pause_hotkeys(self, paused):
+        self.paused.append(paused)
+
+    def api_key(self):
+        return self.key
+
+    def set_api_key(self, k):
+        self.key = k
+
+    def retry_failed(self):
+        pass
+
+    def make_report(self):
+        return None
+
+    def open_logs(self):
+        pass
+
+    def window_hidden(self):
+        pass
+
+
+@pytest.fixture
+def window(qapp, tmp_path, monkeypatch):
     monkeypatch.setenv("LEXOPLAY_HOME", str(tmp_path))
     from lexoplay.config import Settings
-    from lexoplay.store import Store
+    from lexoplay.store import Game, Store
+    from lexoplay.ui.main_window import MainWindow
 
     store = Store(tmp_path / "local.db")
-    acc = FakeAccount()
-    dlg = SettingsDialog(Settings(), store, account=acc, tab="account")
-    tab = dlg.account
-    assert not tab.link_box.isHidden() and tab.linked_box.isHidden()
-    assert "очереди" in tab.details.text()
-    QTest.keyClicks(tab.code, "badbad")
-    assert tab.code.text() == "BADBAD"
-    QTest.keyClick(tab.code, Qt.Key.Key_Return)  # Enter привязывает, а не закрывает окно
-    assert acc.codes == ["BADBAD"] and "не подошёл" in tab.status.text() and dlg.result() == 0
-    tab.code.setText("K7QX2M")
-    tab.link_btn.click()
-    assert acc.linked and tab.link_box.isHidden() and not tab.linked_box.isHidden()
-    assert tab.title.text() == "Lexo: @ruslan"
-    tab.unlink_btn.click()
-    assert not tab.link_box.isHidden()
-    dlg.reject()
-    dlg.deleteLater()
+    store.save_game(Game("dr1_us.exe", "Danganronpa", region=Rect(0.05, 0.7, 0.9, 0.25)))
+    ctl = FakeCtl(store, Settings())
+    w = MainWindow(ctl)
+    yield w, ctl
+    w.hide()
+    w.deleteLater()
     qapp.processEvents()
     store.close()
+
+
+def test_main_window_link_flow(window, qapp):
+    from PySide6.QtWidgets import QLabel
+
+    w, ctl = window
+    w.show_page("lexo")
+    page = w.lexo
+    QTest.keyClicks(page.code, "badbad")
+    assert page.code.text() == "BADBAD"
+    QTest.keyClick(page.code, Qt.Key.Key_Return)
+    assert ctl.codes == ["BADBAD"] and "не подошёл" in page.link_status.text()
+    page.code.setText("K7QX2M")
+    page.link_btn.click()
+    assert ctl.linked
+    texts = [lbl.text() for lbl in page.account.findChildren(QLabel)]
+    assert "@ruslan" in texts and "3 из 50" in texts
+    decks = [lbl.text() for lbl in page.table.findChildren(QLabel)]
+    assert any("Слова из игр" in t for t in decks)
+    assert "Lexo: @ruslan" in w.account_chip.text()
+
+
+def test_games_page_deck_choice_and_pick(window, qapp):
+    w, ctl = window
+    ctl.linked = True
+    w.lexo.reload_decks()
+    w.show_page("games")
+    from PySide6.QtWidgets import QComboBox, QPushButton
+
+    combos = w.games.findChildren(QComboBox)
+    assert combos, "у привязанного ПК у игры есть выбор колоды"
+    combo = combos[0]
+    idx = next(i for i in range(combo.count()) if combo.itemData(i) and combo.itemData(i)[0] == "deck")
+    combo.activated.emit(idx)
+    g = ctl.store.get_game("dr1_us.exe")
+    assert g.deck_mode == "deck" and g.deck_id == 5 and g.deck_title == "Слова из игр"
+    pick = next(b for b in w.games.findChildren(QPushButton) if "Выделить" in b.text())
+    pick.click()
+    assert ctl.picked == ["dr1_us.exe"]
+
+
+def test_keys_page_capture_and_conflict(window, qapp):
+    w, ctl = window
+    w.show_page("keys")
+    edit = w.keys.edits["reselect"]
+    edit.click()
+    assert ctl.paused[-1] is True and edit.text() == "Нажми клавишу…"
+    QTest.keyClick(edit, Qt.Key.Key_F7)
+    assert ctl.settings.hotkeys.reselect == "F7" and ctl.paused[-1] is False and ctl.saved == 1
+    words = w.keys.edits["words"]
+    words.click()
+    QTest.keyClick(words, Qt.Key.Key_F7)  # та же клавиша, что у «выделить заново»
+    assert "стоит на" in w.keys.notes["words"].text() and "стоит на" in w.keys.notes["reselect"].text()
+    ctrl = w.keys.edits["hide"]
+    ctrl.click()
+    QTest.keyClick(ctrl, Qt.Key.Key_F4, Qt.KeyboardModifier.ControlModifier)
+    assert ctl.settings.hotkeys.hide == "Ctrl+F4" and "пропускают" in w.keys.notes["hide"].text()
+    add = w.keys.edits["add_game"]
+    add.click()
+    QTest.keyClick(add, Qt.Key.Key_Escape)
+    assert ctl.settings.hotkeys.add_game == ""
+
+
+def test_view_page_saves_sliders(window, qapp):
+    w, ctl = window
+    w.show_page("view")
+    w.view.size.setValue(130)
+    assert abs(ctl.settings.font_scale - 1.3) < 1e-9
+    w.view._mode("always")  # noqa: SLF001
+    assert ctl.settings.magpie_mode == "always"
+
+
+def test_close_hides_instead_of_quit(window, qapp):
+    w, _ctl = window
+    w.open("games")
+    w.close()
+    assert not w.isVisible()

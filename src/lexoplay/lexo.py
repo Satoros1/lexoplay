@@ -94,6 +94,25 @@ class Sense:
 
 
 @dataclass(frozen=True, slots=True)
+class Deck:
+    id: int
+    title: str
+    card_count: int = 0
+    due_count: int = 0
+    new_count: int = 0
+
+    @staticmethod
+    def from_json(d: dict[str, Any]) -> Deck:
+        return Deck(
+            int(d["id"]),
+            str(d.get("title") or ""),
+            int(d.get("card_count") or 0),
+            int(d.get("due_count") or 0),
+            int(d.get("new_count") or 0),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class GameRef:
     title: str
     exe: str = ""
@@ -215,6 +234,13 @@ class LexoClient:
             await self._request("DELETE", "/desktop/device")
         finally:
             self.token = None
+
+    async def decks(self) -> tuple[list[Deck], int | None]:
+        data = await self._request("GET", "/desktop/decks")
+        return [Deck.from_json(d) for d in data.get("items", [])], data.get("current_deck_id")
+
+    async def create_deck(self, title: str) -> Deck:
+        return Deck.from_json(await self._request("POST", "/desktop/decks", json={"title": title.strip()[:128]}))
 
     async def vocab(self, since: str | None = None) -> tuple[list[str], str]:
         data = await self._request("GET", "/desktop/vocab", params={"since": since} if since else None, timeout=20)

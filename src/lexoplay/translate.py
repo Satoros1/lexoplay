@@ -7,9 +7,12 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from dataclasses import dataclass, field
 from typing import Protocol
+
+log = logging.getLogger(__name__)
 
 LANGS = {
     "en": "English",
@@ -119,9 +122,13 @@ def parse_reply(raw: str, original: str) -> TranslateResult:
 
 
 class AnthropicTranslator:
-    """Haiku через официальный SDK. Ключ и модель берутся из настроек."""
+    """Haiku через официальный SDK. Ключ и модель берутся из настроек.
 
-    def __init__(self, api_key: str, model: str, *, timeout: float = 8.0) -> None:
+    Без temperature: модели Claude 4.7+ и 5.x не принимают параметры сэмплинга,
+    а SDK 1.x убрал их из messages.create совсем.
+    """
+
+    def __init__(self, api_key: str, model: str, *, timeout: float = 10.0) -> None:
         import anthropic  # лениво: тесты и самопроверка не тянут SDK без нужды
 
         self._anthropic = anthropic
@@ -136,28 +143,40 @@ class AnthropicTranslator:
                 resp = await self._client.messages.create(
                     model=self._model,
                     max_tokens=400,
-                    temperature=0.3,
                     system=build_system(req),
                     messages=[{"role": "user", "content": build_user(req)}],
                 )
             except a.AuthenticationError as exc:
-                raise TranslationError("Ключ Anthropic не подходит. Проверь его в настройках.") from exc
+                raise TranslationError("Ключ Anthropic не подходит. Проверь его в настройках.", "bad_key") from exc
+            except a.PermissionDeniedError as exc:
+                raise TranslationError("У ключа Anthropic нет доступа к этой модели.", "bad_key") from exc
             except a.RateLimitError as exc:
                 raise TranslationError("Слишком много запросов. Подожди немного.") from exc
             except a.APITimeoutError as exc:
-                raise TranslationError("Не успел перевести, попробуй ещё раз.") from exc
+                raise TranslationError("Не успел перевести, попробуй ещё раз.", "offline") from exc
             except a.APIConnectionError as exc:
-                raise TranslationError("Нет связи с сервером перевода.") from exc
+                raise TranslationError("Нет связи с сервером перевода.", "offline") from exc
             except a.NotFoundError as exc:
                 raise TranslationError(f"Модель {self._model} не найдена. Поменяй её в настройках.") from exc
+            except a.BadRequestError as exc:
+                log.warning("Anthropic 400: %s", exc)
+                raise TranslationError(f"Сервер перевода отклонил запрос: {_short(exc)}") from exc
             except a.APIStatusError as exc:
                 raise TranslationError(f"Сервер перевода ответил ошибкой {exc.status_code}.") from exc
-            raw = "".join(getattr(b, "text", "") for b in resp.content)
+            except Exception as exc:  # несовместимый SDK и прочее: не показывать игроку трейсбек
+                log.exception("перевод упал")
+                raise TranslationError("Перевод не получился, подробности в логе.") from exc
+            raw = "".join(getattr(b, "text", "") or "" for b in resp.content)
             try:
                 return parse_reply(raw, req.text)
             except (ValueError, json.JSONDecodeError) as exc:
                 last_err = exc
         raise TranslationError("Модель ответила непонятно, попробуй ещё раз.") from last_err
+
+
+def _short(exc: Exception) -> str:
+    msg = getattr(exc, "message", None) or str(exc)
+    return str(msg)[:160]
 
 
 class LexoTranslator:

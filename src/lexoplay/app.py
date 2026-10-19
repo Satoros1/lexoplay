@@ -1,8 +1,12 @@
-"""Сборка всего вместе: трей, хоткеи, события окон, оверлей, выделение области, F2 и F3.
+"""Сборка всего вместе: окно LexoPlay, трей, клавиши, события окон, оверлей, F2 и F3.
 
 Главный поток = Qt. Захват, OCR и сеть идут в BackgroundLoop, результаты возвращаются
-в поток Qt сигналами Bridge. Состояния: idle -> busy -> idle (строка видна) / picking;
-режим слов (F3) живёт в своём окне WordLayer поверх игры.
+в поток Qt через Bridge. Состояния: idle -> busy -> idle (строка видна) / picking.
+Режим слов (F3) живёт в своём окне WordLayer поверх игры и фокус не берёт.
+
+Главное правило: игра не теряет фокус из-за нас. Строка перевода и режим слов фокус не
+берут. Выделению области фокус нужен, поэтому оно рисуется поверх стоп-кадра игры, а
+после Enter или Esc игра разворачивается и получает фокус обратно.
 
 С привязкой к Lexo перевод идёт через сервер, слова уходят в карточки через outbox,
 сессии закрываются сами. Без привязки F2 работает своим ключом Anthropic, F3 недоступен.
@@ -23,18 +27,29 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
+from PIL import Image
 from PySide6.QtCore import QObject, QTimer, QUrl, Signal
-from PySide6.QtGui import QAction, QDesktopServices, QGuiApplication
+from PySide6.QtGui import QAction, QDesktopServices, QFont, QGuiApplication, QImage
 from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon, QWidget
 
 from lexoplay import __version__
 from lexoplay.bg import BackgroundLoop
-from lexoplay.config import Settings, data_dir, debug_dir, get_api_key, get_token, server_url, set_token
+from lexoplay.config import (
+    Settings,
+    data_dir,
+    debug_dir,
+    get_api_key,
+    get_token,
+    server_url,
+    set_api_key,
+    set_token,
+)
 from lexoplay.debugdump import DebugDump
 from lexoplay.dedupe import LineMemory, LineRecord
+from lexoplay.games import NOT_GAMES, WindowInfo, clean_title, is_game_exe
 from lexoplay.geometry import Rect
 from lexoplay.hotkeys import HotkeyError, parse
-from lexoplay.lexo import Account, GameRef, LexoClient, LexoError, LexoOffline, Sense, Usage
+from lexoplay.lexo import Account, Deck, GameRef, LexoClient, LexoError, LexoOffline, Sense, Usage
 from lexoplay.ocr_model import OcrResult
 from lexoplay.outbox import Outbox
 from lexoplay.pipeline import CaptureError, F2Outcome, Pipeline, ScanOutcome, Target
@@ -43,9 +58,9 @@ from lexoplay.session import GameSession, Sessions
 from lexoplay.store import Game, Store, Task
 from lexoplay.textproc import Utterance
 from lexoplay.translate import AnthropicTranslator, LexoTranslator, Translator
+from lexoplay.ui.main_window import AccountStatus, MainWindow
 from lexoplay.ui.overlay import Overlay
 from lexoplay.ui.region_picker import RegionPicker
-from lexoplay.ui.settings_dialog import AccountStatus, SettingsDialog
 from lexoplay.ui.theme import app_icon
 from lexoplay.ui.word_layer import WordLayer
 from lexoplay.vocab import Vocab
@@ -56,22 +71,24 @@ from lexoplay.wordmode import CardState, WordView, build_views, selected_text
 
 log = logging.getLogger(__name__)
 
-GAME_KEYS = ("translate", "words", "hide", "reselect")
 RELEASES_URL = "https://github.com/Satoros1/lexoplay/releases/latest"
 FRESH_OCR_S = 2.0  # F3 берёт распознанную для F2 реплику, если она моложе этого
 
 
-def _plural(n: int, one: str, few: str, many: str) -> str:
-    n10, n100 = n % 10, n % 100
-    if n10 == 1 and n100 != 11:
-        return one
-    if 2 <= n10 <= 4 and not 12 <= n100 <= 14:
-        return few
-    return many
-
-
 def native_place(widget: QWidget, rect: Rect) -> None:
     winapi.place_topmost(int(widget.winId()), rect)
+
+
+def overlay_native(hwnd: int) -> None:
+    """Окна поверх игры: не попадают в наш же снимок экрана и не забирают фокус у игры."""
+    winapi.exclude_from_capture(hwnd)
+    winapi.set_no_activate(hwnd)
+
+
+def pil_to_qimage(img: Image.Image) -> QImage:
+    rgb = img.convert("RGB")
+    data = rgb.tobytes("raw", "RGB")
+    return QImage(data, rgb.width, rgb.height, rgb.width * 3, QImage.Format.Format_RGB888).copy()
 
 
 @dataclass
@@ -90,6 +107,7 @@ class CurrentLine:
     utterance: Utterance | None
     record: LineRecord | None
     at: float
+    thumb: Image.Image | None = None
 
     @property
     def sentence(self) -> str:
@@ -146,6 +164,7 @@ class App(QObject):
         self.usage: Usage | None = None
         self.lexo_offline = False
         self.update_required = False
+        self.server_note = ""  # «на сервере ещё нет LexoPlay» и подобное
         self._auth_lost_at = 0.0
         self.vocab = Vocab(store)
         self.outbox = Outbox(
@@ -157,23 +176,25 @@ class App(QObject):
         )
         self.sessions = Sessions(on_end=self._session_ended)
 
-        self.overlay = Overlay(placer=native_place, on_native=winapi.exclude_from_capture)
-        self._apply_overlay_settings()
+        self.overlay = Overlay(placer=native_place, on_native=overlay_native)
         self.picker: RegionPicker | None = None
-        self.word_layer = WordLayer(placer=native_place, on_native=winapi.exclude_from_capture)
+        self.word_layer = WordLayer(placer=native_place, on_native=overlay_native)
+        self._apply_overlay_settings()
         self.word_layer.selected.connect(self._on_word_selected)
         self.word_layer.add_clicked.connect(self._on_word_add)
         self.word_layer.finished.connect(self._on_words_finished)
         self.word_ctx: WordCtx | None = None
         self.current: CurrentLine | None = None
-        self._settings_dlg: SettingsDialog | None = None
+        self.window: MainWindow | None = None
 
         self.active: Active | None = None
         self.display: Rect | None = None
         self.state = "idle"  # idle | busy | picking
         self.token = 0
-        self.shown_thumb = None
+        self.line_thumb: Image.Image | None = None  # слепок показанной реплики: по нему видно смену
         self._watch_pending = False
+        self._hotkeys_paused = False
+        self._failed_keys: set[str] = set()
 
         self.watch_timer = QTimer(self)
         self.watch_timer.setInterval(400)
@@ -205,10 +226,12 @@ class App(QObject):
         self.events.game_destroyed.connect(self._on_destroyed)
 
         self.tray = self._build_tray()
+        self._purge_non_games()
         self._rebuild_translator()
 
-    # ------------------------------------------------------------------ запуск
+    # ------------------------------------------------------------------ запуск и выход
     def start(self) -> None:
+        log.info("LexoPlay %s, игр в списке: %s, Lexo: %s", __version__, len(self.store.list_games()), self.client.linked)
         self.hotkeys.set_group("global", True)
         self._on_foreground(winapi.foreground_window())
         self.bridge_ocr_check()
@@ -217,19 +240,20 @@ class App(QObject):
         self.vocab_timer.start()
         self._update_tray()
         self.tray.show()
-        hk = self.settings.hotkeys
-        words = f" {hk.words} сохраняет слова в Lexo." if self.client.linked else ""
-        self.tray.showMessage(
-            "LexoPlay запущен",
-            f"Открой игру и нажми {hk.add_game}, чтобы выделить окно диалога. "
-            f"Потом {hk.translate} переводит реплику.{words}",
-            app_icon(),
-            6000,
-        )
         if self.client.linked:
             self._check_account()
-        elif not get_api_key():
-            QTimer.singleShot(400, lambda: self.open_settings("account"))
+        first_run = not self.store.list_games() or (not self.client.linked and not get_api_key())
+        if first_run:
+            page = "lexo" if not self.client.linked and not get_api_key() else "games"
+            QTimer.singleShot(200, lambda: self.show_window(page))
+        else:
+            hk = self.settings.hotkeys
+            self.tray.showMessage(
+                "LexoPlay запущен",
+                f"В игре {hk.translate} переводит реплику, {hk.words} сохраняет слова. Окно LexoPlay открывается из трея.",
+                app_icon(),
+                5000,
+            )
 
     def shutdown(self) -> None:
         self.word_layer.finish("closed")
@@ -247,8 +271,11 @@ class App(QObject):
             log.info("httpx-клиент не закрылся за 2 с")
         self.hotkeys.clear()
         self.events.close()
+        self.tray.hide()
         self.overlay.close()
         self.word_layer.close()
+        if self.window is not None:
+            self.window.deleteLater()
         self.bg.stop()
         self.store.close()
 
@@ -269,6 +296,14 @@ class App(QObject):
 
         self.bg.submit(wrapped()).add_done_callback(back)
 
+    def _purge_non_games(self) -> None:
+        """0.1–0.2 разрешали сделать игрой любое окно: Chrome, Steam. Такие убираем."""
+        for g in self.store.list_games():
+            if g.exe in NOT_GAMES:
+                log.info("убираю из игр %s (%s): это не игра", g.title, g.exe)
+                self.store.delete_game(g.exe)
+
+    # ------------------------------------------------------------------ OCR
     def bridge_ocr_check(self) -> None:
         async def check() -> str:
             return self.ocr.check()
@@ -308,6 +343,174 @@ class App(QObject):
         elif box.clickedButton() is copy:
             QGuiApplication.clipboard().setText(INSTALL_HINT)
 
+    # ------------------------------------------------------------------ окно LexoPlay (контроллер)
+    def show_window(self, page: str | None = None) -> None:
+        if self.window is None:
+            self.window = MainWindow(self)
+        self._close_words("closed")
+        self.window.open(page)
+        winapi.force_foreground(int(self.window.winId()))
+
+    def window_hidden(self) -> None:
+        if not self.store.get_meta("tray_hint_shown"):
+            self.store.set_meta("tray_hint_shown", "1")
+            self.tray.showMessage(
+                "LexoPlay работает в трее",
+                "Перевод в играх продолжает работать. Окно открывается по значку LexoPlay у часов, выход через его меню.",
+                app_icon(),
+                5000,
+            )
+
+    def _refresh_window(self) -> None:
+        if self.window is not None:
+            self.window.refresh_account()
+            self.window.refresh_games()
+
+    def account_status(self) -> AccountStatus:
+        pending, failed = self.outbox.counts()
+        note = self.server_note
+        if not self.client.linked:
+            return AccountStatus(False, queue=pending, failed=failed, note=note)
+        return AccountStatus(
+            True,
+            self.account.label if self.account else "аккаунт привязан",
+            premium=bool(self.account and self.account.premium),
+            used=self.usage.used if self.usage else None,
+            limit=self.usage.limit if self.usage else None,
+            offline=self.lexo_offline,
+            queue=pending,
+            failed=failed,
+            note=note,
+        )
+
+    def active_exe(self) -> str | None:
+        return self.active.exe if self.active else None
+
+    def api_key(self) -> str:
+        return get_api_key() or ""
+
+    def set_api_key(self, key: str) -> None:
+        if key == self.api_key():
+            return
+        set_api_key(key)
+        self._rebuild_translator()
+        self._refresh_window()
+
+    def retry_failed(self) -> None:
+        self.outbox.retry_failed()
+
+    def open_logs(self) -> None:
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(data_dir())))
+
+    def make_report(self) -> str | None:
+        from lexoplay.report import make_report, reveal
+
+        try:
+            path = make_report(self.settings, self.store, extra=self._report_extra())
+        except Exception:
+            log.exception("отчёт не собрался")
+            return None
+        reveal(path)
+        return str(path)
+
+    def _report_extra(self) -> dict[str, Any]:
+        pending, failed = self.outbox.counts()
+        return {
+            "linked": self.client.linked,
+            "server": self.client.server,
+            "account": self.account.label if self.account else None,
+            "usage": [self.usage.used, self.usage.limit] if self.usage else None,
+            "offline": self.lexo_offline,
+            "server_note": self.server_note,
+            "ocr_error": self.ocr_error,
+            "outbox": {"pending": pending, "failed": failed},
+            "active": self.active.exe if self.active else None,
+            "display": self.display.to_dict() if self.display else None,
+            "state": self.state,
+            "failed_hotkeys": sorted(k for k in self._failed_keys if not k.startswith("warned:")),
+            "translator": type(self.translator).__name__ if self.translator else None,
+        }
+
+    def settings_changed(self) -> None:
+        self.settings.save()
+        self._apply_overlay_settings()
+        new_server = server_url(self.settings)
+        if new_server != self.client.server:
+            old = self.client
+            self.client = LexoClient(new_server, old.token)
+            self.bg.submit(old.close())
+            self.server_note = ""
+            if self.client.linked:
+                self._check_account()
+        self._rebuild_translator()
+        self._define_hotkeys()
+        self._apply_hotkey_groups()
+        self._update_tray()
+
+    def pause_hotkeys(self, paused: bool) -> None:
+        """Пока игрок вводит новую клавишу в окне LexoPlay, наши клавиши её не перехватывают."""
+        self._hotkeys_paused = paused
+        self._apply_hotkey_groups()
+
+    def list_windows(self) -> list[WindowInfo]:
+        out = []
+        for hwnd, title, exe, path, rect, minimized in winapi.app_windows():
+            out.append(WindowInfo(hwnd, title, exe, path, int(rect.w), int(rect.h), minimized))
+        return out
+
+    def add_game(self, w: WindowInfo) -> Game:
+        existing = self.store.get_game(w.exe)
+        game = existing or Game(w.exe, clean_title(w.title, w.exe), deck_mode=self.settings.deck)
+        game = self.store.save_game(game)
+        log.info("игра добавлена: %s (%s)", game.title, game.exe)
+        self._update_tray()
+        if game.region is None:
+            QTimer.singleShot(250, lambda: self.pick_region(game.exe))
+        return game
+
+    def save_game(self, game: Game) -> None:
+        self.store.save_game(game)
+        self._set_status()
+
+    def forget_game(self, exe: str) -> None:
+        self.store.delete_game(exe)
+        self.pipelines.pop(exe, None)
+        if self.active and self.active.exe == exe:
+            self._hide_strip()
+            self._close_words("closed")
+            self.events.unwatch_game()
+            self.hotkeys.set_group("game", False)
+            self.active = None
+        self._set_status()
+
+    def pick_region(self, exe: str) -> None:
+        """«Выделить окно диалога» из окна LexoPlay: развернуть игру и открыть выделение поверх неё."""
+        hwnd = winapi.find_game_window(exe)
+        if hwnd is None:
+            if self.window is not None:
+                self.window.show_message(
+                    "Игра сейчас не запущена. Запусти её, а потом нажми здесь «Выделить окно диалога» "
+                    f"или прямо в игре {self.settings.hotkeys.translate}."
+                )
+            return
+        if self.window is not None:
+            self.window.hide()
+        winapi.restore_window(hwnd)
+        winapi.force_foreground(hwnd)
+        QTimer.singleShot(650, lambda: self._pick_when_ready(exe, hwnd, 0))
+
+    def _pick_when_ready(self, exe: str, hwnd: int, tries: int) -> None:
+        if not (self.active and self.active.hwnd == hwnd):
+            if tries < 3:
+                winapi.force_foreground(hwnd)
+                QTimer.singleShot(400, lambda: self._pick_when_ready(exe, hwnd, tries + 1))
+                return
+            # фокус так и не пришёл (игра от администратора?): всё равно выделяем по её окну
+            pid = winapi.window_pid(hwnd)
+            self.active = Active(hwnd, pid, exe)
+            self.events.watch_game(hwnd, pid)
+        self.open_picker()
+
     # ------------------------------------------------------------------ настройки
     def _define_hotkeys(self) -> None:
         self.hotkeys.clear()
@@ -318,15 +521,26 @@ class App(QObject):
             ("hide", hk.hide, "game"),
             ("reselect", hk.reselect, "game"),
             ("add_game", hk.add_game, "global"),
+            ("words_esc", "Escape", "words"),
+            ("words_enter", "Enter", "words"),
         ):
+            if not text:
+                continue
             try:
                 self.hotkeys.define(name, parse(text), group)
             except HotkeyError as exc:
                 log.warning("хоткей %s=%s: %s", name, text, exc)
 
+    def _apply_hotkey_groups(self) -> None:
+        paused = self._hotkeys_paused
+        self.hotkeys.set_group("global", not paused)
+        self.hotkeys.set_group("game", not paused and self._game_in_focus())
+        self.hotkeys.set_group("words", not paused and self.word_layer.is_open)
+
     def _apply_overlay_settings(self) -> None:
         self.overlay.font_scale = self.settings.font_scale
         self.overlay.opacity = self.settings.strip_opacity
+        self.word_layer.font_scale = self.settings.font_scale
 
     def _rebuild_translator(self) -> None:
         if self.client.linked:
@@ -342,68 +556,23 @@ class App(QObject):
             p.target_lang = self.settings.target_lang
             p.source_lang = self.settings.source_lang
 
-    def open_settings(self, tab: str = "account") -> None:
-        if self._settings_dlg is not None:
-            self._settings_dlg.tabs.setCurrentIndex({"account": 0, "game": 1, "extra": 2}.get(tab, 0))
-            self._settings_dlg.raise_()
-            self._settings_dlg.activateWindow()
-            return
-        self.word_layer.finish("closed")
-        dlg = SettingsDialog(self.settings, self.store, account=self, tab=tab)
-        self._settings_dlg = dlg
-        try:
-            accepted = dlg.exec()
-        finally:
-            self._settings_dlg = None
-        if accepted:
-            self.settings = Settings.load()
-            self._apply_overlay_settings()
-            new_server = server_url(self.settings)
-            if new_server != self.client.server:
-                old = self.client
-                self.client = LexoClient(new_server, old.token)
-                self.bg.submit(old.close())
-                if self.client.linked:
-                    self._check_account()
-            self._rebuild_translator()
-            self._define_hotkeys()
-            self.hotkeys.set_group("global", True)
-            if self.active:
-                self.hotkeys.set_group("game", True)
-        self._update_tray()
-
     # ------------------------------------------------------------------ аккаунт Lexo
     def _device_name(self) -> str:
         name = os.environ.get("COMPUTERNAME") or socket.gethostname() or "ПК"
         return name[:64]
-
-    def account_status(self) -> AccountStatus:
-        pending, failed = self.outbox.counts()
-        queue = []
-        if pending:
-            queue.append(f"в очереди на отправку: {pending}")
-        if failed:
-            queue.append(f"не отправлено: {failed}")
-        if not self.client.linked:
-            return AccountStatus(False, queue=", ".join(queue))
-        label = self.account.label if self.account else "аккаунт привязан"
-        details = ""
-        if self.lexo_offline:
-            details = "нет связи с сервером"
-        elif self.usage:
-            details = f"сегодня {self.usage.used} из {self.usage.limit} переводов"
-        return AccountStatus(True, label, details, ", ".join(queue))
 
     def link(self, code: str, done: Callable[[str | None], None]) -> None:
         def finished(result: Any, err: BaseException | None) -> None:
             if err is not None:
                 self.client.token = None
                 if isinstance(err, LexoError):
+                    if err.code == "server_outdated":
+                        self.server_note = err.message
                     done(err.message)
                 elif isinstance(err, LexoOffline):
-                    done("Нет связи с Lexo. Проверь интернет и адрес сервера во вкладке «Дополнительно».")
+                    done("Нет связи с Lexo. Проверь интернет и адрес сервера во вкладке «Ещё».")
                 else:
-                    log.exception("привязка упала", exc_info=err)
+                    log.error("привязка упала", exc_info=err)
                     done(f"Не получилось привязать: {err}")
                 return
             token, account = result
@@ -412,6 +581,7 @@ class App(QObject):
             self.account = account
             self.lexo_offline = False
             self.update_required = False
+            self.server_note = ""
             self.vocab.clear()
             self.outbox.resume()
             self._rebuild_translator()
@@ -430,6 +600,32 @@ class App(QObject):
 
         self.run_bg(self.client.unlink(), finished)
 
+    def load_decks(self, done: Callable[[list[Deck], int | None, str | None], None]) -> None:
+        def finished(result: Any, err: BaseException | None) -> None:
+            if err is None:
+                decks, current = result
+                done(decks, current, None)
+                return
+            if isinstance(err, LexoError) and err.status in (401, 426):
+                self._on_lexo_error(err)
+            done([], None, self._error_text(err))
+
+        self.run_bg(self.client.decks(), finished)
+
+    def create_deck(self, title: str, done: Callable[[Deck | None, str | None], None]) -> None:
+        def finished(deck: Any, err: BaseException | None) -> None:
+            done(deck, None if err is None else self._error_text(err))
+
+        self.run_bg(self.client.create_deck(title), finished)
+
+    @staticmethod
+    def _error_text(err: BaseException) -> str:
+        if isinstance(err, LexoError):
+            return err.message
+        if isinstance(err, LexoOffline):
+            return "Нет связи с Lexo."
+        return f"Ошибка: {err}"
+
     def _forget_token(self) -> None:
         set_token(None)
         self.client.token = None
@@ -438,6 +634,7 @@ class App(QObject):
         self.vocab.clear()
         self._rebuild_translator()
         self._update_tray()
+        self._refresh_window()
 
     def _check_account(self) -> None:
         def finished(result: Any, err: BaseException | None) -> None:
@@ -446,12 +643,14 @@ class App(QObject):
                 if usage:
                     self.usage = usage
                 self.lexo_offline = False
+                self.server_note = ""
                 self._refresh_vocab(full=True)
             elif isinstance(err, LexoOffline):
                 self.lexo_offline = True
             elif isinstance(err, LexoError):
                 self._on_lexo_error(err)
             self._update_tray()
+            self._refresh_window()
 
         self.run_bg(self.client.me(), finished)
 
@@ -479,6 +678,8 @@ class App(QObject):
         self.lexo_offline = False
         self.outbox.nudge()
         self._update_tray()
+        if self.window is not None and self.window.isVisible():
+            self.window.refresh_account()
 
     def _on_lexo_error(self, err: LexoError) -> None:
         if err.status == 401:
@@ -489,10 +690,13 @@ class App(QObject):
                 self.tray.showMessage("LexoPlay", err.message, QSystemTrayIcon.MessageIcon.Warning, 8000)
             self.overlay.toast(err.message, 4000)
             self._update_tray()
+        elif err.code == "server_outdated":
+            self.server_note = err.message
+            self._refresh_window()
 
     def _auth_lost(self, message: str) -> None:
         """Привязку сняли в боте или в Mini App: токен больше не годится."""
-        self.word_layer.finish("closed")
+        self._close_words("closed")
         self._forget_token()
         if time.time() - self._auth_lost_at < 30:
             return
@@ -536,9 +740,9 @@ class App(QObject):
     def _tooltip(self) -> str:
         if self.active:
             g = self.store.get_game(self.active.exe)
-            text = f"LexoPlay {__version__}: {g.title if g else self.active.exe}"
+            text = f"LexoPlay: {g.title if g else self.active.exe}"
         else:
-            text = f"LexoPlay {__version__}: нет активной игры"
+            text = "LexoPlay: игра не открыта"
         if self.client.linked and self.usage:
             text += f"\nПереводов сегодня: {self.usage.used} из {self.usage.limit}"
         return text[:127]
@@ -546,11 +750,18 @@ class App(QObject):
     def _build_tray(self) -> QSystemTrayIcon:
         tray = QSystemTrayIcon(app_icon(), self)
         menu = QMenu()
-        self._status_action = QAction("Нет активной игры", menu)
+        open_action = QAction("Открыть LexoPlay", menu)
+        f = QFont(open_action.font())
+        f.setBold(True)
+        open_action.setFont(f)
+        open_action.triggered.connect(lambda: self.show_window())
+        menu.addAction(open_action)
+        menu.addSeparator()
+        self._status_action = QAction("Игра не открыта", menu)
         self._status_action.setEnabled(False)
         menu.addAction(self._status_action)
         self._lexo_action = QAction("Привязать ПК к Lexo…", menu)
-        self._lexo_action.triggered.connect(lambda: self.open_settings("account"))
+        self._lexo_action.triggered.connect(lambda: self.show_window("lexo"))
         menu.addAction(self._lexo_action)
         self._queue_action = QAction("", menu)
         self._queue_action.setEnabled(False)
@@ -565,20 +776,16 @@ class App(QObject):
         self._update_action.setVisible(False)
         menu.addAction(self._update_action)
         menu.addSeparator()
-        menu.addAction("Как пользоваться", self._show_help)
-        menu.addAction("Настройки", lambda: self.open_settings("game"))
-        menu.addAction("Папка с логами", lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(data_dir()))))
-        menu.addSeparator()
         menu.addAction("Выход", self.qapp.quit)
         tray.setContextMenu(menu)
         tray.setToolTip(self._tooltip())
-        tray.activated.connect(
-            lambda reason: self.open_settings("account")
-            if reason == QSystemTrayIcon.ActivationReason.DoubleClick
-            else None
-        )
+        tray.activated.connect(self._on_tray)
         self._menu = menu
         return tray
+
+    def _on_tray(self, reason: QSystemTrayIcon.ActivationReason) -> None:
+        if reason in (QSystemTrayIcon.ActivationReason.Trigger, QSystemTrayIcon.ActivationReason.DoubleClick):
+            self.show_window()
 
     def _update_tray(self) -> None:
         if self.client.linked:
@@ -595,55 +802,53 @@ class App(QObject):
         self._update_action.setVisible(self.update_required)
         self.tray.setToolTip(self._tooltip())
 
-    def _show_help(self) -> None:
-        hk = self.settings.hotkeys
-        QMessageBox.information(
-            None,
-            "LexoPlay",
-            f"1. Открой игру и нажми {hk.add_game}: выдели мышкой окно диалога и нажми Enter.\n"
-            f"2. В игре жми {hk.translate}: над окном диалога появится перевод. Ещё раз {hk.translate} или {hk.hide} спрячет его.\n"
-            f"3. {hk.words}: слова реплики подчёркиваются. Нажми на слово, потом «+ в Lexo» или Enter, "
-            "и оно станет карточкой с этой репликой как примером. Shift+клик выбирает фразу.\n"
-            f"4. {hk.reselect} выделяет окно диалога заново.\n\n"
-            "Игра должна быть в окне или окне без рамки. Для маленьких игр (800×600) используй Magpie, "
-            "LexoPlay сам поймёт, что игра растянута.",
-        )
-
     def _set_status(self) -> None:
         g = self.store.get_game(self.active.exe) if self.active else None
-        self._status_action.setText(f"Игра: {g.title}" if g else "Нет активной игры")
+        self._status_action.setText(f"Игра: {g.title}" if g else "Игра не открыта")
         self._update_tray()
+        if self.window is not None:
+            self.window.refresh_games()
 
     # ------------------------------------------------------------------ окна
+    def _own_window(self, root: int) -> bool:
+        return self.window is not None and root == int(self.window.winId())
+
     def _on_foreground(self, hwnd: int) -> None:
         if not hwnd:
             return
         root = winapi.root_window(hwnd)
         pid = winapi.window_pid(root)
         if pid == os.getpid():
-            return  # наше окно (выделение области, настройки): состояние не трогаем
+            # наше окно: выделение области (не трогаем) или окно LexoPlay (клавиши игры не нужны)
+            if self._own_window(root):
+                self._close_words("focus")
+                self.hotkeys.set_group("game", False)
+            return
         exe = winapi.process_exe(pid)
-        game = self.store.get_game(exe) if exe else None
+        game = self.store.get_game(exe) if exe and is_game_exe(exe) else None
         if game is not None:
             if not self.active or self.active.hwnd != root:
                 self._hide_strip()
+                self._close_words("switch")
             self.active = Active(root, pid, game.exe)
             self.events.watch_game(root, pid)
-            self.hotkeys.set_group("game", True)
+            self.hotkeys.set_group("game", not self._hotkeys_paused)
             self.store.touch(game.exe)
-            self._sync_geometry()
+            rect = self._sync_geometry()
+            log.info("игра в фокусе: %s, видна в %s", game.exe, rect.to_dict() if rect else None)
             self._set_status()
         else:
             self.hotkeys.set_group("game", False)
             self._hide_strip()
+            self._close_words("focus")
 
     def _on_minimized(self, _hwnd: int, minimized: bool) -> None:
-        if minimized:
-            self.word_layer.finish("closed")
+        if minimized and self.state != "picking":
+            self._close_words("closed")
             self._hide_strip()
 
     def _on_destroyed(self, _hwnd: int) -> None:
-        self.word_layer.finish("closed")
+        self._close_words("closed")
         self._hide_strip()
         if self.active:
             self.sessions.game_closed(self.active.exe)
@@ -673,20 +878,37 @@ class App(QObject):
     def _game_in_focus(self) -> bool:
         return bool(self.active) and winapi.root_window(winapi.foreground_window()) == self.active.hwnd
 
-    # ------------------------------------------------------------------ хоткеи
+    def _return_to_game(self) -> None:
+        if self.active and winapi.is_window(self.active.hwnd):
+            winapi.restore_window(self.active.hwnd)
+            winapi.force_foreground(self.active.hwnd)
+
+    # ------------------------------------------------------------------ клавиши
     def _on_hotkey_failed(self, name: str, text: str) -> None:
+        self._failed_keys.add(f"{name}={text}")
+        key = f"warned:{text}"
+        if key in self._failed_keys or name.startswith("words_"):
+            return
+        self._failed_keys.add(key)
         self.tray.showMessage(
             "LexoPlay",
-            f"Клавиша {text} занята другой программой. Поменяй её в settings.json.",
+            f"Клавишу {text} уже занимает другая программа (или второй LexoPlay). Выбери другую: окно LexoPlay → Клавиши.",
             QSystemTrayIcon.MessageIcon.Warning,
-            5000,
+            6000,
         )
 
     def _on_hotkey(self, name: str) -> None:
         if self.state == "picking":
             return
+        if name == "words_esc":
+            self._close_words("esc")
+            return
+        if name == "words_enter":
+            if self.word_layer.is_open:
+                self.word_layer.press_enter()
+            return
         if self.word_layer.is_open and name in ("translate", "words", "hide"):
-            self.word_layer.finish("hotkey")  # фокус сейчас у нашего окна слов
+            self._close_words("hotkey")
             return
         if name == "add_game":
             self.add_current_game()
@@ -711,9 +933,13 @@ class App(QObject):
         if not exe:
             self.tray.showMessage("LexoPlay", "Не получилось определить игру. Попробуй запустить LexoPlay от имени администратора.")
             return
-        if exe in {"explorer.exe", "searchhost.exe", "shellexperiencehost.exe"}:
+        if not is_game_exe(exe):
+            self.overlay.set_display_rect(winapi.client_rect_screen(hwnd))
+            self.overlay.toast(f"{exe} не похоже на игру. Добавь игру из окна LexoPlay.", 3500)
             return
-        game = self.store.get_game(exe) or self.store.save_game(Game(exe, winapi.window_title(hwnd) or exe))
+        game = self.store.get_game(exe) or self.store.save_game(
+            Game(exe, clean_title(winapi.window_title(hwnd), exe), deck_mode=self.settings.deck)
+        )
         self.active = Active(hwnd, pid, game.exe)
         self.events.watch_game(hwnd, pid)
         self.hotkeys.set_group("game", True)
@@ -722,16 +948,36 @@ class App(QObject):
 
     # ------------------------------------------------------------------ выделение области
     def open_picker(self) -> None:
-        if not self.active:
+        """Снять стоп-кадр игры и открыть поверх него выделение окна диалога."""
+        if not self.active or self.state == "picking":
             return
         display = self._sync_geometry()
         game = self.store.get_game(self.active.exe)
         if display is None or game is None:
             return
         self._hide_strip()
+        self._close_words("closed")
         self.state = "picking"
+        grab = self._make_grab(self.active, game, display)
+
+        def shot(img: Any, err: BaseException | None) -> None:
+            if self.state != "picking" or self.picker is not None:
+                return
+            if err is not None:
+                log.info("стоп-кадр для выделения не снялся: %s", err)
+            self._show_picker(game, display, pil_to_qimage(img) if img is not None else None)
+
+        self.run_bg(asyncio.to_thread(grab), shot)
+
+    def _show_picker(self, game: Game, display: Rect, background: QImage | None) -> None:
         picker = RegionPicker(
-            display, game.title, game.region, game.name_region, placer=native_place, on_native=winapi.exclude_from_capture
+            display,
+            game.title,
+            game.region,
+            game.name_region,
+            placer=native_place,
+            on_native=winapi.exclude_from_capture,
+            background=background,
         )
         picker.accepted.connect(self._on_picked)
         picker.cancelled.connect(self._on_pick_cancelled)
@@ -747,14 +993,15 @@ class App(QObject):
         game = self.store.get_game(self.active.exe)
         if game:
             self.store.save_game(game.with_(region=region, name_region=name_region))
-        winapi.force_foreground(self.active.hwnd)
-        QTimer.singleShot(300, self.f2)  # сразу показать перевод текущей реплики
+            log.info("область диалога %s: %s", game.exe, region.to_dict())
+        self._return_to_game()
+        self._set_status()
+        QTimer.singleShot(450, self.f2)  # сразу показать перевод текущей реплики
 
     def _on_pick_cancelled(self) -> None:
         self.picker = None
         self.state = "idle"
-        if self.active:
-            winapi.force_foreground(self.active.hwnd)
+        self._return_to_game()
 
     # ------------------------------------------------------------------ F2
     def _pipeline(self, exe: str) -> Pipeline | None:
@@ -791,8 +1038,10 @@ class App(QObject):
             # Основной способ: снимок экрана там, где игра видна. Он совпадает с тем, что
             # видит игрок (Magpie, DPI-масштабирование старых игр), а наши окна из него
             # исключены. PrintWindow запасной: для окон, которые в снимке экрана чёрные.
-            if not winapi.is_window(hwnd) or winapi.is_minimized(hwnd):
-                raise CaptureError("окно игры закрыто или свёрнуто")
+            if not winapi.is_window(hwnd):
+                raise CaptureError("окно игры закрыто")
+            if winapi.is_minimized(hwnd):
+                raise CaptureError("окно игры свёрнуто")
             if mode["value"] != "window":
                 img = capture.grab_screen(display)
                 if not is_black(img):
@@ -824,7 +1073,7 @@ class App(QObject):
             return
         pipeline = self._pipeline(game.exe)
         if pipeline is None:
-            self.overlay.toast("Привяжи ПК к Lexo: значок LexoPlay в трее → Настройки", 3500)
+            self.overlay.toast("Перевод не настроен: открой LexoPlay из трея и привяжи Lexo", 3500)
             return
         display = self._sync_geometry()
         if display is None:
@@ -853,7 +1102,7 @@ class App(QObject):
             self._hide_strip()
             self.overlay.toast(f"Ошибка: {exc}")
             return
-        log.info("F2 %s %s", out.kind, {k: round(v, 3) for k, v in out.timings.items()})
+        log.info("F2 %s %s %s", out.kind, out.code or "", {k: round(v, 3) for k, v in out.timings.items()})
         if not self._game_in_focus() or not self.active:
             self._hide_strip()
             return
@@ -862,19 +1111,19 @@ class App(QObject):
             if out.kind == "translated":
                 self.sessions.line_translated(game.exe)
             if out.ocr is not None:
-                self.current = CurrentLine(game.exe, out.ocr, out.utterance, out.record, time.time())
+                self.current = CurrentLine(game.exe, out.ocr, out.utterance, out.record, time.time(), out.thumb)
             self.overlay.show_text(game.region, out.record.translation)
-            self.shown_thumb = out.thumb
+            self.line_thumb = out.thumb
             self.watch_timer.start()
         elif out.kind == "no_text":
             self._hide_strip()
-            self.overlay.toast(f"Текст не найден. {self.settings.hotkeys.reselect}, чтобы выделить область заново")
+            self.overlay.toast(f"Текст не найден. {self.settings.hotkeys.reselect}, чтобы выделить окно диалога заново")
         elif out.code == "limit_reached" and game and game.region:
             # строка на месте перевода: видно, почему перевода нет; F3 при этом работает
             if out.ocr is not None:
-                self.current = CurrentLine(game.exe, out.ocr, out.utterance, None, time.time())
+                self.current = CurrentLine(game.exe, out.ocr, out.utterance, None, time.time(), out.thumb)
             self.overlay.show_text(game.region, out.message or "Лимит переводов на сегодня закончился.")
-            self.shown_thumb = out.thumb
+            self.line_thumb = out.thumb
             self.watch_timer.start()
         elif out.code in ("device_revoked", "unauthorized"):
             self._hide_strip()
@@ -887,25 +1136,29 @@ class App(QObject):
             if out.code == "offline":
                 self.lexo_offline = True
                 self._update_tray()
-            self.overlay.toast(out.message or "Не получилось перевести", 3500)
+            elif out.code == "server_outdated":
+                self.server_note = out.message or ""
+            self.overlay.toast(out.message or "Не получилось перевести", 4000)
 
     def _hide_strip(self) -> None:
-        self.watch_timer.stop()
-        self.shown_thumb = None
         if self.state == "busy":
             self.token += 1  # результат пришедшего позже запроса не показываем
             self.state = "idle"
         self.overlay.hide_strip()
+        if not self.word_layer.is_open:
+            self.watch_timer.stop()
+            self.line_thumb = None
 
     # ------------------------------------------------------------------ смена реплики
     def _watch_tick(self) -> None:
-        if not self.overlay.strip_visible or self.state != "idle" or self._watch_pending or not self.active:
+        watching = self.overlay.strip_visible or self.word_layer.is_open
+        if not watching or self.state != "idle" or self._watch_pending or not self.active:
             return
         game = self.store.get_game(self.active.exe)
-        if not game or not game.region or self.shown_thumb is None or self.display is None:
+        if not game or not game.region or self.line_thumb is None or self.display is None:
             return
         grab = self._make_grab(self.active, game, self.display)
-        region, before = game.region, self.shown_thumb
+        region, before = game.region, self.line_thumb
 
         async def check() -> bool:
             img = await asyncio.to_thread(grab)
@@ -921,12 +1174,18 @@ class App(QObject):
             return
         try:
             if fut.result():
-                self._hide_strip()  # реплика сменилась: старый перевод убираем
+                # реплика сменилась (игрок кликнул в игру): старый перевод и подчёркивания убираем
+                self._close_words("changed")
+                self._hide_strip()
                 self.current = None
         except Exception:
-            pass
+            log.debug("проверка смены реплики не удалась", exc_info=True)
 
     # ------------------------------------------------------------------ F3: слова в Lexo
+    def _close_words(self, reason: str) -> None:
+        if self.word_layer.is_open:
+            self.word_layer.finish(reason)
+
     def f3(self) -> None:
         if self.state != "idle" or not self.active:
             return
@@ -937,7 +1196,7 @@ class App(QObject):
             self.open_picker()
             return
         if not self.client.linked:
-            self.overlay.toast("Слова сохраняются в Lexo: привяжи ПК (значок LexoPlay в трее)", 3500)
+            self.overlay.toast("Слова сохраняются в Lexo: открой LexoPlay из трея и привяжи ПК", 3500)
             return
         if self.ocr_error:
             self.overlay.toast("Нет английского OCR в Windows. Подробности в трее.")
@@ -979,10 +1238,10 @@ class App(QObject):
             if not self._game_in_focus() or not self.active:
                 return
             if not scan.ok or scan.ocr is None:
-                hint = f"Текст не найден. {self.settings.hotkeys.reselect}, чтобы выделить область заново"
+                hint = f"Текст не найден. {self.settings.hotkeys.reselect}, чтобы выделить окно диалога заново"
                 self.overlay.toast(scan.message or hint)
                 return
-            line = CurrentLine(game.exe, scan.ocr, scan.utterance, scan.record, time.time())
+            line = CurrentLine(game.exe, scan.ocr, scan.utterance, scan.record, time.time(), scan.thumb)
             self.current = line
             g = self.store.get_game(game.exe)
             s = self.sessions.get(game.exe)
@@ -994,12 +1253,15 @@ class App(QObject):
     def _open_words(self, game: Game, session: GameSession, line: CurrentLine) -> None:
         if self.display is None or game.region is None or not line.ocr.words:
             return
-        self.watch_timer.stop()
         views = build_views(line.ocr, self.vocab.known)
         self.word_ctx = WordCtx(game.exe, game.title, session.id, line, views)
         self.word_layer.font_scale = self.settings.font_scale
+        self.word_layer.deck_label = game.deck_label
         self.word_layer.open(self.display, game.region, views, strip=self.overlay.strip_rect())
-        winapi.force_foreground(int(self.word_layer.winId()))
+        self.hotkeys.set_group("words", not self._hotkeys_paused)
+        if line.thumb is not None:
+            self.line_thumb = line.thumb
+            self.watch_timer.start()
 
     def _set_card(self, card: CardState | None) -> None:
         if self.word_ctx is not None:
@@ -1007,14 +1269,7 @@ class App(QObject):
         self.word_layer.set_card(card)
 
     def _card_from(self, sense: Sense) -> CardState:
-        return CardState(
-            "ready",
-            sense.lemma,
-            sense.ipa,
-            sense.pos,
-            list(sense.senses),
-            in_deck=sense.in_deck,
-        )
+        return CardState("ready", sense.lemma, sense.ipa, sense.pos, list(sense.senses), in_deck=sense.in_deck)
 
     def _on_word_selected(self, indices: list) -> None:
         ctx = self.word_ctx
@@ -1070,6 +1325,8 @@ class App(QObject):
             return
         sense = ctx.sense
         record = ctx.line.record
+        game = self.store.get_game(ctx.exe)
+        deck_mode = game.deck_mode if game else self.settings.deck
         payload = {
             "idempotency_key": str(uuid.uuid4()),
             "session_id": ctx.session_id,
@@ -1080,7 +1337,8 @@ class App(QObject):
             "lemma": sense.lemma[:80] if sense else None,
             "translation": sense.translation[:200] if sense and sense.translation else None,
             "marked_translation": (sense.marked_translation or None) if sense else None,
-            "deck": self.settings.deck if self.settings.deck in ("game", "current") else "game",
+            "deck": "current" if deck_mode == "current" else "game",
+            "deck_id": game.deck_id if game and deck_mode == "deck" else None,
         }
         self.outbox.enqueue("card", payload)
         word = sense.lemma if sense else ctx.selection
@@ -1088,6 +1346,7 @@ class App(QObject):
         self.sessions.word_added(ctx.exe)
         in_deck = bool(sense and sense.in_deck)
         card = ctx.card
+        deck = game.deck_label if game else ""
         self._set_card(
             CardState(
                 "saved",
@@ -1096,7 +1355,7 @@ class App(QObject):
                 card.pos,
                 list(card.senses),
                 in_deck=in_deck,
-                note="Пример из игры добавлен к карточке" if in_deck else "Сохранено в Lexo",
+                note="Пример из игры добавлен к карточке" if in_deck else f"Сохранено в колоду {deck}",
             )
         )
         ctx.views = build_views(ctx.line.ocr, self.vocab.known)
@@ -1105,7 +1364,8 @@ class App(QObject):
 
     def _on_words_finished(self, reason: str) -> None:
         self.word_ctx = None
-        if self.active and reason in ("esc", "hotkey", "idle"):
-            winapi.force_foreground(self.active.hwnd)  # клик мимо уже отдал фокус игре сам
-        if self.overlay.strip_visible and self.shown_thumb is not None:
-            self.watch_timer.start()
+        self.hotkeys.set_group("words", False)
+        log.debug("режим слов закрыт: %s", reason)
+        if not self.overlay.strip_visible:
+            self.watch_timer.stop()
+            self.line_thumb = None

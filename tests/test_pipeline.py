@@ -153,3 +153,13 @@ def test_scan_reads_words_without_translating():
 def test_scan_without_text():
     p, grab, _ = make(result("|"))
     assert not run(p.scan(grab, Target("G", REGION))).ok
+
+
+def test_unexpected_translator_crash_is_a_readable_error():
+    class Broken(FakeTranslator):
+        async def translate(self, req):
+            raise TypeError("create() got an unexpected keyword argument 'temperature'")
+
+    p, grab, _ = make(result("Hello there."), Broken())
+    out = run(p.run(grab, Target("G", REGION)))
+    assert out.kind == "error" and "temperature" not in out.message

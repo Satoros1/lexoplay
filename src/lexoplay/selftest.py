@@ -358,6 +358,81 @@ def _qt_checks(out_dir: Path) -> None:
 
     _check("word_layer_render", word_layer)
 
+    def main_window() -> tuple[str, object]:
+        import tempfile
+
+        from lexoplay.config import Settings
+        from lexoplay.lexo import Deck
+        from lexoplay.store import Game, Store
+        from lexoplay.ui import theme
+        from lexoplay.ui.main_window import AccountStatus, MainWindow
+
+        family = theme.load_fonts()
+        tmp = Path(tempfile.mkdtemp(prefix="lexoplay-ui-"))
+        store = Store(tmp / "local.db")
+        store.save_game(Game("dr1_us.exe", "Danganronpa: Trigger Happy Havoc", region=Rect(0.05, 0.7, 0.9, 0.25)))
+        store.save_game(Game("midnight.exe", "Midnight Station", deck_mode="deck", deck_id=5, deck_title="Слова из игр"))
+
+        class Ctl:
+            settings = Settings()
+
+            def __init__(self) -> None:
+                self.store = store
+
+            def account_status(self):  # type: ignore[no-untyped-def]
+                return AccountStatus(True, "@ruslan", used=12, limit=50, queue=1)
+
+            def load_decks(self, done):  # type: ignore[no-untyped-def]
+                done([Deck(3, "Danganronpa: Trigger Happy Havoc", 41, 6, 3), Deck(5, "Слова из игр", 120, 18, 0)], 5, None)
+
+            def active_exe(self):  # type: ignore[no-untyped-def]
+                return "dr1_us.exe"
+
+            def api_key(self):  # type: ignore[no-untyped-def]
+                return ""
+
+            def __getattr__(self, _name):  # type: ignore[no-untyped-def]
+                return lambda *a, **k: None
+
+        w = MainWindow(Ctl())
+        w.resize(980, 680)
+        w.show()
+        saved = []
+        for key in ("games", "lexo", "keys", "view", "more"):
+            w.show_page(key)
+            for _ in range(5):
+                app.processEvents()
+            name = f"window-{key}.png"
+            w.grab().save(str(out_dir / name))
+            saved.append(name)
+        w.hide()
+        store.close()
+        return ("ok" if family == "Manrope" else "warn"), {"font": family, "pages": saved}
+
+    _check("main_window_render", main_window)
+
+    def picker_freeze() -> tuple[str, object]:
+        from PySide6.QtGui import QImage
+
+        from lexoplay.ui.region_picker import RegionPicker
+
+        frame = _test_frame().convert("RGB")
+        raw = frame.tobytes("raw", "RGB")
+        bg = QImage(raw, frame.width, frame.height, frame.width * 3, QImage.Format.Format_RGB888).copy()
+        picker = RegionPicker(Rect(40, 40, 800, 600), "Тестовая новелла", Rect(0.05, 0.75, 0.9, 0.22), None, background=bg)
+        picker.open()
+        app.processEvents()
+        img = picker.grab().toImage()
+        img.save(str(out_dir / "picker.png"))
+        center = img.pixelColor(img.width() // 2, int(img.height() * 0.86))
+        picker._done = True  # noqa: SLF001
+        picker.close()
+        # в центре окна диалога видно светлый стоп-кадр под затемнением, а не чёрную заливку
+        ok = center.red() > 90
+        return ("ok" if ok else "fail"), {"center_rgb": [center.red(), center.green(), center.blue()]}
+
+    _check("picker_freeze_frame", picker_freeze)
+
     if sys.platform != "win32":
         return
 
@@ -412,6 +487,55 @@ def _qt_checks(out_dir: Path) -> None:
 
     _check("hotkeys_and_hooks", hotkey)
 
+    def words_keys() -> tuple[str, object]:
+        from lexoplay.hotkeys import parse
+        from lexoplay.win.hooks import HotkeyManager
+
+        hm = HotkeyManager()
+        fails: list[str] = []
+        hm.failed.connect(lambda n, t: fails.append(t))
+        hm.define("esc", parse("Escape"), "words")
+        hm.define("enter", parse("Enter"), "words")
+        hm.define("f6", parse("F6"), "game")
+        hm.set_group("words", True)
+        hm.set_group("game", True)
+        hm.set_group("words", False)
+        hm.set_group("game", False)
+        return ("ok" if not fails else "warn"), {"failed": fails}
+
+    _check("word_mode_keys", words_keys)
+
+    def no_activate() -> tuple[str, object]:
+        import ctypes
+
+        from lexoplay.ui.overlay import Overlay
+        from lexoplay.ui.word_layer import WordLayer
+        from lexoplay.win import winapi
+
+        def overlay_native(h: int) -> None:
+            winapi.exclude_from_capture(h)
+            winapi.set_no_activate(h)
+
+        info = {}
+        for name, widget in (("overlay", Overlay(on_native=overlay_native)), ("word_layer", WordLayer(on_native=overlay_native))):
+            hwnd = int(widget.winId())
+            style = ctypes.windll.user32.GetWindowLongPtrW(hwnd, winapi.GWL_EXSTYLE)
+            info[name] = bool(style & winapi.WS_EX_NOACTIVATE)
+            widget.close()
+        return ("ok" if all(info.values()) else "fail"), info
+
+    _check("overlays_never_take_focus", no_activate)
+
+    def windows_list() -> tuple[str, object]:
+        from lexoplay.games import WindowInfo, rank
+        from lexoplay.win import winapi
+
+        raw = winapi.app_windows()
+        infos = [WindowInfo(h, t, e, p, int(r.w), int(r.h), m) for h, t, e, p, r, m in raw]
+        return "ok", {"all": [(w.title[:40], w.exe) for w in infos][:15], "games": [w.exe for w in rank(infos)][:15]}
+
+    _check("window_list", windows_list)
+
     def magpie_math() -> tuple[str, object]:
         from lexoplay.win import winapi
 
@@ -451,8 +575,12 @@ def run(report: str) -> int:
             "lexoplay.wordmode",
             "lexoplay.ui.overlay",
             "lexoplay.ui.region_picker",
-            "lexoplay.ui.settings_dialog",
+            "lexoplay.ui.main_window",
+            "lexoplay.ui.window_picker",
+            "lexoplay.ui.hotkey_edit",
             "lexoplay.ui.word_layer",
+            "lexoplay.report",
+            "lexoplay.games",
         ]
         if sys.platform == "win32":
             mods += ["lexoplay.app", "lexoplay.win.winapi", "lexoplay.win.capture", "lexoplay.win.hooks", "lexoplay.win.ocr"]

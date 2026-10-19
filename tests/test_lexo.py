@@ -208,3 +208,22 @@ def test_old_server_without_desktop_endpoints():
     with pytest.raises(LexoError) as e:
         run(client_with(lambda r: httpx.Response(404, json={"detail": "Not Found"}), None).link("ABCDEF", "pc"))
     assert e.value.code == "server_outdated" and "Обнови сервер" in e.value.message
+
+
+def test_decks_list_and_create():
+    def handler(req):
+        if req.method == "POST":
+            return httpx.Response(200, json={"id": 9, "title": json.loads(req.content)["title"], "card_count": 0})
+        return httpx.Response(
+            200,
+            json={
+                "items": [{"id": 3, "title": "Danganronpa", "card_count": 12, "due_count": 4, "new_count": 2}],
+                "current_deck_id": 3,
+            },
+        )
+
+    c = client_with(handler)
+    decks, current = run(c.decks())
+    assert decks[0].title == "Danganronpa" and decks[0].due_count == 4 and current == 3
+    made = run(c.create_deck("  Слова из игр  "))
+    assert made.id == 9 and made.title == "Слова из игр"

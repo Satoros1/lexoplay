@@ -1,30 +1,38 @@
-"""Иконка exe: тот же логотип, что рисует трей (тёмно-бирюзовый квадрат с «L»)."""
+"""Иконка exe: тот же логотип, что в окне и трее (облачко реплики на зелёном квадрате).
+
+Рисуется тем же кодом Qt (lexoplay.ui.theme.draw_logo), каждый размер отдельно:
+у маленьких свои упрощения, поэтому не уменьшаем одну большую картинку.
+"""
 
 from __future__ import annotations
 
+import io
 import os
 import sys
-from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+from PIL import Image  # noqa: E402
+from PySide6.QtCore import QBuffer, QIODevice  # noqa: E402
+from PySide6.QtGui import QGuiApplication  # noqa: E402
+
+SIZES = (16, 20, 24, 32, 40, 48, 64, 128, 256)
 
 
-def logo(size: int) -> Image.Image:
-    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    d.rounded_rectangle((0, 0, size - 1, size - 1), radius=int(size * 0.22), fill=(15, 110, 86, 255))
-    font_path = Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts" / "segoeuib.ttf"
-    try:
-        font = ImageFont.truetype(str(font_path), int(size * 0.62))
-    except OSError:
-        font = ImageFont.load_default()
-    d.text((size / 2, size / 2), "L", fill=(255, 255, 255, 255), font=font, anchor="mm")
-    return img
+def render(size: int) -> Image.Image:
+    from lexoplay.ui.theme import draw_logo
+
+    buf = QBuffer()
+    buf.open(QIODevice.OpenModeFlag.WriteOnly)
+    draw_logo(size).save(buf, "PNG")
+    return Image.open(io.BytesIO(bytes(buf.data()))).convert("RGBA")
 
 
 def main(out: str) -> None:
-    big = logo(256)
-    big.save(out, sizes=[(s, s) for s in (16, 24, 32, 48, 64, 128, 256)])
+    _app = QGuiApplication.instance() or QGuiApplication(sys.argv[:1])
+    images = [render(s) for s in SIZES]
+    big = images[-1]
+    big.save(out, format="ICO", sizes=[(s, s) for s in SIZES], append_images=images[:-1])
     print("icon:", out)
 
 

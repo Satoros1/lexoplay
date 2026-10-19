@@ -41,6 +41,19 @@ user32.SetWindowDisplayAffinity.argtypes = [HWND, wintypes.DWORD]
 kernel32.OpenProcess.restype = wintypes.HANDLE
 kernel32.QueryFullProcessImageNameW.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)]
 kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+user32.ShowWindow.argtypes = [HWND, ctypes.c_int]
+user32.GetWindow.argtypes = [HWND, wintypes.UINT]
+user32.GetWindow.restype = HWND
+user32.GetWindowLongPtrW.argtypes = [HWND, ctypes.c_int]
+user32.GetWindowLongPtrW.restype = ctypes.c_ssize_t
+user32.SetWindowLongPtrW.argtypes = [HWND, ctypes.c_int, ctypes.c_ssize_t]
+user32.SetWindowLongPtrW.restype = ctypes.c_ssize_t
+
+try:
+    dwmapi = ctypes.WinDLL("dwmapi")
+    dwmapi.DwmGetWindowAttribute.argtypes = [HWND, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD]
+except OSError:  # pragma: no cover
+    dwmapi = None
 
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 MONITOR_DEFAULTTONEAREST = 2
@@ -50,6 +63,12 @@ SWP_SHOWWINDOW = 0x0040
 SWP_NOOWNERZORDER = 0x0200
 GA_ROOT = 2
 WDA_EXCLUDEFROMCAPTURE = 0x00000011
+SW_RESTORE = 9
+GW_OWNER = 4
+GWL_EXSTYLE = -20
+WS_EX_TOOLWINDOW = 0x00000080
+WS_EX_NOACTIVATE = 0x08000000
+DWMWA_CLOAKED = 14
 
 
 class MONITORINFO(ctypes.Structure):
@@ -217,3 +236,57 @@ def force_foreground(hwnd: int) -> None:
 
 def own_pid() -> int:
     return os.getpid()
+
+
+def restore_window(hwnd: int) -> None:
+    """Развернуть свёрнутую игру (полноэкранные игры сворачиваются, когда теряют фокус)."""
+    if is_window(hwnd) and is_minimized(hwnd):
+        user32.ShowWindow(hwnd, SW_RESTORE)
+
+
+def set_no_activate(hwnd: int) -> None:
+    """Окно получает клики, но не забирает фокус: игра остаётся активной и не сворачивается."""
+    style = user32.GetWindowLongPtrW(hwnd, GWL_EXSTYLE)
+    user32.SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style | WS_EX_NOACTIVATE)
+
+
+def _cloaked(hwnd: int) -> bool:
+    """Скрытые системой окна (приложения из Store на других рабочих столах) выглядят видимыми."""
+    if dwmapi is None:
+        return False
+    val = wintypes.DWORD()
+    if dwmapi.DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, ctypes.byref(val), ctypes.sizeof(val)) != 0:
+        return False
+    return bool(val.value)
+
+
+def app_windows() -> list[tuple[int, str, str, str, Rect, bool]]:
+    """Окна, которые видно на панели задач: (hwnd, заголовок, exe, путь, размер, свёрнуто)."""
+    own = os.getpid()
+    out: list[tuple[int, str, str, str, Rect, bool]] = []
+    for hwnd in top_level_windows():
+        if not is_visible(hwnd) or user32.GetWindow(hwnd, GW_OWNER):
+            continue
+        if user32.GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_TOOLWINDOW or _cloaked(hwnd):
+            continue
+        title = window_title(hwnd).strip()
+        pid = window_pid(hwnd)
+        if not title or pid == own:
+            continue
+        path = process_path(pid) or ""
+        exe = os.path.basename(path).lower() if path else ""
+        if not exe:
+            continue
+        out.append((hwnd, title, exe, path, client_rect_screen(hwnd), is_minimized(hwnd)))
+    return out
+
+
+def find_game_window(exe: str) -> int | None:
+    """Самое большое окно этой игры, если она запущена."""
+    best, best_area = None, -1.0
+    for hwnd, _title, wexe, _path, rect, minimized in app_windows():
+        if wexe == exe.lower():
+            area = 0.0 if minimized else rect.w * rect.h
+            if area > best_area:
+                best, best_area = hwnd, area
+    return best

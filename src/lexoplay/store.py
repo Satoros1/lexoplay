@@ -61,6 +61,19 @@ class Game:
     capture: str | None = None  # "screen" | "window"; None = ещё не выбрано
     binarize: bool = False
     last_played_at: float | None = None
+    # куда слова этой игры идут в Lexo: game = своя колода по названию игры,
+    # current = текущая колода в Lexo, deck = конкретная колода deck_id
+    deck_mode: str = "game"
+    deck_id: int | None = None
+    deck_title: str | None = None
+
+    @property
+    def deck_label(self) -> str:
+        if self.deck_mode == "deck" and self.deck_title:
+            return f"«{self.deck_title}»"
+        if self.deck_mode == "current":
+            return "текущая колода"
+        return f"«{self.title}»"
 
     def with_(self, **kw: object) -> Game:
         return replace(self, **kw)  # type: ignore[arg-type]
@@ -79,28 +92,39 @@ class Store:
         self._lock = threading.Lock()
         self._db = sqlite3.connect(str(path), check_same_thread=False)
         self._db.executescript(_SCHEMA)
+        cols = {r[1] for r in self._db.execute("PRAGMA table_info(games)").fetchall()}
+        for col, ddl in (
+            ("deck_mode", "TEXT NOT NULL DEFAULT 'game'"),
+            ("deck_id", "INTEGER"),
+            ("deck_title", "TEXT"),
+        ):
+            if col not in cols:  # база из 0.1–0.2
+                self._db.execute(f"ALTER TABLE games ADD COLUMN {col} {ddl}")
         self._db.commit()
+
+    _COLS = "exe, title, region_json, name_region_json, capture, binarize, last_played_at, deck_mode, deck_id, deck_title"
+
+    @staticmethod
+    def _game(row) -> Game:  # type: ignore[no-untyped-def]
+        return Game(
+            row[0], row[1], _rect_from(row[2]), _rect_from(row[3]), row[4], bool(row[5]), row[6],
+            row[7] or "game", row[8], row[9],
+        )
 
     def get_game(self, exe: str) -> Game | None:
         with self._lock:
-            row = self._db.execute(
-                "SELECT exe, title, region_json, name_region_json, capture, binarize, last_played_at "
-                "FROM games WHERE exe = ?",
-                (exe.lower(),),
-            ).fetchone()
-        if row is None:
-            return None
-        return Game(row[0], row[1], _rect_from(row[2]), _rect_from(row[3]), row[4], bool(row[5]), row[6])
+            row = self._db.execute(f"SELECT {self._COLS} FROM games WHERE exe = ?", (exe.lower(),)).fetchone()
+        return None if row is None else self._game(row)
 
     def save_game(self, game: Game) -> Game:
         game = game.with_(exe=game.exe.lower())
         with self._lock:
             self._db.execute(
-                "INSERT INTO games (exe, title, region_json, name_region_json, capture, binarize, last_played_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?) "
+                f"INSERT INTO games ({self._COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(exe) DO UPDATE SET title=excluded.title, region_json=excluded.region_json, "
                 "name_region_json=excluded.name_region_json, capture=excluded.capture, "
-                "binarize=excluded.binarize, last_played_at=excluded.last_played_at",
+                "binarize=excluded.binarize, last_played_at=excluded.last_played_at, "
+                "deck_mode=excluded.deck_mode, deck_id=excluded.deck_id, deck_title=excluded.deck_title",
                 (
                     game.exe,
                     game.title,
@@ -109,6 +133,9 @@ class Store:
                     game.capture,
                     int(game.binarize),
                     game.last_played_at,
+                    game.deck_mode,
+                    game.deck_id,
+                    game.deck_title,
                 ),
             )
             self._db.commit()

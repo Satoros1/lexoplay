@@ -39,11 +39,28 @@ def debug_dir() -> Path:
 
 @dataclass
 class Hotkeys:
+    """Работают только пока на экране игра (кроме add_game). Без Ctrl и Shift: в новеллах
+    они пропускают текст. add_game по умолчанию не задана: игра добавляется из окна LexoPlay."""
+
     translate: str = "F2"
     words: str = "F3"
     hide: str = "F4"
-    reselect: str = "Ctrl+F2"
-    add_game: str = "Ctrl+Shift+F2"  # глобальная: работает в любом окне
+    reselect: str = "F6"
+    add_game: str = ""
+
+    def items(self) -> list[tuple[str, str]]:
+        return [(f.name, getattr(self, f.name)) for f in fields(self)]
+
+
+HOTKEY_LABELS = {
+    "translate": ("Перевести реплику", "Ещё раз спрячет перевод"),
+    "words": ("Слова в Lexo", "Подчеркнуть слова реплики и добавить в карточки"),
+    "hide": ("Спрятать перевод", ""),
+    "reselect": ("Выделить окно диалога заново", "Если перевод встал не туда"),
+    "add_game": ("Добавить текущее окно как игру", "Работает в любой программе, поэтому по умолчанию выключено"),
+}
+
+SETTINGS_VERSION = 3
 
 
 @dataclass
@@ -59,6 +76,7 @@ class Settings:
     context_lines: int = 8
     debug: bool = False
     hotkeys: Hotkeys = field(default_factory=Hotkeys)
+    version: int = SETTINGS_VERSION
 
     @staticmethod
     def path() -> Path:
@@ -75,9 +93,15 @@ class Settings:
             log.exception("settings.json повреждён, беру значения по умолчанию")
             return cls()
         known = {f.name for f in fields(cls)}
-        data = {k: v for k, v in raw.items() if k in known and k != "hotkeys"}
+        data = {k: v for k, v in raw.items() if k in known and k not in ("hotkeys", "version")}
         hk_known = {f.name for f in fields(Hotkeys)}
         hk = Hotkeys(**{k: v for k, v in (raw.get("hotkeys") or {}).items() if k in hk_known})
+        if int(raw.get("version") or 1) < 3:
+            # 0.1–0.2: Ctrl+F2 и Ctrl+Shift+F2 пропускали текст в новеллах
+            if hk.reselect.replace(" ", "").lower() == "ctrl+f2":
+                hk.reselect = "F6"
+            if hk.add_game.replace(" ", "").lower() == "ctrl+shift+f2":
+                hk.add_game = ""
         return cls(**data, hotkeys=hk)
 
     def save(self) -> None:

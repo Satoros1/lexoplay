@@ -1,7 +1,9 @@
-"""Выделение окна диалога мышкой поверх игры (экран 2 на канвасе).
+"""Выделение окна диалога мышкой (экран 2 на канвасе).
 
-Окно накрывает display_rect, затемняет игру и даёт нарисовать рамку. Tab переключает
-на необязательную рамку для имени говорящего. Результат в долях 0..1 от игры.
+Рисуем поверх стоп-кадра игры: сначала снимок, потом окно выделения на его месте.
+Выделению нужен фокус (Enter, Esc, Tab), а полноэкранные игры, потеряв фокус,
+сворачиваются. Со стоп-кадром это неважно: игрок видит ту же картинку, а после Enter
+LexoPlay разворачивает игру обратно. Результат в долях 0..1 от игры.
 """
 
 from __future__ import annotations
@@ -9,7 +11,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QKeyEvent, QMouseEvent, QPainter, QPaintEvent, QPen
+from PySide6.QtGui import QColor, QFont, QFontMetricsF, QImage, QKeyEvent, QMouseEvent, QPainter, QPaintEvent, QPen
 from PySide6.QtWidgets import QWidget
 
 from lexoplay.geometry import Rect, denormalize, normalize
@@ -32,6 +34,7 @@ class RegionPicker(QWidget):
         name_region: Rect | None = None,
         placer: Placer | None = None,
         on_native: Callable[[int], None] | None = None,
+        background: QImage | None = None,
     ) -> None:
         super().__init__(
             None,
@@ -50,6 +53,7 @@ class RegionPicker(QWidget):
         self._drag_to: QPointF | None = None
         self._placer = placer
         self._done = False
+        self._background = background
         self.winId()
         if on_native:
             on_native(int(self.winId()))
@@ -132,7 +136,12 @@ class RegionPicker(QWidget):
     def paintEvent(self, _e: QPaintEvent) -> None:  # noqa: N802
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        p.fillRect(self.rect(), QColor(0, 0, 0, 120))
+        if self._background is not None and not self._background.isNull():
+            p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+            p.drawImage(QRectF(self.rect()), self._background)
+            p.fillRect(self.rect(), QColor(0, 0, 0, 90))
+        else:
+            p.fillRect(self.rect(), QColor(0, 0, 0, 120))
         bounds = self._bounds()
         for rect, color, label in ((self._region, ACCENT, "диалог"), (self._name, NAME, "имя")):
             if rect is not None:
@@ -166,26 +175,31 @@ class RegionPicker(QWidget):
             p.drawText(tag, Qt.AlignmentFlag.AlignCenter, label)
 
     def _paint_panel(self, p: QPainter) -> None:
-        w = min(self.width() - 32, 600)
-        box = QRectF((self.width() - w) / 2, 24, w, 112)
-        p.setPen(QColor("#3A3D45"))
-        p.setBrush(QColor(18, 21, 27, 240))
-        p.drawRoundedRect(box, 12, 12)
+        w = min(self.width() - 32, 620)
         title = QFont(FONT_FAMILY)
         title.setPixelSize(17)
         title.setBold(True)
         body = QFont(FONT_FAMILY)
         body.setPixelSize(13)
+        if self._mode == "dialog":
+            head = "Обведи мышкой окно диалога" if self._region is None else "Готово? Нажми Enter"
+        else:
+            head = "Обведи имя говорящего (необязательно)"
+        text = (
+            f"{self._title}: рамка запомнится, дальше хватит одной клавиши перевода.\n"
+            "Enter сохранить · Esc или правый клик отмена · Tab рамка для имени"
+            + (" · Delete убрать имя" if self._mode == "name" else "")
+        )
+        flags = int(Qt.TextFlag.TextWordWrap | Qt.AlignmentFlag.AlignLeft)
+        inner = w - 40
+        body_h = QFontMetricsF(body).boundingRect(QRectF(0, 0, inner, 1000), flags, text).height()
+        box = QRectF((self.width() - w) / 2, 24, w, 14 + 26 + 8 + body_h + 16)
+        p.setPen(QColor("#3A3D45"))
+        p.setBrush(QColor(18, 21, 27, 240))
+        p.drawRoundedRect(box, 12, 12)
         p.setFont(title)
         p.setPen(QColor("#FFFFFF"))
-        head = "Выдели окно диалога мышкой" if self._mode == "dialog" else "Выдели имя говорящего (необязательно)"
-        p.drawText(QRectF(box.x() + 20, box.y() + 14, box.width() - 40, 24), int(Qt.AlignmentFlag.AlignLeft), head)
+        p.drawText(QRectF(box.x() + 20, box.y() + 14, inner, 26), int(Qt.AlignmentFlag.AlignLeft), head)
         p.setFont(body)
         p.setPen(QColor("#B4B2A9"))
-        lines = [
-            f"Игра: {self._title}. Область запомнится, дальше хватит F2.",
-            "Enter сохранить · Esc отмена · Tab рамка для имени"
-            + (" · Delete убрать имя" if self._mode == "name" else ""),
-        ]
-        for i, line in enumerate(lines):
-            p.drawText(QRectF(box.x() + 20, box.y() + 48 + i * 22, box.width() - 40, 20), int(Qt.AlignmentFlag.AlignLeft), line)
+        p.drawText(QRectF(box.x() + 20, box.y() + 48, inner, body_h + 2), flags, text)

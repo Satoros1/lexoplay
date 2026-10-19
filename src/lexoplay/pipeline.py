@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 import uuid
 from collections.abc import Awaitable, Callable
@@ -20,6 +21,8 @@ from lexoplay.ocr_model import OcrResult
 from lexoplay.preprocess import Prepared, changed, prepare, thumbnail
 from lexoplay.textproc import Utterance, has_text, to_utterance
 from lexoplay.translate import ContextLine, TranslateRequest, TranslationError, Translator
+
+log = logging.getLogger(__name__)
 
 
 class OcrEngine(Protocol):
@@ -183,6 +186,17 @@ class Pipeline:
                 thumb=thumb,
                 timings=timings,
                 code=getattr(exc, "code", "error"),
+                utterance=utt,
+            )
+        except Exception:  # чужая ошибка не должна показываться игроку трейсбеком
+            log.exception("переводчик упал")
+            return F2Outcome(
+                "error",
+                message="Перевод не получился, подробности в логе.",
+                ocr=result,
+                thumb=thumb,
+                timings=timings,
+                code="error",
                 utterance=utt,
             )
         timings["translate"] = time.perf_counter() - t2
