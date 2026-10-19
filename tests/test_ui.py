@@ -292,3 +292,23 @@ def test_close_hides_instead_of_quit(window, qapp):
     w.open("games")
     w.close()
     assert not w.isVisible()
+
+
+def test_picker_draws_freeze_frame(qapp):
+    from PySide6.QtGui import QColor, QImage
+
+    bg = QImage(800, 600, QImage.Format.Format_RGB888)
+    bg.fill(QColor(240, 240, 240))
+    picker = RegionPicker(Rect(0, 0, 800, 600), "Danganronpa", background=bg)
+    picker.open()
+    qapp.processEvents()
+    img = picker.grab().toImage()
+    px = img.pixelColor(400, 500)
+    assert px.red() > 120  # светлый кадр под лёгким затемнением, а не чёрный экран
+    got = {}
+    picker.accepted.connect(lambda r, n: got.update(region=r))
+    QTest.mousePress(picker, Qt.MouseButton.LeftButton, pos=QPoint(40, 450))
+    QTest.mouseMove(picker, QPoint(760, 580))
+    QTest.mouseRelease(picker, Qt.MouseButton.LeftButton, pos=QPoint(760, 580))
+    QTest.keyClick(picker, Qt.Key.Key_Return)
+    assert got["region"].w > 0.8
