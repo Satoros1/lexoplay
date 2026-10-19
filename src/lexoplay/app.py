@@ -996,7 +996,19 @@ class App(QObject):
             log.info("область диалога %s: %s", game.exe, region.to_dict())
         self._return_to_game()
         self._set_status()
-        QTimer.singleShot(450, self.f2)  # сразу показать перевод текущей реплики
+        QTimer.singleShot(300, lambda: self._f2_when_back(0))  # сразу показать перевод текущей реплики
+
+    def _f2_when_back(self, tries: int) -> None:
+        """Полноэкранная игра разворачивается не мгновенно: переводим, когда она снова на экране."""
+        if not self.active:
+            return
+        back = self._game_in_focus() and not winapi.is_minimized(self.active.hwnd)
+        if not back and tries < 12:
+            if tries % 4 == 3:
+                self._return_to_game()
+            QTimer.singleShot(250, lambda: self._f2_when_back(tries + 1))
+            return
+        QTimer.singleShot(250, self.f2)  # ещё кадр-другой на перерисовку после разворота
 
     def _on_pick_cancelled(self) -> None:
         self.picker = None
