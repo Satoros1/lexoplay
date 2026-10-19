@@ -53,10 +53,10 @@ from lexoplay.lexo import Account, Deck, GameRef, LexoClient, LexoError, LexoOff
 from lexoplay.ocr_model import OcrResult
 from lexoplay.outbox import Outbox
 from lexoplay.pipeline import CaptureError, F2Outcome, Pipeline, ScanOutcome, Target
-from lexoplay.preprocess import changed, is_black, thumbnail
+from lexoplay.preprocess import is_black, thumbnail
 from lexoplay.session import GameSession, Sessions
 from lexoplay.store import Game, Store, Task
-from lexoplay.textproc import Utterance
+from lexoplay.textproc import Utterance, to_utterance
 from lexoplay.translate import AnthropicTranslator, LexoTranslator, Translator
 from lexoplay.ui.main_window import AccountStatus, MainWindow
 from lexoplay.ui.overlay import Overlay
@@ -64,6 +64,7 @@ from lexoplay.ui.region_picker import RegionPicker
 from lexoplay.ui.theme import app_icon
 from lexoplay.ui.word_layer import WordLayer
 from lexoplay.vocab import Vocab
+from lexoplay.watch import LineWatcher
 from lexoplay.win import capture, winapi
 from lexoplay.win.hooks import HotkeyManager, WindowEvents
 from lexoplay.win.ocr import INSTALL_HINT, OcrUnavailable, WinOcr
@@ -191,7 +192,7 @@ class App(QObject):
         self.display: Rect | None = None
         self.state = "idle"  # idle | busy | picking
         self.token = 0
-        self.line_thumb: Image.Image | None = None  # слепок показанной реплики: по нему видно смену
+        self.watcher: LineWatcher | None = None  # следит, не сменилась ли показанная реплика
         self._watch_pending = False
         self._hotkeys_paused = False
         self._failed_keys: set[str] = set()
@@ -1135,8 +1136,7 @@ class App(QObject):
             if out.ocr is not None:
                 self.current = CurrentLine(game.exe, out.ocr, out.utterance, out.record, time.time(), out.thumb)
             self.overlay.show_text(game.region, out.record.translation)
-            self.line_thumb = out.thumb
-            self.watch_timer.start()
+            self._watch_line(out.utterance.text if out.utterance else out.record.source, out.thumb)
         elif out.kind == "no_text":
             self._hide_strip()
             self.overlay.toast(f"Текст не найден. {self.settings.hotkeys.reselect}, чтобы выделить окно диалога заново")
@@ -1145,8 +1145,7 @@ class App(QObject):
             if out.ocr is not None:
                 self.current = CurrentLine(game.exe, out.ocr, out.utterance, None, time.time(), out.thumb)
             self.overlay.show_text(game.region, out.message or "Лимит переводов на сегодня закончился.")
-            self.line_thumb = out.thumb
-            self.watch_timer.start()
+            self._watch_line(out.utterance.text if out.utterance else "", out.thumb)
         elif out.code in ("device_revoked", "unauthorized"):
             self._hide_strip()
             self._auth_lost(out.message or "Привязка снята.")
@@ -1169,22 +1168,39 @@ class App(QObject):
         self.overlay.hide_strip()
         if not self.word_layer.is_open:
             self.watch_timer.stop()
-            self.line_thumb = None
+            self.watcher = None
 
     # ------------------------------------------------------------------ смена реплики
+    def _watch_line(self, text: str, thumb: Image.Image | None) -> None:
+        """Следить за показанной репликой: перевод уберём, когда она сменится."""
+        self.watcher = LineWatcher(text, thumb) if thumb is not None else None
+        if self.watcher is not None:
+            self.watch_timer.start()
+
     def _watch_tick(self) -> None:
         watching = self.overlay.strip_visible or self.word_layer.is_open
-        if not watching or self.state != "idle" or self._watch_pending or not self.active:
+        watcher = self.watcher
+        if not watching or watcher is None or self.state != "idle" or self._watch_pending or not self.active:
             return
         game = self.store.get_game(self.active.exe)
-        if not game or not game.region or self.line_thumb is None or self.display is None:
+        if not game or not game.region or self.display is None:
             return
         grab = self._make_grab(self.active, game, self.display)
-        region, before = game.region, self.line_thumb
+        target = Target(game.title, game.region, game.name_region, game.binarize)
+        pipeline = self._pipeline(game.exe)
 
         async def check() -> bool:
             img = await asyncio.to_thread(grab)
-            return changed(before, thumbnail(img, region), threshold=0.006)
+            thumb = thumbnail(img, target.region)
+            if not watcher.needs_ocr(thumb):
+                return False
+            if pipeline is None:
+                return True  # перечитать текст нечем: как раньше, по пикселям
+            result, name_text = await pipeline.recognize(img, target)
+            gone = watcher.line_changed(to_utterance(result, name_text).text, thumb)
+            if gone:
+                log.info("реплика сменилась (перечитывал текст %s раз)", watcher.checks)
+            return gone
 
         self._watch_pending = True
         fut = self.bg.submit(check())
@@ -1281,9 +1297,8 @@ class App(QObject):
         self.word_layer.deck_label = game.deck_label
         self.word_layer.open(self.display, game.region, views, strip=self.overlay.strip_rect())
         self.hotkeys.set_group("words", not self._hotkeys_paused)
-        if line.thumb is not None:
-            self.line_thumb = line.thumb
-            self.watch_timer.start()
+        if self.watcher is None:
+            self._watch_line(line.sentence, line.thumb)
 
     def _set_card(self, card: CardState | None) -> None:
         if self.word_ctx is not None:
@@ -1390,4 +1405,4 @@ class App(QObject):
         log.debug("режим слов закрыт: %s", reason)
         if not self.overlay.strip_visible:
             self.watch_timer.stop()
-            self.line_thumb = None
+            self.watcher = None
