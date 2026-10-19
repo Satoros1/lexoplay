@@ -343,9 +343,14 @@ class GamesPage(QWidget):
 
     def _deck_combo(self, g: Game) -> QComboBox:
         combo = QComboBox()
+        # ширина по названию, но не шире 340: иначе карточка игры вылезает за окно
         combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
-        combo.setMinimumContentsLength(min(44, max(24, len(g.title) + 16)))
-        combo.addItem(f"Своя колода «{g.title}»", ("game", None, None))
+        combo.setMinimumContentsLength(18)
+        combo.setMaximumWidth(340)
+        combo.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        own = f"Своя колода «{g.title}»" if len(g.title) <= 18 else "Своя колода игры"
+        combo.addItem(own, ("game", None, None))
+        combo.setItemData(0, f"Колода «{g.title}» создастся сама с первым словом", Qt.ItemDataRole.ToolTipRole)
         combo.addItem("Текущая колода в Lexo", ("current", None, None))
         if self.decks.decks:
             combo.insertSeparator(combo.count())

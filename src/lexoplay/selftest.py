@@ -245,6 +245,9 @@ def _app_flow(out_dir: Path) -> Callable[[], tuple[str, object]]:
             return cond()
 
         store = Store(Path(tmp) / "local.db")
+        region = Rect(0.05, 0.75, 0.9, 0.2)
+        # игра уже есть: при старте не откроется окно LexoPlay (оно закрыло бы режим слов посреди проверки)
+        game = store.save_game(Game("selftest.exe", "Selftest", region=region))
         bg = BackgroundLoop("selftest-app")
         app = App(app_q, Settings(), store, bg)
         app.client = LexoClient("https://lexo.test", "tok", transport=httpx.MockTransport(handler))
@@ -255,8 +258,6 @@ def _app_flow(out_dir: Path) -> Callable[[], tuple[str, object]]:
             info["vocab_loaded"] = pump(lambda: app.vocab.known("reluctant"))
             info["account"] = app.account.label if app.account else None
 
-            region = Rect(0.05, 0.75, 0.9, 0.2)
-            game = store.save_game(Game("selftest.exe", "Selftest", region=region))
             app.display = Rect(80, 80, 1000, 700)
             session = app.sessions.touch(game.exe, game.title)
             words, x = [], 0.08
@@ -276,6 +277,14 @@ def _app_flow(out_dir: Path) -> Callable[[], tuple[str, object]]:
             app.word_layer.finish("esc")
             app.sessions.end_all()
             info["session_end_sent"] = pump(lambda: any(c[1].endswith("/end") for c in calls))
+            # окно LexoPlay на настоящем App (контроллер тот же, что в игре)
+            app.show_window("games")
+            for _ in range(10):
+                app_q.processEvents()
+            if app.window is not None:
+                app.window.grab().save(str(out_dir / "window-real-app.png"))
+                info["window_ok"] = app.window.isVisible()
+                app.window.hide()
         finally:
             app.shutdown()
 
