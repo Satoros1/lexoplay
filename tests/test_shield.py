@@ -30,7 +30,7 @@ def test_click_on_layer_never_reaches_game_even_its_release():
     assert s.mouse(WM_LBUTTONDOWN, over_layer=True) == (True, ("click", VK_LBUTTON))
     s.active = False  # клик по пустому месту закрыл режим ещё на нажатии
     assert not s.idle  # отпускание ещё ждём
-    assert s.mouse(WM_LBUTTONUP) == (True, None)  # и его забираем: новеллы листают и по отпусканию
+    assert s.mouse(WM_LBUTTONUP) == (True, ("release", VK_LBUTTON))  # и его забираем: новеллы листают и по отпусканию
     assert s.idle
     assert s.mouse(WM_LBUTTONDOWN, over_layer=True) == (False, None)  # режим закрыт: клики снова игры
     assert s.mouse(WM_LBUTTONUP) == (False, None)
@@ -42,7 +42,7 @@ def test_clicks_outside_layer_and_moves_pass():
     assert s.mouse(WM_LBUTTONDOWN, over_layer=False) == (False, None)  # другое окно или монитор
     assert s.mouse(WM_LBUTTONUP) == (False, None)  # нажатие было не наше: отпускание тоже
     assert s.mouse(WM_RBUTTONDOWN, over_layer=True) == (True, ("click", VK_RBUTTON))
-    assert s.mouse(WM_RBUTTONUP) == (True, None)
+    assert s.mouse(WM_RBUTTONUP) == (True, ("release", VK_RBUTTON))
     assert s.mouse(WM_MOUSEWHEEL, over_layer=True) == (True, None)
     assert s.mouse(WM_MOUSEWHEEL, over_layer=False) == (False, None)
     s.active = False

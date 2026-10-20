@@ -2,12 +2,13 @@
 
 Отдельное окно поверх игры размером с display_rect. Пока режим открыт, оно лежит над
 всей игрой (слегка затемняет её) и отвечает на все клики над ней: по слову, по кнопкам,
-по пустому месту (это просто закрывает режим). Сами клики и колесо до игры не доходят:
-их ещё до окон забирает хук (win/llhooks.py) и передаёт сюда в click(). Иначе игры,
-которые читают мышь через Raw Input или DirectInput, пропускали бы реплику.
+по пустому месту (это закрывает режим, когда кнопку отпустят). Сами клики и колесо до игры
+не доходят: их ещё до окон забирает хук (win/llhooks.py) и передаёт сюда в click() и
+release(), а App на время режима забирает у игры фокус. Иначе игры, которые читают мышь
+через Raw Input или DirectInput, пропускали бы реплику.
 
-Фокус окно не берёт (WS_EX_NOACTIVATE): полноэкранные игры, потеряв фокус, сворачиваются.
-Поэтому Esc, Enter и стрелки приходят не сюда, а через App (тот же хук), пока режим открыт. Стрелками слова выбираются и без мыши: это выручает, когда игра держит
+Окно создаётся с WS_EX_NOACTIVATE: фокус ему даёт только App, и не всем играм (эксклюзивный
+полноэкранный режим, Magpie). Esc, Enter и стрелки приходят через App глобальными клавишами. Стрелками слова выбираются и без мыши: это выручает, когда игра держит
 курсор у себя (тогда App ещё и забирает фокус на время режима, см. CursorGuard).
 
 Перед тем как спрятаться, окно рисует пустой кадр: иначе при следующем F3 Windows на
@@ -104,6 +105,7 @@ class WordLayer(QWidget):
         self.explain_key = "F7"
         self.cursor_locked = False  # игра держит курсор: подсказка про стрелки
         self._focus: int | None = None  # куда двигают стрелки
+        self._close_armed = False  # нажали мимо слов (или правой): закроемся, когда кнопку отпустят
         self._blank = False
         self._pick = QTimer(self)
         self._pick.setSingleShot(True)
@@ -131,6 +133,7 @@ class WordLayer(QWidget):
         self._sel, self._anchor, self._hover, self._card, self._focus = [], None, None, None, None
         self._explain, self._explain_open = None, False
         self.cursor_locked = False
+        self._close_armed = False
         self._pick.stop()
         self._open = True
         self._placer(self, display)
@@ -277,15 +280,21 @@ class WordLayer(QWidget):
         elif self._open:
             self._idle.start()
 
+    def mouseReleaseEvent(self, e: QMouseEvent) -> None:  # noqa: N802
+        e.accept()
+        if e.button() in (Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton):
+            self.release()
+
     def click(self, pos: QPointF, *, right: bool = False, shift: bool = False) -> None:
-        """Клик по слою в точке pos (логические пиксели окна).
+        """Нажатие кнопки над слоем в точке pos (логические пиксели окна).
 
         Обычно приходит от хука: он забрал клик у игры, и до окна тот уже не дошёл."""
+        self._close_armed = False
         if not self._open:
             return
         self._idle.start()
         if right:
-            self.finish("outside")
+            self._close_armed = True
             return
         if self._explain_btn and self._explain_btn.contains(pos):
             self.explain_clicked.emit()
@@ -308,7 +317,7 @@ class WordLayer(QWidget):
             return
         idx = self._hit_word(pos)
         if idx is None:
-            self.finish("outside")  # пустое место: закрыть режим, в игру клик не попадёт
+            self._close_armed = True  # пустое место: закрыть режим, в игру клик не попадёт
             return
         self._explain_open = False  # слово важнее: разбор спрячется, F7 вернёт
         self._pick.stop()
@@ -319,6 +328,13 @@ class WordLayer(QWidget):
         self._sel = sel
         self.update()
         self.selected.emit(sel)
+
+    def release(self) -> None:
+        """Кнопку отпустили. Закрываемся только теперь: отдай App фокус игре на нажатии, её
+        отпускание досталось бы игре, а многие новеллы листают реплику как раз по отпусканию."""
+        if self._close_armed and self._open:
+            self._close_armed = False
+            self.finish("outside")
 
     def wheelEvent(self, e: QWheelEvent) -> None:  # noqa: N802
         e.accept()  # колесо над игрой в новеллах листает текст: пока режим открыт, не пускаем

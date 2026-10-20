@@ -570,6 +570,199 @@ def _app_flow(out_dir: Path) -> Callable[[], tuple[str, object]]:
     return run
 
 
+def _app_vs_game(out_dir: Path) -> Callable[[], tuple[str, object]]:
+    """Настоящий App и «игра» в отдельном процессе, которая читает ввод через Raw Input, оконные
+    сообщения и GetAsyncKeyState. Пока открыт режим слов, клик по слову, Enter, колесо и клик
+    по пустому месту (он закрывает режим) до неё не доходят; после выхода из режима доходят."""
+
+    def run() -> tuple[str, object]:
+        import ctypes
+        import subprocess
+        import tempfile
+
+        import httpx
+        from PySide6.QtWidgets import QApplication
+
+        app_q = QApplication.instance() or QApplication(sys.argv[:1])
+        tmp = tempfile.mkdtemp(prefix="lexoplay-selftest-game-")
+        os.environ["LEXOPLAY_HOME"] = tmp
+        os.environ["ANTHROPIC_API_KEY"] = "sk-selftest"
+
+        from lexoplay.app import Active, App, CurrentLine
+        from lexoplay.bg import BackgroundLoop
+        from lexoplay.config import Settings
+        from lexoplay.geometry import Rect
+        from lexoplay.lexo import LexoClient
+        from lexoplay.ocr_model import Line, OcrResult, Word
+        from lexoplay.store import Game, Store
+        from lexoplay.textproc import Utterance
+        from lexoplay.win import winapi as _wa
+
+        u32 = ctypes.windll.user32
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            path = req.url.path
+            if path == "/desktop/me":
+                user = {"username": "selftest", "native_lang": "ru", "learning_lang": "en", "premium": False}
+                return httpx.Response(200, json={"user": user, "usage": {"used": 0, "limit": 50}, "device_name": "CI"})
+            if path == "/desktop/vocab":
+                return httpx.Response(200, json={"items": [], "server_time": "2026-10-20T00:00:00Z"})
+            if path == "/desktop/lookup":
+                return httpx.Response(
+                    200,
+                    json={"lemma": "eerie", "pos": "adj", "ipa": "ˈɪəri", "senses": ["жуткий"], "marked_translation": "",
+                          "in_deck": False, "card_id": None},
+                )  # fmt: skip
+            if path == "/desktop/cards":
+                return httpx.Response(200, json={"card_id": 1, "text": "eerie", "translation": "жуткий", "status": "created", "deck": "x"})
+            if path.endswith("/end"):
+                return httpx.Response(200, json={"words_added": 1})
+            return httpx.Response(404, json={"detail": "not found"})
+
+        def pump(cond: Callable[[], bool], seconds: float = 5.0) -> bool:
+            end = time.time() + seconds
+            while time.time() < end:
+                app_q.processEvents()
+                if cond():
+                    return True
+                time.sleep(0.01)
+            return cond()
+
+        state_path = Path(tmp) / "game.json"
+
+        def game_state() -> dict:
+            try:
+                return json.loads(state_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return {}
+
+        counters = ("raw_down", "raw_up", "raw_wheel", "raw_keys", "msg_down", "msg_wheel", "msg_keys", "async_down", "async_enter")
+
+        def delta(a: dict, b: dict) -> dict:
+            return {k: int(b.get(k, 0)) - int(a.get(k, 0)) for k in counters if int(b.get(k, 0)) != int(a.get(k, 0))}
+
+        gx, gy, gw, gh = 120, 120, 800, 500
+        from lexoplay.updater import clean_env
+
+        frozen = getattr(sys, "frozen", False)
+        base = [sys.executable] if frozen else [sys.executable, "-m", "lexoplay"]
+        proc = subprocess.Popen(  # noqa: S603  второй экземпляр exe не должен взять временную папку первого
+            [*base, "--fake-game", str(state_path), "--fake-rect", f"{gx},{gy},{gw},{gh}"],
+            env=clean_env() if frozen else None,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        info: dict[str, object] = {}
+        app = None
+        ghwnd = 0
+        try:
+            if not pump(lambda: bool(game_state().get("hwnd")), 20):
+                return "fail", {"error": "поддельная игра не запустилась", "exit": proc.poll()}
+            st = game_state()
+            ghwnd, gpid = int(st["hwnd"]), int(st["pid"])
+            store = Store(Path(tmp) / "local.db")
+            game = store.save_game(Game("selftest.exe", "Selftest", region=Rect(0.05, 0.75, 0.9, 0.2)))
+            bg = BackgroundLoop("selftest-game")
+            app = App(app_q, Settings(), store, bg)
+            app.client = LexoClient("https://lexo.test", "tok", transport=httpx.MockTransport(handler))
+            app._rebuild_translator()
+            app.start()
+            _wa.force_foreground(ghwnd)
+            pump(lambda: _wa.foreground_window() == ghwnd, 3)
+            info["game_foreground"] = _wa.foreground_window() == ghwnd
+            app.active = Active(ghwnd, gpid, game.exe)
+            app.display = Rect(gx, gy, gw, gh)
+            session = app.sessions.touch(game.exe, game.title)
+            words, x = [], 0.08
+            for w in "This place feels eerie after dark.".split():
+                words.append(Word(w, Rect(x, 0.85, 0.012 * len(w), 0.035)))
+                x += 0.012 * len(w) + 0.012
+            line = CurrentLine(game.exe, OcrResult((Line(tuple(words)),)), Utterance(None, "This place feels eerie after dark."), None, time.time())
+
+            def click(px: int, py: int) -> None:
+                u32.SetCursorPos(px, py)
+                pump(lambda: False, 0.08)
+                u32.mouse_event(0x0002, 0, 0, 0, 0)
+                pump(lambda: False, 0.08)  # кнопку держат: игра с опросом успела бы её заметить
+                u32.mouse_event(0x0004, 0, 0, 0, 0)
+
+            app._open_words(game, session, line)
+            pump(lambda: False, 0.3)
+            lh = int(app.word_layer.winId())
+            info["took_focus"] = app._took_focus
+            info["layer_foreground"] = _wa.root_window(_wa.foreground_window()) == lh
+            v = app.word_ctx.views[3] if app.word_ctx else None
+            lr = _wa.window_rect(lh)
+            s0 = game_state()
+            if v is not None:
+                click(int(lr.x + (v.rect.x + v.rect.w / 2) * lr.w), int(lr.y + (v.rect.y + v.rect.h / 2) * lr.h))
+            info["picked"] = pump(lambda: app.word_layer.selection == [3], 3)
+            info["card_ready"] = pump(lambda: bool(app.word_ctx and app.word_ctx.card and app.word_ctx.card.phase == "ready"), 5)
+            u32.keybd_event(0x0D, 0, 0, 0)  # Enter: сохранить слово
+            pump(lambda: False, 0.08)
+            u32.keybd_event(0x0D, 0, 2, 0)
+            info["card_saved"] = pump(lambda: bool(app.word_ctx and app.word_ctx.card and app.word_ctx.card.phase == "saved"), 3)
+            u32.mouse_event(0x0800, 0, 0, 120, 0)  # колесо
+            pump(lambda: False, 0.3)
+            s1 = game_state()
+            info["game_saw_in_mode"] = delta(s0, s1)
+            click(int(lr.x + lr.w * 0.5), int(lr.y + lr.h * 0.3))  # пустое место: режим закроется на отпускании
+            info["closed"] = pump(lambda: not app.word_layer.is_open, 3)
+            info["focus_back"] = pump(lambda: _wa.foreground_window() == ghwnd, 3)
+            pump(lambda: False, 0.3)
+            s2 = game_state()
+            info["game_saw_close_click"] = delta(s1, s2)
+            info["shield_off"] = pump(lambda: not app.shield.running, 3)
+            click(int(lr.x + lr.w * 0.5), int(lr.y + lr.h * 0.3))  # режим закрыт: клик уходит в игру
+            pump(lambda: False, 0.4)
+            s3 = game_state()
+            info["game_saw_after"] = delta(s2, s3)
+            # для отчёта: без фокуса у слоя (Magpie, эксклюзивный экран) Raw Input игры клик видит
+            app._focus_bad.add(game.exe)
+            _wa.force_foreground(ghwnd)
+            pump(lambda: _wa.foreground_window() == ghwnd, 2)
+            app._open_words(game, session, line)
+            pump(lambda: False, 0.3)
+            if v is not None:
+                click(int(lr.x + (v.rect.x + v.rect.w / 2) * lr.w), int(lr.y + (v.rect.y + v.rect.h / 2) * lr.h))
+            pump(lambda: False, 0.4)
+            info["no_focus_game_saw"] = delta(s3, game_state())
+            app._close_words("esc")
+            info["blocked"] = app.shield.blocked
+        finally:
+            if app is not None:
+                app.shutdown()
+            if ghwnd:
+                u32.PostMessageW(ghwnd, 0x0010, 0, 0)  # WM_CLOSE
+            try:
+                proc.wait(5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        quiet = ("raw_down", "raw_up", "raw_wheel", "raw_keys", "msg_down", "msg_wheel", "msg_keys", "async_down", "async_enter")
+        in_mode = info.get("game_saw_in_mode") or {}
+        on_close = info.get("game_saw_close_click") or {}
+        after = info.get("game_saw_after") or {}
+        ok = (
+            info.get("game_foreground")
+            and info.get("took_focus")
+            and info.get("layer_foreground")
+            and info.get("picked")
+            and info.get("card_ready")
+            and info.get("card_saved")
+            and not any(in_mode.get(k) for k in quiet)  # type: ignore[union-attr]
+            and info.get("closed")
+            and not any(on_close.get(k) for k in quiet)  # type: ignore[union-attr]
+            and info.get("focus_back")
+            and info.get("shield_off")
+            and after.get("raw_down", 0) >= 1  # type: ignore[union-attr]
+            and after.get("msg_down", 0) >= 1  # type: ignore[union-attr]
+        )
+        return ("ok" if ok else "fail"), info
+
+    return run
+
+
 def _own_key_flow(out_dir: Path) -> Callable[[], tuple[str, object]]:
     """Без Lexo, своим ключом: F3 → значение → «+ в мои слова» → слово в «Слова»; после привязки уходит в Lexo."""
 
@@ -1154,8 +1347,10 @@ def _qt_checks(out_dir: Path) -> None:
     _check("cursor_unlock_in_word_mode", cursor_unlock)
 
     def shield() -> tuple[str, object]:
-        """Режим слов: клики над слоем и клавиши режима забирает хук. До игры (Raw Input,
-        GetAsyncKeyState, горячие клавиши, окно) они не доходят, а режим слов на них отвечает."""
+        """Хук режима слов: клик над слоем не доходит до оконных сообщений и GetAsyncKeyState,
+        отпускание забранной кнопки тоже, боковая кнопка и клавиши режима приходят в App.
+        Raw Input здесь не проверяем: этот процесс сам в фокусе, а Raw Input процесса в фокусе
+        хук не останавливает (от него спасает фокус у слоя, см. app_words_keep_game_input)."""
         import ctypes
 
         from PySide6.QtCore import QPointF
@@ -1164,7 +1359,6 @@ def _qt_checks(out_dir: Path) -> None:
         from lexoplay.geometry import Rect as _R
         from lexoplay.hotkeys import parse as _parse
         from lexoplay.ui.word_layer import WordLayer
-        from lexoplay.win import input as rawin
         from lexoplay.win import winapi as _wa
         from lexoplay.win.hooks import HotkeyManager
         from lexoplay.win.llhooks import InputShield, to_local
@@ -1195,19 +1389,14 @@ def _qt_checks(out_dir: Path) -> None:
         pump(0.3)
         _wa.force_foreground(int(game.winId()))
         pump(0.3)
-        iw = rawin.InputWatch()  # так ввод видит игра на Raw Input
-        raw: list[str] = []
-        raw_buttons: list[int] = []
-        iw.pressed.connect(raw.append)
-        iw.button.connect(raw_buttons.append)
-        iw.start()
-        hm = HotkeyManager()  # через RegisterHotKey забранный Enter тоже не должен сработать
+        hm = HotkeyManager()  # Enter режима слов зарегистрирован, как в App
         hot: list[str] = []
         hm.triggered.connect(hot.append)
         hm.define("words_enter", _parse("Enter"), "words")
         hm.define("words_esc", _parse("Escape"), "words")
         hm.set_group("words", True)
         keys = hm.group_keys("words")
+        keys[(0x86, 0)] = "probe_f23"  # клавиша без RegisterHotKey: видит ли её хук клавиатуры
         layer = WordLayer(on_native=native)
         views = [WordView(0, "eerie", _R(0.1, 0.75, 0.15, 0.08)), WordView(1, "dark", _R(0.3, 0.75, 0.12, 0.08))]
         layer.open(_R(200, 200, 600, 400), _R(0.05, 0.7, 0.9, 0.25), views)
@@ -1222,6 +1411,7 @@ def _qt_checks(out_dir: Path) -> None:
         layer.finished.connect(lambda _r: sh.stop())
         sh.action.connect(actions.append)
         sh.button.connect(buttons.append)
+        sh.released.connect(lambda _vk: layer.release())
         lh = int(layer.winId())
 
         def on_click(vk: int, x: int, y: int, _mods: int) -> None:
@@ -1239,43 +1429,39 @@ def _qt_checks(out_dir: Path) -> None:
         u32.mouse_event(0x0004, 0, 0, 0, 0)
         pump(0.3)
         info["picked"] = list(picked)
-        info["raw_after_click"] = list(raw)
         u32.mouse_event(0x0800, 0, 0, 120, 0)  # колесо
         u32.mouse_event(0x0080, 0, 0, 2, 0)  # Mouse5 вниз и вверх
         u32.mouse_event(0x0100, 0, 0, 2, 0)
         pump(0.3)
         info["buttons"] = list(buttons)
-        info["raw_after_wheel_x2"] = list(raw)
-        info["raw_buttons"] = list(raw_buttons)
-        u32.keybd_event(0x0D, 0, 0, 0)  # Enter режима слов
+        u32.keybd_event(0x86, 0, 0, 0)  # F23 из таблицы хука
+        u32.keybd_event(0x86, 0, 2, 0)
+        pump(0.2)
+        u32.keybd_event(0x0D, 0, 0, 0)  # Enter: он ещё и горячая клавиша
         u32.keybd_event(0x0D, 0, 2, 0)
         pump(0.3)
         info["actions"] = list(actions)
         info["hotkeys_fired"] = list(hot)
-        info["raw_after_enter"] = list(raw)
-        u32.keybd_event(0x87, 0, 0, 0)  # F24: не клавиша режима, её получает игра
-        u32.keybd_event(0x87, 0, 2, 0)
-        pump(0.3)
-        info["raw_after_f24"] = list(raw)
+        info["key_calls"] = sh.key_calls
+        info["last_key"] = sh.last_key
         u32.SetCursorPos(int(r.x + r.w * 0.5), int(r.y + r.h * 0.2))  # пустое место
         pump(0.1)
         u32.mouse_event(0x0002, 0, 0, 0, 0)
         pump(0.2)
-        info["closed_on_press"] = done == ["outside"]
-        u32.mouse_event(0x0004, 0, 0, 0, 0)  # отпускание уже после закрытия режима: тоже не игре
-        pump(0.3)
-        info["raw_after_close"] = list(raw)
-        info["hooks_removed"] = not sh.running
-        info["blocked"] = sh.blocked
-        info["game_clicks_during_mode"] = game.clicks
-        u32.mouse_event(0x0002, 0, 0, 0, 0)  # режим закрыт: клик снова игры
+        info["open_while_held"] = layer.is_open and done == []  # закроется на отпускании
         u32.mouse_event(0x0004, 0, 0, 0, 0)
         pump(0.3)
-        info["raw_after_mode"] = list(raw)
+        info["closed_on_release"] = done == ["outside"]
+        info["hooks_removed"] = not sh.running
+        info["blocked"] = sh.blocked
+        info["errors"] = list(sh.errors)
+        info["game_clicks_during_mode"] = game.clicks
+        u32.mouse_event(0x0002, 0, 0, 0, 0)  # режим закрыт: клик снова в окно «игры»
+        u32.mouse_event(0x0004, 0, 0, 0, 0)
+        pump(0.3)
         info["game_clicks_after_mode"] = game.clicks
         sh.close()
         hm.clear()
-        iw.close()
         layer.close()
         game.close()
         pump(0.1)
@@ -1283,19 +1469,13 @@ def _qt_checks(out_dir: Path) -> None:
             info["started"]
             and info["picked"] == [[0]]
             and not info["async_down_while_held"]
-            and info["raw_after_click"] == []
-            and info["raw_after_wheel_x2"] == []
-            and info["raw_buttons"] == []
             and info["buttons"] == [6]
-            and info["actions"] == ["words_enter"]
-            and info["hotkeys_fired"] == []
-            and info["raw_after_enter"] == []
-            and info["raw_after_f24"] == ["key"]
-            and info["closed_on_press"]
-            and info["raw_after_close"] == ["key"]
+            and "probe_f23" in info["actions"]  # type: ignore[operator]
+            and info["open_while_held"]
+            and info["closed_on_release"]
             and info["hooks_removed"]
+            and not info["errors"]
             and info["game_clicks_during_mode"] == 0
-            and "mouse" in info["raw_after_mode"]  # type: ignore[operator]
             and info["game_clicks_after_mode"] >= 1  # type: ignore[operator]
         )
         return ("ok" if ok else "fail"), info
@@ -1349,6 +1529,7 @@ def _qt_checks(out_dir: Path) -> None:
 
     _check("display_rect", magpie_math)
     _check("app_word_flow", _app_flow(out_dir))
+    _check("app_words_keep_game_input", _app_vs_game(out_dir))
     _check("app_own_key_flow", _own_key_flow(out_dir))
 
 

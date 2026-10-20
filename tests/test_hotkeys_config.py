@@ -23,9 +23,10 @@ def test_settings_roundtrip(tmp_path, monkeypatch):
     s = Settings.load()
     s.target_lang = "uk"
     s.hotkeys.translate = "F6"
+    s.no_focus_games = ["dr1_us.exe"]  # режим слов у этой игры фокус больше не берёт
     s.save()
     s2 = Settings.load()
-    assert s2.target_lang == "uk" and s2.hotkeys.translate == "F6"
+    assert s2.target_lang == "uk" and s2.hotkeys.translate == "F6" and s2.no_focus_games == ["dr1_us.exe"]
     # мусорные ключи из старых версий не ломают загрузку
     p = Settings.path()
     p.write_text(p.read_text(encoding="utf-8").replace('"debug"', '"zzz": 1, "debug"'), encoding="utf-8")

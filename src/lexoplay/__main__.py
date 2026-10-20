@@ -65,7 +65,15 @@ def main() -> None:
     # для самопроверки обновления в CI: подменить себя и перезапуститься / отметиться и выйти
     parser.add_argument("--update-swap-test", default="")
     parser.add_argument("--update-probe", default="")
+    # для самопроверки режима слов: отдельный процесс-«игра» (fakegame.py)
+    parser.add_argument("--fake-game", default="")
+    parser.add_argument("--fake-rect", default="120,120,800,500")
     args = parser.parse_args()
+
+    if args.fake_game:
+        from lexoplay.fakegame import run as fake_game
+
+        sys.exit(fake_game(args.fake_game, args.fake_rect))
 
     if args.wait_pid:
         from lexoplay.updater import cleanup_old, wait_pid

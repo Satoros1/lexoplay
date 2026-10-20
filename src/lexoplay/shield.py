@@ -1,6 +1,8 @@
 """Что забирать у игры, пока открыт режим слов (F3, F7). Решение по одному событию, без WinAPI.
 
-Сами хуки живут в win/llhooks.py, здесь только правила, чтобы их проверяли тесты:
+Сами хуки живут в win/llhooks.py, здесь только правила, чтобы их проверяли тесты.
+Хук останавливает оконные сообщения, GetAsyncKeyState и DirectInput на хуках, но не Raw Input
+игры в фокусе: от него спасает только фокус у слоя (см. App._words_focus). Правила:
 - нажатие кнопки мыши или колесо над слоем слов забираем, пока режим открыт;
 - клавишу режима (Esc, Enter, стрелки, R, 1–5) забираем, если Shift и Ctrl зажаты
   ровно как в её сочетании: так же решает и RegisterHotKey;
@@ -40,7 +42,9 @@ _UP = {WM_LBUTTONUP: VK_LBUTTON, WM_RBUTTONUP: VK_RBUTTON, WM_MBUTTONUP: VK_MBUT
 WHEEL = (WM_MOUSEWHEEL, WM_MOUSEHWHEEL)
 KEY_DOWN = (WM_KEYDOWN, WM_SYSKEYDOWN)
 
-Event = tuple[str, object]  # ("click", vk) левая/правая, ("button", vk) средняя/боковая, ("key", имя действия)
+# ("click", vk) нажата левая/правая, ("release", vk) её отпустили, ("button", vk) средняя/боковая,
+# ("key", имя действия режима слов)
+Event = tuple[str, object]
 
 
 def button(msg: int, data: int = 0) -> tuple[int, bool] | None:
@@ -92,7 +96,7 @@ class Shield:
             return False, None
         if vk in self.held_buttons:
             self.held_buttons.discard(vk)
-            return True, None
+            return True, (("release", vk) if vk in (VK_LBUTTON, VK_RBUTTON) else None)
         return False, None
 
     def key(self, msg: int, vk: int, mods: int = 0) -> tuple[bool, Event | None]:

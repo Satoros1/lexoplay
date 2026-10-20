@@ -196,7 +196,9 @@ def test_word_layer_clicks_from_hook(qapp):
     layer.click(center(views[3]))
     layer.click(center(views[4]), shift=True)
     assert picked == [[3], [3, 4]]
-    layer.click(center(views[3]), right=True)  # правая кнопка закрывает режим, как и раньше
+    layer.click(center(views[3]), right=True)  # правая кнопка закрывает режим, но когда её отпустят:
+    assert done == [] and layer.is_open  # иначе отпускание досталось бы игре
+    layer.release()
     assert done == ["outside"] and not layer.is_open
     layer.click(center(views[2]))  # запоздалый клик после закрытия
     assert picked == [[3], [3, 4]]

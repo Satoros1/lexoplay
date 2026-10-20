@@ -320,7 +320,8 @@ class App(QObject):
         self._cursor_timer.timeout.connect(self._cursor_tick)
         self._took_focus = False  # слой слов забрал фокус у игры, чтобы она отпустила курсор
         self._took_focus_at = 0.0
-        self._focus_bad: set[str] = set()  # игры, которые от потери фокуса свернулись: фокус у них больше не берём
+        # игры, которые от потери фокуса свернулись: фокус у них больше не берём (помним и после перезапуска)
+        self._focus_bad: set[str] = set(settings.no_focus_games)
         self._history_sessions: dict[str, str] = {}  # exe -> сессия для разбора и слов из истории (без игры)
         self.hotkeys = HotkeyManager()
         self.hotkeys.triggered.connect(self._on_hotkey)
@@ -331,6 +332,7 @@ class App(QObject):
         # иначе игры на Raw Input и DirectInput получают их тоже и пропускают реплику
         self.shield = InputShield()
         self.shield.clicked.connect(self._on_shield_click)
+        self.shield.released.connect(self._on_shield_release)
         self.shield.button.connect(self._on_mouse_button)
         self.shield.action.connect(self._on_hotkey)
 
@@ -1273,6 +1275,8 @@ class App(QObject):
             if not self.active or self.active.hwnd != root:
                 self._hide_strip()
                 self._close_words("switch")
+            elif self._took_focus and self.word_layer.is_open:
+                self._close_words("switch")  # фокус режима слов игрок сам вернул игре (клик по её рамке)
             self.active = Active(root, pid, game.exe)
             self.overlay.strip_custom = game.strip_pos
             self.events.watch_game(root, pid)
@@ -1291,6 +1295,8 @@ class App(QObject):
             # игра свернулась, потому что режим слов забрал фокус: больше так не делаем и разворачиваем её
             log.warning("%s свернулась без фокуса: в режиме слов фокус у неё больше не берём", self.active.exe)
             self._focus_bad.add(self.active.exe)
+            self.settings.no_focus_games = sorted(self._focus_bad)
+            self.settings.save()
             self._close_words("closed")
             self._return_to_game()
             return
@@ -1327,7 +1333,11 @@ class App(QObject):
             self.geom_timer.stop()
 
     def _game_in_focus(self) -> bool:
-        return bool(self.active) and winapi.root_window(winapi.foreground_window()) == self.active.hwnd
+        """Игра в фокусе. Пока фокус на время режима слов у слоя (_words_focus), это тоже считается."""
+        if not self.active:
+            return False
+        root = winapi.root_window(winapi.foreground_window())
+        return root == self.active.hwnd or (self._took_focus and root == int(self.word_layer.winId()))
 
     def _return_to_game(self) -> None:
         if self.active and winapi.is_window(self.active.hwnd):
@@ -1975,6 +1985,7 @@ class App(QObject):
         self.word_layer.open(self.display, game.region, views, strip=self.overlay.strip_rect())
         self.hotkeys.set_group("words", not self._hotkeys_paused)
         self._shield_on()
+        self._words_focus()
         self._sync_ignored_keys()
         self._cursor_guard.reset()
         self._cursor_timer.start()
@@ -2518,16 +2529,48 @@ class App(QObject):
         self.word_layer.cursor_locked = True
         self.word_layer.update()
         exe = self.active.exe if self.active else "?"
-        if self.active is None or exe in self._focus_bad or winapi.exclusive_fullscreen():
+        if self._took_focus:
+            log.info("курсор держит игра %s даже без фокуса: слова стрелками", exe)
+        elif not self._words_focus():  # игра без фокуса обычно отпускает курсор
             log.info("курсор держит игра %s: слова стрелками, фокус не забираем", exe)
-            return
-        # игра без фокуса обычно отпускает курсор: на время режима слов фокус у слоя
+
+    def _words_focus(self) -> bool:
+        """Режим слов открыт: фокус на это время у слоя, а не у игры.
+
+        Многие игры читают мышь и клавиатуру через Raw Input или DirectInput. Это хук не
+        останавливает, и клик по слову листал бы реплику. Без фокуса игре такой ввод просто
+        не приходит. Не берём фокус, если игра свернётся (эксклюзивный полноэкранный режим или
+        уже сворачивалась) или её растягивает Magpie (он бы перестал)."""
+        if self._took_focus:
+            return True
+        if self.active is None or not self.word_layer.is_open:
+            return False
+        exe = self.active.exe
+        why = ""
+        if exe in self._focus_bad:
+            why = "она сворачивалась без фокуса"
+        elif winapi.exclusive_fullscreen():
+            why = "эксклюзивный полноэкранный режим"
+        elif self._magpie_scaling():
+            why = "игру растягивает Magpie"
+        if why:
+            log.info("режим слов без фокуса у %s: %s", exe, why)
+            return False
         hwnd = int(self.word_layer.winId())
         winapi.set_no_activate(hwnd, False)
         winapi.force_foreground(hwnd)
         self._took_focus = True
         self._took_focus_at = time.monotonic()
-        log.info("курсор держит игра %s: слой слов забрал фокус, чтобы игра отпустила курсор", exe)
+        return True
+
+    def _magpie_scaling(self) -> bool:
+        if self.active is None or self.settings.magpie_mode == "never":
+            return False
+        try:
+            return winapi.find_magpie_window(winapi.monitor_rect(self.active.hwnd)) is not None
+        except Exception:
+            log.debug("не понял, растянута ли игра Magpie", exc_info=True)
+            return False
 
     def _cursor_over_game(self, pos: tuple[int, int]) -> bool:
         """Курсор над игрой и не упёрт в край экрана: только тогда «стоит» значит «держит игра»."""
@@ -2558,6 +2601,10 @@ class App(QObject):
             return
         lx, ly = to_local(int(layer.winId()), x, y, layer.devicePixelRatioF())
         layer.click(QPointF(lx, ly), right=vk == 2, shift=bool(mods & MOD_SHIFT))
+
+    def _on_shield_release(self, vk: int) -> None:
+        if self.word_layer.is_open:
+            self.word_layer.release()
 
     def _on_words_finished(self, reason: str) -> None:
         self.word_ctx = None

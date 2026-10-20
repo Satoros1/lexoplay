@@ -5,10 +5,12 @@
 курсором: игра в фокусе, значит, клик её. Так клик по слову пропускал реплику, а Enter
 («сохранить слово») мог её пролистать.
 
-Низкоуровневые хуки Windows вызывает раньше всего этого. Если хук забрал событие, оно не
-доходит ни до окон, ни до Raw Input, ни до DirectInput, ни до горячих клавиш. Что именно
-забрали, хук сообщает в поток Qt сигналами, и режим слов отвечает сам: клик выбирает
-слово, Enter сохраняет. Что забирать, решает Shield (lexoplay/shield.py).
+Низкоуровневые хуки Windows вызывает раньше окон: забранное событие не доходит ни до окон,
+ни до GetAsyncKeyState, ни до DirectInput, который сам живёт на таких хуках. Raw Input игры в
+фокусе хук не останавливает (Windows раздаёт его раньше хуков), поэтому на время режима App
+ещё и забирает фокус у игры (App._words_focus): без фокуса Raw Input игре не приходит.
+Что забрали, хук сообщает в поток Qt сигналами, и режим слов отвечает сам: клик выбирает
+слово. Что забирать, решает Shield (lexoplay/shield.py).
 
 Хуки ставятся в своём потоке со своим циклом сообщений: Windows ждёт ответа хука на каждое
 событие мыши в системе, и занятый главный поток тормозил бы курсор. И стоят только пока
@@ -121,10 +123,12 @@ class InputShield(QObject):
     """Хуки на время режима слов.
 
     clicked(vk, x, y, mods): левая (1) или правая (2) кнопка над слоем, точка экрана, модификаторы.
+    released(vk): её отпустили (отпускание тоже забрали у игры).
     button(vk): средняя или боковая кнопка над слоем (на неё может быть назначено действие).
     action(name): клавиша режима слов (words_esc, words_left, ...), которую забрали у игры."""
 
     clicked = Signal(int, int, int, int)
+    released = Signal(int)
     button = Signal(int)
     action = Signal(str)
 
@@ -132,6 +136,9 @@ class InputShield(QObject):
         super().__init__()
         self.logic = Shield()
         self.blocked = 0  # сколько событий забрали (для самопроверки и отчёта)
+        self.key_calls = 0  # сколько раз Windows звала хук клавиатуры
+        self.last_key: tuple[int, int, int] | None = None  # (сообщение, vk, модификаторы)
+        self.errors: list[str] = []
         self.failed = ""  # почему хуки не встали
         self._layer = 0
         self._lock = threading.Lock()
@@ -260,22 +267,27 @@ class InputShield(QObject):
                     kind, vk = event
                     if kind == "click":
                         self.clicked.emit(int(vk), int(info.pt.x), int(info.pt.y), _mods())
+                    elif kind == "release":
+                        self.released.emit(int(vk))
                     else:
                         self.button.emit(int(vk))
                 if block:
                     self.blocked += 1
                     self._done()
                     return 1
-            except Exception:
+            except Exception as exc:
+                self.errors.append(repr(exc)[:200])
                 log.exception("хук мыши")
         return user32.CallNextHookEx(None, code, wparam, lparam)
 
     def _on_key(self, code: int, wparam: int, lparam: int) -> int:
         logic = self.logic
+        self.key_calls += 1
         if code == HC_ACTION and (logic.active or logic.held_keys):
             try:
                 info = KBDLLHOOKSTRUCT.from_address(lparam)
                 mods = _mods() if wparam in KEY_DOWN else 0
+                self.last_key = (int(wparam), int(info.vkCode), mods)
                 block, event = logic.key(wparam, int(info.vkCode), mods)
                 if event is not None:
                     self.action.emit(str(event[1]))
@@ -283,6 +295,7 @@ class InputShield(QObject):
                     self.blocked += 1
                     self._done()
                     return 1
-            except Exception:
+            except Exception as exc:
+                self.errors.append(repr(exc)[:200])
                 log.exception("хук клавиатуры")
         return user32.CallNextHookEx(None, code, wparam, lparam)
