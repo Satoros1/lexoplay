@@ -1,13 +1,15 @@
-"""Поле для клавиши: нажал на него, нажал клавишу (или сочетание) — готово.
+"""Поле для клавиши: нажал на него, нажал клавишу (или сочетание) или кнопку мыши, и готово.
 
 Esc отменяет ввод, Backspace/Delete очищает (если клавишу можно не задавать).
 Одиночные Ctrl, Shift, Alt не принимаются: ждём основную клавишу.
+Из кнопок мыши подходят средняя и боковые (Mouse3, Mouse4, Mouse5): левая и правая нужны
+для кликов, ими ввод отменяется.
 """
 
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QFocusEvent, QKeyEvent
+from PySide6.QtGui import QFocusEvent, QKeyEvent, QMouseEvent
 from PySide6.QtWidgets import QPushButton
 
 from lexoplay.hotkeys import HotkeyError, normalize
@@ -24,6 +26,11 @@ _SPECIAL = {
     Qt.Key.Key_Space: "Space",
     Qt.Key.Key_QuoteLeft: "`",
 }
+_MOUSE = {
+    Qt.MouseButton.MiddleButton: "Mouse3",
+    Qt.MouseButton.BackButton: "Mouse4",
+    Qt.MouseButton.ForwardButton: "Mouse5",
+}
 _MODIFIER_KEYS = {
     Qt.Key.Key_Control,
     Qt.Key.Key_Shift,
@@ -33,6 +40,23 @@ _MODIFIER_KEYS = {
     Qt.Key.Key_CapsLock,
     Qt.Key.Key_NumLock,
 }
+
+
+def key_text_for(name: str, mods: Qt.KeyboardModifier) -> str | None:
+    """Готовое имя клавиши или кнопки («Mouse5») с модификаторами → запись для настроек."""
+    parts = []
+    if mods & Qt.KeyboardModifier.ControlModifier:
+        parts.append("Ctrl")
+    if mods & Qt.KeyboardModifier.AltModifier:
+        parts.append("Alt")
+    if mods & Qt.KeyboardModifier.ShiftModifier:
+        parts.append("Shift")
+    if mods & Qt.KeyboardModifier.MetaModifier:
+        parts.append("Win")
+    try:
+        return normalize("+".join([*parts, name]))
+    except HotkeyError:
+        return None
 
 
 def key_text(key: int, mods: Qt.KeyboardModifier) -> str | None:
@@ -101,6 +125,7 @@ class HotkeyEdit(QPushButton):
         self._capturing = True
         self.setFocus()
         self.grabKeyboard()
+        self.grabMouse()  # кнопку мыши ловим, где бы ни был курсор
         self._render()
         self.capturing.emit(True)
 
@@ -109,6 +134,7 @@ class HotkeyEdit(QPushButton):
         if self._capturing:
             self._capturing = False
             self.releaseKeyboard()
+            self.releaseMouse()
             self._render()
             self.capturing.emit(False)
 
@@ -139,6 +165,20 @@ class HotkeyEdit(QPushButton):
             return
         self._stop()
         self._set(text)
+
+    def mousePressEvent(self, e: QMouseEvent) -> None:  # noqa: N802
+        if not self._capturing:
+            super().mousePressEvent(e)
+            return
+        e.accept()
+        name = _MOUSE.get(e.button())
+        if name is None:  # левая или правая: ими кликают, это отмена ввода
+            self._stop()
+            return
+        text = key_text_for(name, e.modifiers())
+        self._stop()
+        if text:
+            self._set(text)
 
     def _set(self, text: str) -> None:
         if text != self._value:

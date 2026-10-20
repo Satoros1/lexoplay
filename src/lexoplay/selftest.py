@@ -988,6 +988,28 @@ def _qt_checks(out_dir: Path) -> None:
         pump(0.4)
         info["after_wheel"] = len(got)
         info["kinds"] = sorted(set(got))
+        # боковая кнопка мыши (Mouse5) как горячая клавиша: Raw Input -> HotkeyManager -> действие
+        from lexoplay.hotkeys import parse as _parse
+        from lexoplay.win.hooks import HotkeyManager
+        from lexoplay.win import winapi as _wa0
+
+        hm = HotkeyManager()
+        fired: list[str] = []
+        hm.triggered.connect(fired.append)
+        hm.define("translate", _parse("Mouse5"), "game")
+        hm.set_group("game", True)
+        buttons: list[int] = []
+        iw.button.connect(buttons.append)
+        iw.button.connect(lambda vk: hm.mouse_pressed(vk, _wa0.modifiers_down()) if hm.mouse_vks else None)
+        iw.ignore_buttons = hm.mouse_vks
+        before = len(got)
+        u32.mouse_event(0x0080, 0, 0, 2, 0)  # XBUTTON2 вниз
+        u32.mouse_event(0x0100, 0, 0, 2, 0)  # и вверх
+        pump(0.4)
+        info["mouse5_buttons"] = buttons
+        info["mouse5_fired"] = fired
+        info["mouse5_not_player_action"] = len(got) == before  # наша кнопка не считается «игрок пропустил реплику»
+        hm.clear()
         iw.close()
         # клик в окно LexoPlay не считается «игрок пропустил реплику»
         from PySide6.QtWidgets import QWidget as _W
@@ -1011,6 +1033,9 @@ def _qt_checks(out_dir: Path) -> None:
             and info["key_events"] >= 1
             and info["after_wheel"] >= 2
             and info["kinds"] == ["key", "mouse"]
+            and info["mouse5_buttons"] == [6]
+            and info["mouse5_fired"] == ["translate"]
+            and info["mouse5_not_player_action"]
             and info["cursor_over_own"]
             and not info["cursor_over_own_after_hide"]
         )

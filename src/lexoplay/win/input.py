@@ -28,6 +28,8 @@ RIDEV_REMOVE = 0x00000001
 RIDEV_INPUTSINK = 0x00000100
 RI_KEY_BREAK = 0x01
 MOUSE_MOVE_ABSOLUTE = 0x01  # планшет, удалённый рабочий стол: координаты, а не сдвиг
+# нажатия средней и боковых кнопок -> VK (VK_MBUTTON, VK_XBUTTON1, VK_XBUTTON2): их можно назначить действием
+BUTTON_VK = {0x0010: 0x04, 0x0040: 0x05, 0x0100: 0x06}
 # кнопки вниз (левая, правая, средняя, 4, 5), колесо и отпускание левой: многие новеллы
 # листают реплику по отпусканию кнопки, и проверка сразу после него ловит смену быстрее
 MOUSE_ACTION = 0x0001 | 0x0002 | 0x0004 | 0x0010 | 0x0040 | 0x0100 | 0x0400 | 0x0800
@@ -131,9 +133,11 @@ def action_kind(raw: RAWINPUT) -> str:
 
 
 class InputWatch(QObject):
-    """pressed(kind): игрок кликнул или крутанул колесо ("mouse") или нажал клавишу ("key") где угодно."""
+    """pressed(kind): игрок кликнул или крутанул колесо ("mouse") или нажал клавишу ("key") где угодно.
+    button(vk): нажата средняя или боковая кнопка мыши (для действий, назначенных на кнопки мыши)."""
 
     pressed = Signal(str)
+    button = Signal(int)
 
     def __init__(self) -> None:
         super().__init__()
@@ -143,6 +147,7 @@ class InputWatch(QObject):
         QCoreApplication.instance().installNativeEventFilter(self._filter)
         self.active = False
         self.ignore_vks: set[int] = set()
+        self.ignore_buttons: set[int] = set()  # кнопки мыши, назначенные действием LexoPlay: не «игрок пропустил реплику»
         self.travel = 0  # сколько мышь проехала (сырые отсчёты): видно, что курсор держит игра
         self._buf = RAWINPUT()
 
@@ -173,8 +178,18 @@ class InputWatch(QObject):
         )
         if got in (0, 0xFFFFFFFF):
             return
-        if self._buf.header.dwType == RIM_TYPEMOUSE and not self._buf.data.mouse.usFlags & MOUSE_MOVE_ABSOLUTE:
-            self.travel += abs(self._buf.data.mouse.lLastX) + abs(self._buf.data.mouse.lLastY)
+        if self._buf.header.dwType == RIM_TYPEMOUSE:
+            mouse = self._buf.data.mouse
+            if not mouse.usFlags & MOUSE_MOVE_ABSOLUTE:
+                self.travel += abs(mouse.lLastX) + abs(mouse.lLastY)
+            flags = mouse.u.buttons.usButtonFlags
+            ours = False
+            for flag, vk in BUTTON_VK.items():
+                if flags & flag:
+                    self.button.emit(vk)
+                    ours = ours or vk in self.ignore_buttons
+            if ours and not flags & (MOUSE_ACTION & ~sum(BUTTON_VK)):
+                return  # нажали только нашу кнопку: это действие LexoPlay, а не игрока
         if is_action(self._buf, self.ignore_vks):
             self.pressed.emit(action_kind(self._buf))
 

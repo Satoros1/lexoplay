@@ -1,4 +1,7 @@
-"""Разбор хоткеев из настроек ("Ctrl+Shift+F2") в модификаторы и VK-код Windows. Чистый модуль."""
+"""Разбор хоткеев из настроек ("Ctrl+Shift+F2") в модификаторы и VK-код Windows. Чистый модуль.
+
+Кнопки мыши тоже можно назначить: Mouse3 (средняя), Mouse4 и Mouse5 (боковые). RegisterHotKey
+их не умеет, поэтому их ловит Raw Input (см. HotkeyManager), и нажатие доходит и до игры."""
 
 from __future__ import annotations
 
@@ -37,8 +40,13 @@ _KEYS.update(
         "up": 0x26,
         "right": 0x27,
         "down": 0x28,
+        # кнопки мыши (VK_MBUTTON, VK_XBUTTON1, VK_XBUTTON2)
+        "mouse3": 0x04,
+        "mouse4": 0x05,
+        "mouse5": 0x06,
     }
 )
+MOUSE_VKS = {0x04, 0x05, 0x06}
 _KEYS.update({f"num{d}": 0x60 + d for d in range(10)})
 
 # как писать клавишу в интерфейсе: f2 -> F2, pageup -> PageUp
@@ -51,6 +59,10 @@ class Hotkey:
     mods: int
     vk: int
     text: str
+
+    @property
+    def mouse(self) -> bool:
+        return self.vk in MOUSE_VKS
 
 
 class HotkeyError(ValueError):
@@ -98,6 +110,8 @@ def risk(text: str) -> str | None:
     if not text:
         return None
     hk = parse(text)
+    if hk.mouse:
+        return "Нажатие кнопки мыши получит и игра: если в игре на этой кнопке что-то есть, сработает и там."
     if hk.mods & (MOD_CONTROL | MOD_SHIFT):
         return "Ctrl и Shift в новеллах часто пропускают текст. Лучше отдельная F-клавиша."
     key = text.replace(" ", "").split("+")[-1].lower()

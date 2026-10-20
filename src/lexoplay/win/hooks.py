@@ -13,7 +13,7 @@ from ctypes import wintypes
 from PySide6.QtCore import QAbstractNativeEventFilter, QCoreApplication, QObject, Signal
 from PySide6.QtWidgets import QWidget
 
-from lexoplay.hotkeys import Hotkey
+from lexoplay.hotkeys import MOD_NOREPEAT, Hotkey
 
 log = logging.getLogger(__name__)
 
@@ -56,10 +56,14 @@ class _HotkeyFilter(QAbstractNativeEventFilter):
 
 
 class HotkeyManager(QObject):
-    """Две группы: global (работает всегда) и game (только пока игра в фокусе)."""
+    """Две группы: global (работает всегда) и game (только пока игра в фокусе).
+
+    Кнопки мыши (Mouse3/4/5) RegisterHotKey не умеет: такие хоткеи только помечаются
+    активными, а нажатие сообщает App из Raw Input (mouse_pressed)."""
 
     triggered = Signal(str)
     failed = Signal(str, str)  # имя, текст хоткея
+    mouse_changed = Signal()  # набор активных кнопок мыши изменился: App включает или выключает Raw Input
 
     def __init__(self) -> None:
         super().__init__()
@@ -70,7 +74,20 @@ class HotkeyManager(QObject):
         self._defs: dict[str, tuple[Hotkey, str]] = {}  # name -> (hotkey, group)
         self._ids: dict[int, str] = {}
         self._active: set[str] = set()
+        self._mouse: dict[str, Hotkey] = {}  # активные кнопки мыши
         self._next_id = 1
+
+    @property
+    def mouse_vks(self) -> set[int]:
+        return {hk.vk for hk in self._mouse.values()}
+
+    def mouse_pressed(self, vk: int, mods: int) -> bool:
+        """Нажата кнопка мыши (из Raw Input) при зажатых mods: сработал ли хоткей."""
+        for name, hk in self._mouse.items():
+            if hk.vk == vk and hk.mods & ~MOD_NOREPEAT == mods:
+                self.triggered.emit(name)
+                return True
+        return False
 
     def define(self, name: str, hotkey: Hotkey, group: str) -> None:
         self._defs[name] = (hotkey, group)
@@ -79,6 +96,11 @@ class HotkeyManager(QObject):
         if name in self._active:
             return
         hk, _group = self._defs[name]
+        if hk.mouse:
+            self._mouse[name] = hk
+            self._active.add(name)
+            self.mouse_changed.emit()
+            return
         hid = self._next_id
         self._next_id += 1
         if user32.RegisterHotKey(self._hwnd, hid, hk.mods, hk.vk):
@@ -95,6 +117,8 @@ class HotkeyManager(QObject):
                 user32.UnregisterHotKey(self._hwnd, hid)
                 del self._ids[hid]
         self._active.discard(name)
+        if self._mouse.pop(name, None) is not None:
+            self.mouse_changed.emit()
 
     def set_group(self, group: str, enabled: bool) -> None:
         for name, (_hk, g) in self._defs.items():

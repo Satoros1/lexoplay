@@ -311,6 +311,7 @@ class App(QObject):
 
         self.input = InputWatch()  # клики и клавиши игрока: после них перевод может смениться
         self.input.pressed.connect(self._on_user_input)
+        self.input.button.connect(self._on_mouse_button)  # средняя и боковые кнопки: на них можно назначить действие
         # режим слов: курсор может держать игра (см. cursorguard.py)
         self._cursor_guard = CursorGuard(winapi.cursor_pos, lambda: self.input.travel, counts=self._cursor_over_game)
         self._cursor_timer = QTimer(self)
@@ -322,6 +323,7 @@ class App(QObject):
         self._history_sessions: dict[str, str] = {}  # exe -> сессия для разбора и слов из истории (без игры)
         self.hotkeys = HotkeyManager()
         self.hotkeys.triggered.connect(self._on_hotkey)
+        self.hotkeys.mouse_changed.connect(self._sync_input)
         self.hotkeys.failed.connect(self._on_hotkey_failed)
         self._define_hotkeys()
 
@@ -1769,7 +1771,21 @@ class App(QObject):
         self._kick_timer.stop()
         self.watcher = None
         if not keep_input:
+            self._sync_input()
+
+    def _sync_input(self) -> None:
+        """Raw Input нужен, пока следим за репликой, открыт режим слов или на кнопку мыши назначено действие."""
+        mouse = self.hotkeys.mouse_vks
+        self.input.ignore_buttons = mouse
+        if self.watcher is not None or self.word_layer.is_open or mouse:
+            self.input.start()
+        else:
             self.input.stop()
+
+    def _on_mouse_button(self, vk: int) -> None:
+        """Средняя или боковая кнопка мыши: если на неё назначено действие, оно срабатывает."""
+        if self.hotkeys.mouse_vks:
+            self.hotkeys.mouse_pressed(vk, winapi.modifiers_down())
 
     def _set_watch_pace(self, *, hot: bool) -> None:
         ms = WATCH_HOT_MS if hot else WATCH_IDLE_MS

@@ -451,6 +451,16 @@ def test_keys_page_capture_and_conflict(window, qapp):
     same.click()
     w.show_page("games")  # ушёл с вкладки посреди ввода
     assert ctl.paused[-1] is False
+    # боковая кнопка мыши: Mouse5 на перевод
+    w.show_page("keys")
+    edit = w.keys.edits["translate"]
+    edit.click()
+    QTest.mouseClick(edit, Qt.MouseButton.ForwardButton)
+    assert ctl.settings.hotkeys.translate == "Mouse5" and ctl.paused[-1] is False
+    assert "получит и игра" in w.keys.notes["translate"].text()
+    edit.click()
+    QTest.mouseClick(edit, Qt.MouseButton.LeftButton)  # левая кнопка: отмена, ничего не меняется
+    assert ctl.settings.hotkeys.translate == "Mouse5" and ctl.paused[-1] is False
 
 
 def test_view_page_saves_sliders(window, qapp):

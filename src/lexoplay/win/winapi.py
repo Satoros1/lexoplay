@@ -94,6 +94,29 @@ def cursor_window() -> int:
     return _hwnd(user32.WindowFromPoint(pt))
 
 
+user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
+user32.GetAsyncKeyState.restype = ctypes.c_short
+
+
+def modifiers_down() -> int:
+    """Какие Ctrl, Shift, Alt, Win зажаты сейчас: в битах MOD_* (для действий на кнопках мыши)."""
+    from lexoplay.hotkeys import MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN
+
+    def down(vk: int) -> bool:
+        return bool(user32.GetAsyncKeyState(vk) & 0x8000)
+
+    mods = 0
+    if down(0x11):
+        mods |= MOD_CONTROL
+    if down(0x10):
+        mods |= MOD_SHIFT
+    if down(0x12):
+        mods |= MOD_ALT
+    if down(0x5B) or down(0x5C):
+        mods |= MOD_WIN
+    return mods
+
+
 def cursor_pos() -> tuple[int, int]:
     pt = wintypes.POINT()
     if not user32.GetCursorPos(ctypes.byref(pt)):
