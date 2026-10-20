@@ -53,7 +53,9 @@ from lexoplay.lexo import Deck
 from lexoplay.store import Game, SavedWord, Store, StoredLine
 from lexoplay.ui import theme
 from lexoplay.ui.hotkey_edit import HotkeyEdit
-from lexoplay.ui.pages import GlossaryDialog, HistoryPage, ProgressPage, WordsPage
+from lexoplay.ui.history_page import HistoryPage
+from lexoplay.ui.pages import GlossaryDialog, WordsPage
+from lexoplay.ui.progress_page import ProgressPage
 from lexoplay.ui.theme import app_icon, draw_logo, icon
 
 RELEASES_URL = "https://github.com/Satoros1/lexoplay/releases/latest"

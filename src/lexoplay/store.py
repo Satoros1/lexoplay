@@ -5,7 +5,8 @@ games: профили игр (область диалога, способ зах
 outbox: запросы в Lexo, которые нельзя потерять (слова, конец сессии).
 vocab: словарные формы слов из карточек Lexo, для жёлтой подсветки в F3.
 lines: переведённые реплики по играм. Это и кеш (та же реплика второй раз переводится
-бесплатно и мгновенно), и история во вкладке «История».
+бесплатно и мгновенно), и история во вкладке «История» (по сессиям, см. timeline.py;
+star: реплика в избранном).
 words: слова, сохранённые через F3. Без привязки к Lexo живут только здесь, после
 привязки сами уходят в карточки.
 glossary: свои переводы имён и терминов для игры, их видит модель.
@@ -15,6 +16,7 @@ stats: по дням и играм: сколько реплик переведе
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import threading
 import time
@@ -143,6 +145,7 @@ class StoredLine:
     created_at: float
     seen_at: float
     hits: int
+    star: int = 0  # в избранном
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,6 +168,27 @@ class SavedWord:
         return self.lemma or self.selection
 
 
+def fold(s: str | None) -> str:
+    """Для поиска: без регистра (и для кириллицы, LIKE в SQLite умеет только латиницу) и ё = е."""
+    return (s or "").casefold().replace("ё", "е")
+
+
+_WORD_RE = re.compile(r"[A-Za-z]+(?:'[A-Za-z]+)?")
+
+
+def english_words(s: str | None) -> int:
+    """Сколько английских слов в реплике: для «прочитано слов»."""
+    return len(_WORD_RE.findall(s or ""))
+
+
+def _like(query: str) -> str:
+    q = fold(query).replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{q}%"
+
+
+_MATCH = "(lx_fold(source) LIKE ? ESCAPE '\\' OR lx_fold(translation) LIKE ? ESCAPE '\\' OR lx_fold(speaker) LIKE ? ESCAPE '\\')"
+
+
 def _rect_to(r: Rect | None) -> str | None:
     return json.dumps(r.to_dict()) if r else None
 
@@ -177,10 +201,15 @@ class Store:
     def __init__(self, path: Path | str) -> None:
         self._lock = threading.Lock()
         self._db = sqlite3.connect(str(path), check_same_thread=False)
+        self._db.create_function("lx_fold", 1, fold, deterministic=True)
+        self._db.create_function("lx_words", 1, english_words, deterministic=True)
         self._db.executescript(_SCHEMA)
         line_cols = {r[1] for r in self._db.execute("PRAGMA table_info(lines)").fetchall()}
         if "ver" not in line_cols:  # 0.4–0.5: версия перевода, старые строки = 0
             self._db.execute("ALTER TABLE lines ADD COLUMN ver INTEGER NOT NULL DEFAULT 0")
+        if "star" not in line_cols:  # до 0.6.2: избранного не было
+            self._db.execute("ALTER TABLE lines ADD COLUMN star INTEGER NOT NULL DEFAULT 0")
+        self._db.execute("CREATE INDEX IF NOT EXISTS words_exe_time ON words (exe, created_at)")
         cols = {r[1] for r in self._db.execute("PRAGMA table_info(games)").fetchall()}
         for col, ddl in (
             ("deck_mode", "TEXT NOT NULL DEFAULT 'game'"),
@@ -366,7 +395,7 @@ class Store:
             self._db.commit()
 
     # ------------------------------------------------------------------ lines: кеш и история
-    _LINE_COLS = "id, exe, norm, speaker, source, translation, lang, created_at, seen_at, hits"
+    _LINE_COLS = "id, exe, norm, speaker, source, translation, lang, created_at, seen_at, hits, star"
 
     def line_find(self, exe: str, lang: str, norm: str, min_ver: int = 0) -> StoredLine | None:
         with self._lock:
@@ -419,8 +448,8 @@ class Store:
             where.append("exe = ?")
             args.append(exe.lower())
         if query:
-            where.append("(source LIKE ? OR translation LIKE ? OR speaker LIKE ?)")
-            q = f"%{query}%"
+            where.append(_MATCH)
+            q = _like(query)
             args += [q, q, q]
         sql = f"SELECT {self._LINE_COLS} FROM lines"
         if where:
@@ -450,6 +479,106 @@ class Store:
             else:
                 self._db.execute("DELETE FROM lines")
             self._db.commit()
+
+    def line_star(self, line_id: int, on: bool) -> None:
+        with self._lock:
+            self._db.execute("UPDATE lines SET star = ? WHERE id = ?", (int(on), line_id))
+            self._db.commit()
+
+    # --- история по сессиям (timeline.py собирает сессии из этих событий)
+    def history_events(self, exe: str | None = None) -> list[tuple[str, float, str]]:
+        """[(exe, время, "line" | "word")]: когда видели реплику и когда сохранили слово."""
+        line_sql = "SELECT exe, seen_at, 'line' FROM lines"
+        word_sql = "SELECT LOWER(exe), created_at, 'word' FROM words WHERE exe IS NOT NULL AND exe != ''"
+        args: tuple = ()
+        if exe:
+            line_sql += " WHERE exe = ?"
+            word_sql += " AND LOWER(exe) = ?"
+            args = (exe.lower(), exe.lower())
+        with self._lock:
+            rows = self._db.execute(f"{line_sql} UNION ALL {word_sql}", args).fetchall()
+        return [(r[0], float(r[1]), r[2]) for r in rows]
+
+    def lines_matching(self, exe: str | None, query: str = "", starred: bool = False) -> list[tuple[str, float]]:
+        """[(exe, когда видели)] реплик под поиск или избранное: по ним видно, в каких сессиях искать."""
+        where, args = self._line_filter(exe, query, starred)
+        sql = "SELECT exe, seen_at FROM lines"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        with self._lock:
+            rows = self._db.execute(sql, args).fetchall()
+        return [(r[0], float(r[1])) for r in rows]
+
+    @staticmethod
+    def _line_filter(exe: str | None, query: str, starred: bool) -> tuple[list[str], list]:
+        where: list[str] = []
+        args: list = []
+        if exe:
+            where.append("exe = ?")
+            args.append(exe.lower())
+        if query:
+            where.append(_MATCH)
+            q = _like(query)
+            args += [q, q, q]
+        if starred:
+            where.append("star = 1")
+        return where, args
+
+    def lines_range(
+        self,
+        exe: str,
+        start: float,
+        end: float,
+        *,
+        query: str = "",
+        starred: bool = False,
+        limit: int = 40,
+    ) -> tuple[list[StoredLine], int]:
+        """Реплики сессии: последние limit по времени (от старых к новым) и сколько всего."""
+        where, args = self._line_filter(exe, query, starred)
+        where += ["seen_at >= ?", "seen_at <= ?"]
+        args += [start, end]
+        cond = " AND ".join(where)
+        with self._lock:
+            total = self._db.execute(f"SELECT COUNT(*) FROM lines WHERE {cond}", args).fetchone()[0]
+            rows = self._db.execute(
+                f"SELECT {self._LINE_COLS} FROM lines WHERE {cond} ORDER BY seen_at DESC, id DESC LIMIT ?",
+                (*args, limit),
+            ).fetchall()
+        return [StoredLine(*r) for r in reversed(rows)], int(total)
+
+    def words_range(self, exe: str, start: float, end: float) -> list[SavedWord]:
+        with self._lock:
+            rows = self._db.execute(
+                f"SELECT {self._WORD_COLS} FROM words WHERE LOWER(exe) = ? AND created_at >= ? AND created_at <= ? "
+                "ORDER BY created_at",
+                (exe.lower(), start, end),
+            ).fetchall()
+        return [SavedWord(*r[1:11], lexo=bool(r[11]), id=r[0]) for r in rows]
+
+    def line_times(self) -> list[float]:
+        """Когда реплики переводились впервые: для «когда ты играешь»."""
+        with self._lock:
+            rows = self._db.execute("SELECT created_at FROM lines").fetchall()
+        return [float(r[0]) for r in rows]
+
+    def words_read(self, exe: str | None = None) -> int:
+        """Сколько английских слов в переведённых репликах (каждая реплика один раз)."""
+        with self._lock:
+            if exe:
+                row = self._db.execute("SELECT COALESCE(SUM(lx_words(source)), 0) FROM lines WHERE exe = ?", (exe.lower(),)).fetchone()
+            else:
+                row = self._db.execute("SELECT COALESCE(SUM(lx_words(source)), 0) FROM lines").fetchone()
+        return int(row[0])
+
+    def speaker_counts(self, exe: str, limit: int = 3) -> list[tuple[str, int]]:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT speaker, COUNT(*) AS n FROM lines WHERE exe = ? AND speaker IS NOT NULL AND speaker != '' "
+                "GROUP BY speaker ORDER BY n DESC LIMIT ?",
+                (exe.lower(), limit),
+            ).fetchall()
+        return [(r[0], int(r[1])) for r in rows]
 
     def line_speakers(self, exe: str, limit: int = 30) -> list[str]:
         """Имена говорящих, которые встречались в игре: подсказка для глоссария."""
@@ -506,6 +635,15 @@ class Store:
         with self._lock:
             self._db.execute("DELETE FROM words WHERE id = ?", (word_id,))
             self._db.commit()
+
+    def words_pos(self) -> list[tuple[str, bool, int]]:
+        """[(часть речи как её назвала модель, несколько слов ли это, сколько)]."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT LOWER(COALESCE(pos, '')), INSTR(TRIM(COALESCE(lemma, selection)), ' ') > 0, COUNT(*) "
+                "FROM words GROUP BY 1, 2"
+            ).fetchall()
+        return [(r[0], bool(r[1]), int(r[2])) for r in rows]
 
     def words_count(self) -> tuple[int, int]:
         """(всего, ещё не в Lexo)."""
@@ -572,6 +710,15 @@ class Store:
                 (since,),
             ).fetchall()
         return [(r[0], int(r[1]), int(r[2]), int(r[3])) for r in rows]
+
+    def stats_best_day(self, metric: str) -> tuple[str, int] | None:
+        """Лучший день по реплик/слов/секунд: (день, сколько) или None."""
+        col = {"lines": "SUM(lines)", "words": "SUM(words)", "seconds": "SUM(seconds)"}[metric]
+        with self._lock:
+            row = self._db.execute(
+                f"SELECT day, {col} AS v FROM stats GROUP BY day HAVING v > 0 ORDER BY v DESC, day DESC LIMIT 1"
+            ).fetchone()
+        return (row[0], int(row[1])) if row else None
 
     def stats_totals(self) -> tuple[int, int, int]:
         with self._lock:

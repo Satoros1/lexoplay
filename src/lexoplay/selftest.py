@@ -757,6 +757,19 @@ def _qt_checks(out_dir: Path) -> None:
         store.save_game(Game("midnight.exe", "Midnight Station", deck_mode="deck", deck_id=5, deck_title="Слова из игр"))
         store.line_add("dr1_us.exe", "ru", "a", "Makoto", "I wonder what kind of school this is...", "Интересно, что это за школа...")
         store.line_add("dr1_us.exe", "ru", "b", "Monokuma", "Puhuhu! Welcome to despair!", "Пухуху! Добро пожаловать в отчаяние!")
+        # вчерашняя сессия: история показывает реплики по сессиям, одна в избранном
+        older = time.time() - 26 * 3600
+        for i, (sp, src, tr) in enumerate(
+            [
+                ("Kyoko", "Don't jump to conclusions. Look at the evidence first.", "Не спеши с выводами. Сначала посмотри на улики."),
+                ("Makoto", "My view became warped, twisted.", "Всё перед глазами поплыло и исказилось."),
+            ]
+        ):
+            store.line_add("dr1_us.exe", "ru", f"old{i}", sp, src, tr)
+            with store._lock:
+                store._db.execute("UPDATE lines SET created_at = ?, seen_at = ? WHERE norm = ?", (older + i * 90, older + i * 90, f"old{i}"))
+                store._db.commit()
+        store.line_star(store.lines_list(query="warped")[0].id, True)
         store.word_add(
             SavedWord("dr1_us.exe", "Danganronpa", "despair", "despair", "отчаяние, безысходность", "dɪˈspɛr", "noun",
                       "Puhuhu! Welcome to despair!", "Пухуху! Добро пожаловать в отчаяние!", created_at=time.time())
@@ -1083,6 +1096,10 @@ def run(report: str) -> int:
             "lexoplay.ocrscore",
             "lexoplay.wordlist_en",
             "lexoplay.ui.pages",
+            "lexoplay.ui.history_page",
+            "lexoplay.ui.progress_page",
+            "lexoplay.timeline",
+            "lexoplay.progress",
         ]
         if sys.platform == "win32":
             mods += ["lexoplay.win.input", "lexoplay.app", "lexoplay.win.winapi", "lexoplay.win.capture", "lexoplay.win.hooks", "lexoplay.win.ocr"]

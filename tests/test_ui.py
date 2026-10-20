@@ -408,23 +408,58 @@ def test_picker_draws_freeze_frame(qapp):
     assert got["region"].w > 0.8
 
 
-def test_history_page_lists_searches_and_deletes(window, qapp):
+def test_history_page_sessions_search_star_and_delete(window, qapp):
+    import time
+
     from PySide6.QtWidgets import QLabel
 
     w, ctl = window
+    old = time.time() - 3 * 86400  # позавчерашняя сессия
+    ctl.store.line_add("dr1_us.exe", "ru", "long ago", "Kyoko", "That's a contradiction.", "Вот и противоречие.")
+    with ctl.store._lock:  # noqa: SLF001
+        ctl.store._db.execute("UPDATE lines SET created_at = ?, seen_at = ? WHERE norm = 'long ago'", (old, old))  # noqa: SLF001
+        ctl.store._db.commit()  # noqa: SLF001
     ctl.store.line_add("dr1_us.exe", "ru", "hello there", "Makoto", "Hello there!", "Привет!")
     ctl.store.line_add("dr1_us.exe", "ru", "the class trial begins", None, "The class trial begins.", "Классный суд начинается.")
     w.show_page("history")
-    texts = [lbl.text() for lbl in w.history.box.findChildren(QLabel)]
-    assert "Привет!" in texts and "Классный суд начинается." in texts
-    assert any("Makoto" in t for t in texts)
-    w.history.search.setText("trial")
-    w.history._reset()  # noqa: SLF001  без ожидания таймера поиска
-    texts = [lbl.text() for lbl in w.history.box.findChildren(QLabel)]
-    assert "Классный суд начинается." in texts and "Привет!" not in texts
+    page = w.history
+
+    def texts():
+        return " | ".join(lbl.text() for c in page.cards for lbl in c.findChildren(QLabel) if lbl.isVisibleTo(c))
+
+    assert len(page.cards) == 2 and page.cards[0].opened and not page.cards[1].opened  # свежая сессия раскрыта
+    assert "2 сессии" in page.summary.text() and "3 реплики" in page.summary.text()
+    assert "Привет!" in texts() and "Makoto" in texts() and "Вот и противоречие." in texts()  # у свёрнутой видно последнюю
+    page.cards[1].toggle()
+    assert page.cards[1].opened and "That" in texts()
+    # поиск: без регистра и по-русски тоже, с подсветкой
+    page.search.setText("СУД")
+    page._reset()  # noqa: SLF001  без ожидания таймера поиска
+    assert len(page.cards) == 1 and "Нашлось 1 реплика в 1 сессии" == page.summary.text()
+    assert "Классный " in texts() and "Привет!" not in texts() and "background-color" in texts()
+    # избранное
     line = ctl.store.lines_list("dr1_us.exe", "trial")[0]
-    w.history._delete(line.id)  # noqa: SLF001
-    assert ctl.store.lines_count() == 1
+    page.star_line(line, True)
+    page.search.setText("")
+    page.star_btn.setChecked(True)
+    assert len(page.cards) == 1 and "В избранном 1 реплика" == page.summary.text()
+    page.star_line(ctl.store.lines_list("dr1_us.exe", "trial")[0], False)
+    assert not page.cards and "пусто" in " ".join(lbl.text() for lbl in page.findChildren(QLabel))
+    page.star_btn.setChecked(False)
+    page.delete_line(line.id)
+    assert ctl.store.lines_count() == 2 and "2 реплики" in page.summary.text()
+
+
+def test_session_copy_text():
+    from lexoplay.store import StoredLine
+    from lexoplay.timeline import split_sessions
+    from lexoplay.ui.history_page import rich, session_text
+
+    s = split_sessions([("dr1_us.exe", 1_790_000_000.0, "line")])[0]
+    line = StoredLine(1, "dr1_us.exe", "n", "Makoto", "Hello!", "Привет!", "ru", 1.0, 1.0, 0)
+    text = session_text("Danganronpa", s, [line])
+    assert text.startswith("Danganronpa, ") and text.endswith("Makoto: Hello!\nПривет!")
+    assert rich("Ёлка <b>", "елк") == '<span style="background-color:#FBE3A0">Ёлк</span>а &lt;b&gt;'
 
 
 def test_words_page_and_export(window, qapp, tmp_path):
@@ -542,6 +577,31 @@ def test_progress_page_shows_today_week_and_goal(window, qapp):
     assert "реплик 12" in page.week_note.text()
     page._goal(3)  # noqa: SLF001
     assert ctl.settings.daily_goal == 3 and page.words_note.text() == "цель выполнена"
+    # переключатели: календарь и неделя по словам, игры за всё время
+    page.metric_seg.buttons["words"].click()
+    assert page.chart.measure == "words" and page.calendar.measure == "words"
+    page.period_seg.buttons["all"].click()
+    from PySide6.QtWidgets import QLabel
+
+    games = [lbl.text() for lbl in page.games_box.findChildren(QLabel)]
+    assert "Danganronpa" in games
+    records = [lbl.text() for lbl in page.records_box.findChildren(QLabel)]
+    assert "12 реплик" in records
+    page.grab()  # отрисовка календаря, часов и полос без ошибок
+
+
+def test_hours_peak_and_activity_levels():
+    from lexoplay.ui.progress_page import ActivityMap, best_window, hours_note
+
+    hours = [0] * 24
+    hours[23], hours[0], hours[1] = 10, 12, 8  # через полночь
+    hours[15] = 3
+    assert best_window(hours) == (23, 2)
+    assert hours_note(hours).startswith("Чаще всего ты играешь ночью, с 23:00 до 2:00")
+    assert hours_note([0] * 24).startswith("Покажется")
+    th = ActivityMap.thresholds([0, 1, 2, 3, 4, 50, 0])
+    m = ActivityMap.__new__(ActivityMap)
+    assert m.level_color(0, th) == "#ECEAE4" and m.level_color(50, th) == "#0F6E56"
 
 
 def test_word_layer_explain_panel_and_clicks_stay_out_of_the_game(qapp):

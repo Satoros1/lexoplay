@@ -120,6 +120,20 @@ QPushButton#danger {{ color: {DANGER}; }}
 QPushButton#chipButton {{ border: none; border-radius: 11px; padding: 3px 10px; min-height: 16px; font-size: 9pt;
                          background: #ECEAE4; color: {INK}; }}
 QPushButton#chipButton:hover {{ background: {GREEN_SOFT}; }}
+QPushButton#filterChip {{ border: 1px solid {BORDER_STRONG}; border-radius: 8px; padding: 7px 12px; min-height: 22px;
+                         background: {CARD}; font-weight: 600; }}
+QPushButton#filterChip:checked {{ background: {GREEN_SOFT}; border-color: {GREEN}; color: {GREEN_INK}; }}
+QPushButton#segment {{ border: none; border-radius: 7px; padding: 4px 11px; min-height: 16px; font-size: 9pt;
+                      background: transparent; color: {MUTED}; }}
+QPushButton#segment:hover {{ background: #ECEAE4; }}
+QPushButton#segment:checked {{ background: {CARD}; color: {INK}; border: 1px solid {BORDER}; }}
+QFrame#segments {{ background: #ECEAE4; border: none; border-radius: 9px; }}
+QFrame#sessionHead {{ background: transparent; border: none; }}
+QFrame#sessionHead:hover {{ background: #FAF9F6; border-radius: 12px; }}
+QFrame#sessionBody {{ background: transparent; border: none; border-top: 1px solid #EEECE6; }}
+QLabel#wordChip {{ background: {GREEN_SOFT}; color: {GREEN_INK}; border-radius: 9px; padding: 2px 9px;
+                  font-size: 9pt; font-weight: 600; }}
+QLabel#recordValue {{ font-size: 11.5pt; font-weight: 700; }}
 QFrame#updateBar {{ background: {GREEN_SOFT}; border: none; border-bottom: 1px solid #BFE0D4; }}
 QLabel#preview {{ background: #1E2433; border-radius: 6px; padding: 2px; }}
 QPushButton#link {{ border: none; color: {GREEN}; padding: 2px 0; font-weight: 700; text-align: left; }}
@@ -134,6 +148,8 @@ QPushButton#hotkey[capturing="true"] {{ border: 2px solid {GREEN}; color: {GREEN
 QToolButton {{ border: 1px solid {BORDER_STRONG}; border-radius: 8px; padding: 6px; background: transparent; }}
 QToolButton:hover {{ background: #EFEDE6; }}
 QToolButton::menu-indicator {{ image: none; width: 0; }}
+QToolButton#rowTool {{ border: none; padding: 4px; border-radius: 6px; }}
+QToolButton#rowTool:hover {{ background: #EFEDE6; }}
 QLineEdit {{ background: {CARD}; border: 1px solid {BORDER_STRONG}; border-radius: 8px; padding: 8px 10px;
             font-size: 10.5pt; selection-background-color: {GREEN_SOFT}; selection-color: {INK}; }}
 QLineEdit:focus {{ border: 2px solid {GREEN}; padding: 7px 9px; }}
@@ -213,18 +229,23 @@ _ICONS = {
     "download": '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/>',
     "search": '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>',
     "progress": '<path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/>',
+    "star": '<path d="M11.5 2.6a.6.6 0 0 1 1 0l2.6 5.3a1.5 1.5 0 0 0 1.1.8l5.8.8a.6.6 0 0 1 .3 1l-4.2 4.1'
+    'a1.5 1.5 0 0 0-.4 1.3l1 5.8a.6.6 0 0 1-.8.6l-5.2-2.7a1.5 1.5 0 0 0-1.4 0l-5.2 2.7a.6.6 0 0 1-.8-.6l1-5.8'
+    'a1.5 1.5 0 0 0-.4-1.3L1.7 10.5a.6.6 0 0 1 .3-1l5.8-.8a1.5 1.5 0 0 0 1.1-.8z"/>',
+    "chevron-down": '<path d="m6 9 6 6 6-6"/>',
+    "chevron-up": '<path d="m18 15-6-6-6 6"/>',
 }
 
 
-def icon_svg(name: str, color: str = INK, size: int = 24, stroke: float = 2.0) -> str:
+def icon_svg(name: str, color: str = INK, size: int = 24, stroke: float = 2.0, fill: str = "none") -> str:
     body = _ICONS[name]
     return (
-        f'<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" viewBox="0 0 24 24" fill="none" '
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" viewBox="0 0 24 24" fill="{fill}" '
         f'stroke="{color}" stroke-width="{stroke}" stroke-linecap="round" stroke-linejoin="round">{body}</svg>'
     )
 
 
-def icon(name: str, color: str = INK, size: int = 18) -> QIcon:
+def icon(name: str, color: str = INK, size: int = 18, fill: str = "none") -> QIcon:
     from PySide6.QtSvg import QSvgRenderer
 
     out = QIcon()
@@ -232,7 +253,7 @@ def icon(name: str, color: str = INK, size: int = 18) -> QIcon:
         px = size * scale
         pm = QPixmap(px, px)
         pm.fill(Qt.GlobalColor.transparent)
-        renderer = QSvgRenderer(QByteArray(icon_svg(name, color).encode()))
+        renderer = QSvgRenderer(QByteArray(icon_svg(name, color, fill=fill).encode()))
         p = QPainter(pm)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         renderer.render(p, QRectF(0, 0, px, px))

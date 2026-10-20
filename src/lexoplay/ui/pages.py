@@ -1,7 +1,6 @@
-"""Вкладки «История» и «Слова» и окно словаря игры.
+"""Вкладка «Слова», окно словаря игры и общие мелочи для вкладок.
 
-История: все переведённые реплики, поиск, копирование. Удалённый перевод при следующем
-F2 переведётся заново: так исправляется неудачный перевод.
+История по сессиям живёт в history_page.py, прогресс в progress_page.py.
 Слова: сохранённые через F3. Без Lexo живут здесь и выгружаются в Anki или таблицу;
 после привязки к Lexo сами уходят в карточки.
 """
@@ -14,19 +13,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Protocol
 
-from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer
-from PySide6.QtGui import QColor, QFont, QGuiApplication, QPainter, QPainterPath, QPen
+from PySide6.QtCore import QSize, Qt
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
-    QComboBox,
     QDialog,
     QFileDialog,
     QFrame,
     QHBoxLayout,
-    QLabel,
     QLineEdit,
     QMenu,
-    QMessageBox,
-    QProgressBar,
     QPushButton,
     QSizePolicy,
     QToolButton,
@@ -37,7 +32,7 @@ from PySide6.QtWidgets import (
 from lexoplay.store import Game, SavedWord, Store, StoredLine
 from lexoplay.ui import theme
 from lexoplay.ui.theme import icon
-from lexoplay.ui.widgets import button, card, card_list, clear, label, page_shell, setting_row
+from lexoplay.ui.widgets import button, card, clear, label, page_shell
 
 PAGE = 100
 MONTHS = ["янв", "фев", "мар", "апр", "мая", "июн", "июл", "авг", "сен", "окт", "ноя", "дек"]
@@ -85,149 +80,6 @@ def selectable(lbl):  # type: ignore[no-untyped-def]
 
 def copy_text(text: str) -> None:
     QGuiApplication.clipboard().setText(text)
-
-
-# ------------------------------------------------------------------ История
-class HistoryPage(QWidget):
-    def __init__(self, ctl: Ctl) -> None:
-        super().__init__()
-        self.ctl = ctl
-        self._shown = PAGE
-        scroll, lay, actions = page_shell(
-            "История",
-            "Все переведённые реплики. Повтор той же реплики берётся отсюда: сразу и бесплатно. "
-            "Удали неудачный перевод, и в следующий раз реплика переведётся заново.",
-        )
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.addWidget(scroll)
-
-        bar = QHBoxLayout()
-        bar.setSpacing(8)
-        self.game = QComboBox()
-        self.game.setMinimumContentsLength(16)
-        self.game.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
-        self.game.activated.connect(lambda _i: self._reset())
-        self.search = QLineEdit()
-        self.search.setPlaceholderText("Поиск по тексту и переводу")
-        self.search.setClearButtonEnabled(True)
-        self.search.addAction(icon("search", theme.MUTED, 16), QLineEdit.ActionPosition.LeadingPosition)
-        self._search_timer = QTimer(self)
-        self._search_timer.setSingleShot(True)
-        self._search_timer.setInterval(250)
-        self._search_timer.timeout.connect(self._reset)
-        self.search.textChanged.connect(lambda _t: self._search_timer.start())
-        bar.addWidget(self.game)
-        bar.addWidget(self.search, 1)
-        clear_btn = button(" Очистить", None, "trash")
-        clear_btn.clicked.connect(self._clear)
-        bar.addWidget(clear_btn)
-        lay.addLayout(bar)
-
-        self.count = label("", "muted")
-        lay.addWidget(self.count)
-        self.box, self.box_lay = card()
-        self.box_lay.setContentsMargins(0, 4, 0, 4)
-        self.box_lay.setSpacing(0)
-        lay.addWidget(self.box)
-        self.more = button("Показать ещё")
-        self.more.clicked.connect(self._more)
-        lay.addWidget(self.more, 0, Qt.AlignmentFlag.AlignHCenter)
-        lay.addStretch(1)
-
-    def _games(self) -> None:
-        current = self.game.currentData()
-        self.game.clear()
-        self.game.addItem("Все игры", None)
-        for g in self.ctl.store.list_games():
-            self.game.addItem(g.title, g.exe)
-        idx = self.game.findData(current)
-        self.game.setCurrentIndex(max(0, idx))
-
-    def refresh(self) -> None:
-        self._games()
-        self._render()
-
-    def _reset(self) -> None:
-        self._shown = PAGE
-        self._render()
-
-    def _more(self) -> None:
-        self._shown += PAGE
-        self._render()
-
-    def _render(self) -> None:
-        exe = self.game.currentData()
-        query = self.search.text().strip()
-        rows = self.ctl.history(exe, query, self._shown + 1, 0)
-        has_more = len(rows) > self._shown
-        rows = rows[: self._shown]
-        clear(self.box_lay)
-        titles = {g.exe: g.title for g in self.ctl.store.list_games()}
-        total = self.ctl.store.lines_count(exe)
-        self.count.setText(f"Реплик в истории: {total}" if total else "")
-        if not rows:
-            text = (
-                "Ничего не нашлось."
-                if query
-                else "Здесь появятся переведённые реплики. В игре нажми F2 на реплике, и она окажется тут."
-            )
-            empty = QWidget()
-            el = QVBoxLayout(empty)
-            el.setContentsMargins(18, 14, 18, 14)
-            el.addWidget(label(text, "muted", wrap=True))
-            self.box_lay.addWidget(empty)
-        for i, line in enumerate(rows):
-            self.box_lay.addWidget(self._row(line, titles.get(line.exe, line.exe), show_game=exe is None, last=i == len(rows) - 1))
-        self.more.setVisible(has_more)
-
-    def _row(self, line: StoredLine, game: str, *, show_game: bool, last: bool) -> QFrame:
-        row = QFrame()
-        row.setObjectName("rowLast" if last else "row")
-        lay = QHBoxLayout(row)
-        lay.setContentsMargins(18, 10, 10, 10)
-        lay.setSpacing(10)
-        col = QVBoxLayout()
-        col.setSpacing(3)
-        meta = []
-        if show_game:
-            meta.append(game)
-        if line.speaker:
-            meta.append(line.speaker)
-        meta.append(when(line.seen_at))
-        if line.hits:
-            meta.append(f"повторов: {line.hits}")
-        col.addWidget(label(" · ".join(meta), "version"))
-        col.addWidget(selectable(label(line.source, "muted", wrap=True)))
-        tr = selectable(label(line.translation, "title", wrap=True))
-        col.addWidget(tr)
-        lay.addLayout(col, 1)
-        tools = QVBoxLayout()
-        tools.setSpacing(4)
-        tools.addWidget(tool("copy", "Скопировать перевод", lambda: copy_text(line.translation)))
-        tools.addWidget(
-            tool("trash", "Удалить: в следующий раз реплика переведётся заново", lambda: self._delete(line.id))
-        )
-        tools.addStretch(1)
-        lay.addLayout(tools)
-        return row
-
-    def _delete(self, line_id: int) -> None:
-        self.ctl.delete_line(line_id)
-        self._render()
-
-    def _clear(self) -> None:
-        exe = self.game.currentData()
-        what = f"историю игры «{self.game.currentText()}»" if exe else "всю историю"
-        ok = QMessageBox.question(
-            self,
-            "LexoPlay",
-            f"Удалить {what}? Реплики тогда будут переводиться заново.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        )
-        if ok == QMessageBox.StandardButton.Yes:
-            self.ctl.clear_history(exe)
-            self._reset()
 
 
 # ------------------------------------------------------------------ Слова
@@ -434,189 +286,3 @@ class GlossaryDialog(QDialog):
     def _delete(self, term: str) -> None:
         self.ctl.delete_glossary(self.game.exe, term)
         self._render()
-
-
-# ------------------------------------------------------------------ Прогресс
-class WeekChart(QWidget):
-    """Реплики за последние 7 дней: столбики, подпись только у сегодняшнего, остальное в подсказке."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.days: list = []  # progress.DayStat
-        self.setMinimumHeight(170)
-        self.setMouseTracking(True)
-        self._cols: list[tuple[QRectF, object]] = []
-
-    def set_days(self, days: list) -> None:  # type: ignore[no-untyped-def]
-        self.days = days
-        self.update()
-
-    def paintEvent(self, _e) -> None:  # type: ignore[no-untyped-def]  # noqa: N802
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        w, h = float(self.width()), float(self.height())
-        top, bottom = 22.0, h - 26.0
-        base = bottom
-        p.setPen(QPen(QColor("#E2DFD7"), 1))
-        p.drawLine(QPointF(0, base + 0.5), QPointF(w, base + 0.5))
-        self._cols = []
-        if not self.days:
-            p.end()
-            return
-        peak = max(1, max(d.lines for d in self.days))
-        slot = w / len(self.days)
-        bar_w = min(24.0, slot * 0.5)
-        f = theme.ui_font(8.5)
-        fb = theme.ui_font(8.5, QFont.Weight.DemiBold)
-        for i, d in enumerate(self.days):
-            cx = slot * i + slot / 2
-            today = i == len(self.days) - 1
-            hgt = (bottom - top) * d.lines / peak if d.lines else 0.0
-            if hgt:
-                hgt = max(hgt, 4.0)
-                r = QRectF(cx - bar_w / 2, base - hgt, bar_w, hgt)
-                path = QPainterPath()
-                rad = min(4.0, hgt / 2, bar_w / 2)
-                path.moveTo(r.left(), r.bottom())
-                path.lineTo(r.left(), r.top() + rad)
-                path.quadTo(r.left(), r.top(), r.left() + rad, r.top())
-                path.lineTo(r.right() - rad, r.top())
-                path.quadTo(r.right(), r.top(), r.right(), r.top() + rad)
-                path.lineTo(r.right(), r.bottom())
-                path.closeSubpath()
-                p.fillPath(path, QColor(theme.GREEN))
-            hit = QRectF(slot * i, top - 18, slot, bottom - top + 44)
-            self._cols.append((hit, d))
-            p.setFont(fb if today else f)
-            p.setPen(QColor(theme.INK if today else theme.MUTED))
-            p.drawText(QRectF(slot * i, base + 6, slot, 18), int(Qt.AlignmentFlag.AlignHCenter), "сегодня" if today else d.label)
-            if today and d.lines:
-                p.setPen(QColor(theme.INK))
-                p.drawText(QRectF(cx - 40, base - hgt - 18, 80, 16), int(Qt.AlignmentFlag.AlignHCenter), str(d.lines))
-        p.end()
-
-    def mouseMoveEvent(self, e) -> None:  # type: ignore[no-untyped-def]  # noqa: N802
-        from PySide6.QtWidgets import QToolTip
-
-        from lexoplay.progress import minutes
-
-        for hit, d in self._cols:
-            if hit.contains(e.position()):
-                text = (
-                    f"{d.label}, {d.day.day} {MONTHS[d.day.month - 1]}: реплик {d.lines}, "
-                    f"новых слов {d.words}, в игре {minutes(d.seconds)}"
-                )
-                QToolTip.showText(e.globalPosition().toPoint(), text, self)
-                return
-        QToolTip.hideText()
-
-
-def stat_tile(caption: str) -> tuple[QFrame, QLabel, QLabel]:
-    frame, lay = card()
-    lay.setContentsMargins(16, 14, 16, 14)
-    lay.setSpacing(2)
-    value = label("0", "statValue")
-    lay.addWidget(value)
-    lay.addWidget(label(caption, "muted"))
-    extra = label("", "version", wrap=True)
-    lay.addWidget(extra)
-    return frame, value, extra
-
-
-class ProgressPage(QWidget):
-    def __init__(self, ctl) -> None:  # type: ignore[no-untyped-def]
-        super().__init__()
-        self.ctl = ctl
-        scroll, lay, _actions = page_shell("Прогресс", "Сколько ты читаешь и учишь в играх: по дням, по играм и всего.")
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.addWidget(scroll)
-
-        tiles = QHBoxLayout()
-        tiles.setSpacing(10)
-        t1, self.lines_today, self.lines_note = stat_tile("Реплик сегодня")
-        t2, self.words_today, self.words_note = stat_tile("Новых слов сегодня")
-        t3, self.time_today, self.time_note = stat_tile("В игре сегодня")
-        t4, self.streak, self.streak_note = stat_tile("Дней подряд")
-        for t in (t1, t2, t3, t4):
-            tiles.addWidget(t, 1)
-        lay.addLayout(tiles)
-        self.goal_bar = QProgressBar()
-        self.goal_bar.setTextVisible(False)
-        t2.layout().addWidget(self.goal_bar)
-
-        lay.addWidget(label("ЦЕЛЬ НА ДЕНЬ", "section"))
-        goal_box, gl = card_list()
-        self.goal = QComboBox()
-        current = int(getattr(ctl.settings, "daily_goal", 10))
-        for n in sorted({0, 5, 10, 15, 20, 30, 50, current}):
-            self.goal.addItem("Без цели" if n == 0 else f"{n} слов", n)
-        self.goal.setCurrentIndex(max(0, self.goal.findData(current)))
-        self.goal.setMinimumWidth(150)
-        self.goal.activated.connect(lambda _i: self._goal(int(self.goal.currentData())))
-        gl.addWidget(
-            setting_row(
-                "Новых слов в день",
-                "Слова, сохранённые в игре клавишами F3 и F7. Когда цель выполнена, LexoPlay скажет",
-                self.goal,
-                last=True,
-            )
-        )
-        lay.addWidget(goal_box)
-
-        lay.addWidget(label("РЕПЛИКИ ЗА НЕДЕЛЮ", "section"))
-        chart_box, cl = card()
-        self.chart = WeekChart()
-        cl.addWidget(self.chart)
-        self.week_note = label("", "muted")
-        cl.addWidget(self.week_note)
-        lay.addWidget(chart_box)
-
-        lay.addWidget(label("ИГРЫ ЗА НЕДЕЛЮ", "section"))
-        self.games_box, self.games_lay = card_list()
-        lay.addWidget(self.games_box)
-        self.totals = label("", "muted", wrap=True)
-        lay.addWidget(self.totals)
-        lay.addStretch(1)
-
-    def _goal(self, value: int) -> None:
-        self.ctl.settings.daily_goal = value
-        self.ctl.settings_changed()
-        self.refresh()
-
-    def refresh(self) -> None:
-        from lexoplay.progress import minutes
-
-        pr = self.ctl.progress()
-        t = pr.today
-        self.lines_today.setText(str(t.lines))
-        self.words_today.setText(f"{t.words} из {pr.goal}" if pr.goal else str(t.words))
-        self.goal_bar.setVisible(pr.goal > 0)
-        self.goal_bar.setRange(0, max(1, pr.goal))
-        self.goal_bar.setValue(min(t.words, pr.goal))
-        self.words_note.setText("цель выполнена" if pr.goal_done else "")
-        self.time_today.setText(minutes(t.seconds))
-        self.streak.setText(str(pr.streak))
-        self.chart.set_days(pr.week)
-        week_lines = sum(d.lines for d in pr.week)
-        week_words = sum(d.words for d in pr.week)
-        week_time = sum(d.seconds for d in pr.week)
-        self.week_note.setText(f"За 7 дней: реплик {week_lines}, новых слов {week_words}, в игре {minutes(week_time)}")
-        clear(self.games_lay)
-        titles = {g.exe: g.title for g in self.ctl.store.list_games()}
-        if not pr.by_game:
-            empty = QWidget()
-            el = QVBoxLayout(empty)
-            el.setContentsMargins(18, 14, 18, 14)
-            el.addWidget(label("На этой неделе игр ещё не было.", "muted"))
-            self.games_lay.addWidget(empty)
-        for i, (exe, lines, words, seconds) in enumerate(pr.by_game):
-            row = QFrame()
-            row.setObjectName("rowLast" if i == len(pr.by_game) - 1 else "row")
-            rl = QHBoxLayout(row)
-            rl.setContentsMargins(18, 10, 18, 10)
-            rl.addWidget(label(titles.get(exe, exe), "title"), 1)
-            rl.addWidget(label(f"реплик {lines} · слов {words} · {minutes(seconds)}", "muted"))
-            self.games_lay.addWidget(row)
-        lines, words, seconds = pr.totals
-        self.totals.setText(f"Всего с LexoPlay: реплик {lines}, новых слов {words}, в играх {minutes(seconds)}.")
