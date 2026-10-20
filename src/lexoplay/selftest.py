@@ -497,13 +497,35 @@ def _app_flow(out_dir: Path) -> Callable[[], tuple[str, object]]:
             line = CurrentLine(game.exe, ocr, Utterance(None, "This place feels eerie after dark."), None, time.time())
             app._open_words(game, session, line)
             info["layer_open"] = app.word_layer.is_open
-            app._on_word_selected([3])
+            info["shield_on"] = app.shield.running
+            # настоящий клик по слову «eerie»: хук забирает его у игры, слово выбирает слой
+            import ctypes
+
+            from lexoplay.win import winapi as _wa
+
+            u32 = ctypes.windll.user32
+            raw_seen: list[str] = []
+            app.input.pressed.connect(raw_seen.append)
+            lr = _wa.window_rect(int(app.word_layer.winId()))
+            v = app.word_ctx.views[3] if app.word_ctx else None
+            if v is not None:
+                u32.SetCursorPos(int(lr.x + (v.rect.x + v.rect.w / 2) * lr.w), int(lr.y + (v.rect.y + v.rect.h / 2) * lr.h))
+                pump(lambda: False, 0.1)
+                blocked = app.shield.blocked
+                u32.mouse_event(0x0002, 0, 0, 0, 0)
+                u32.mouse_event(0x0004, 0, 0, 0, 0)
+                info["click_picked"] = pump(lambda: app.word_layer.selection == [3], 2)
+                info["click_blocked"] = app.shield.blocked - blocked
+                info["click_seen_by_raw_input"] = list(raw_seen)
+            if app.word_layer.selection != [3]:
+                app._on_word_selected([3])  # чтобы проверить остальное
             info["card_ready"] = pump(lambda: bool(app.word_ctx and app.word_ctx.card and app.word_ctx.card.phase == "ready"))
             app.word_layer.grab().save(str(out_dir / "word-layer.png"))
             app._on_word_add()
             info["card_saved"] = bool(app.word_ctx and app.word_ctx.card and app.word_ctx.card.phase == "saved")
             info["card_sent"] = pump(lambda: any(c[1] == "/desktop/cards" for c in calls) and app.outbox.counts() == (0, 0))
             app.word_layer.finish("esc")
+            info["shield_off"] = pump(lambda: not app.shield.running, 2)
             app.sessions.end_all()
             info["session_end_sent"] = pump(lambda: any(c[1].endswith("/end") for c in calls))
             # окно LexoPlay на настоящем App (контроллер тот же, что в игре)
@@ -525,6 +547,11 @@ def _app_flow(out_dir: Path) -> Callable[[], tuple[str, object]]:
         ok = (
             info.get("vocab_loaded")
             and info.get("layer_open")
+            and info.get("shield_on")
+            and info.get("click_picked")
+            and info.get("click_blocked") == 2
+            and info.get("click_seen_by_raw_input") == []
+            and info.get("shield_off")
             and info.get("card_ready")
             and info.get("card_saved")
             and info.get("card_sent")
@@ -1126,6 +1153,155 @@ def _qt_checks(out_dir: Path) -> None:
 
     _check("cursor_unlock_in_word_mode", cursor_unlock)
 
+    def shield() -> tuple[str, object]:
+        """Режим слов: клики над слоем и клавиши режима забирает хук. До игры (Raw Input,
+        GetAsyncKeyState, горячие клавиши, окно) они не доходят, а режим слов на них отвечает."""
+        import ctypes
+
+        from PySide6.QtCore import QPointF
+        from PySide6.QtWidgets import QWidget as _W
+
+        from lexoplay.geometry import Rect as _R
+        from lexoplay.hotkeys import parse as _parse
+        from lexoplay.ui.word_layer import WordLayer
+        from lexoplay.win import input as rawin
+        from lexoplay.win import winapi as _wa
+        from lexoplay.win.hooks import HotkeyManager
+        from lexoplay.win.llhooks import InputShield, to_local
+        from lexoplay.wordmode import WordView
+
+        u32 = ctypes.windll.user32
+
+        def pump(sec: float) -> None:
+            end = time.time() + sec
+            while time.time() < end:
+                app.processEvents()
+                time.sleep(0.005)
+
+        def native(h: int) -> None:
+            _wa.exclude_from_capture(h)
+            _wa.set_no_activate(h)
+
+        class Game(_W):
+            clicks = 0
+
+            def mousePressEvent(self, _e):  # type: ignore[no-untyped-def]  # noqa: N802
+                self.clicks += 1
+
+        game = Game()
+        game.setWindowTitle("LexoPlay shield test")
+        game.setGeometry(200, 200, 600, 400)
+        game.show()
+        pump(0.3)
+        _wa.force_foreground(int(game.winId()))
+        pump(0.3)
+        iw = rawin.InputWatch()  # так ввод видит игра на Raw Input
+        raw: list[str] = []
+        raw_buttons: list[int] = []
+        iw.pressed.connect(raw.append)
+        iw.button.connect(raw_buttons.append)
+        iw.start()
+        hm = HotkeyManager()  # через RegisterHotKey забранный Enter тоже не должен сработать
+        hot: list[str] = []
+        hm.triggered.connect(hot.append)
+        hm.define("words_enter", _parse("Enter"), "words")
+        hm.define("words_esc", _parse("Escape"), "words")
+        hm.set_group("words", True)
+        keys = hm.group_keys("words")
+        layer = WordLayer(on_native=native)
+        views = [WordView(0, "eerie", _R(0.1, 0.75, 0.15, 0.08)), WordView(1, "dark", _R(0.3, 0.75, 0.12, 0.08))]
+        layer.open(_R(200, 200, 600, 400), _R(0.05, 0.7, 0.9, 0.25), views)
+        pump(0.2)
+        sh = InputShield()
+        picked: list[list[int]] = []
+        done: list[str] = []
+        actions: list[str] = []
+        buttons: list[int] = []
+        layer.selected.connect(picked.append)
+        layer.finished.connect(done.append)
+        layer.finished.connect(lambda _r: sh.stop())
+        sh.action.connect(actions.append)
+        sh.button.connect(buttons.append)
+        lh = int(layer.winId())
+
+        def on_click(vk: int, x: int, y: int, _mods: int) -> None:
+            layer.click(QPointF(*to_local(lh, x, y, layer.devicePixelRatioF())), right=vk == 2)
+
+        sh.clicked.connect(on_click)
+        info: dict[str, object] = {"keys": sorted(keys.values()), "started": sh.start(lh, keys, set()), "failed": sh.failed}
+        r = _wa.window_rect(lh)
+        v0 = views[0]
+        u32.SetCursorPos(int(r.x + (v0.rect.x + v0.rect.w / 2) * r.w), int(r.y + (v0.rect.y + v0.rect.h / 2) * r.h))
+        pump(0.1)
+        u32.mouse_event(0x0002, 0, 0, 0, 0)  # левая вниз над словом
+        pump(0.05)
+        info["async_down_while_held"] = bool(u32.GetAsyncKeyState(0x01) & 0x8000)  # так кнопку видят игры с опросом
+        u32.mouse_event(0x0004, 0, 0, 0, 0)
+        pump(0.3)
+        info["picked"] = list(picked)
+        info["raw_after_click"] = list(raw)
+        u32.mouse_event(0x0800, 0, 0, 120, 0)  # колесо
+        u32.mouse_event(0x0080, 0, 0, 2, 0)  # Mouse5 вниз и вверх
+        u32.mouse_event(0x0100, 0, 0, 2, 0)
+        pump(0.3)
+        info["buttons"] = list(buttons)
+        info["raw_after_wheel_x2"] = list(raw)
+        info["raw_buttons"] = list(raw_buttons)
+        u32.keybd_event(0x0D, 0, 0, 0)  # Enter режима слов
+        u32.keybd_event(0x0D, 0, 2, 0)
+        pump(0.3)
+        info["actions"] = list(actions)
+        info["hotkeys_fired"] = list(hot)
+        info["raw_after_enter"] = list(raw)
+        u32.keybd_event(0x87, 0, 0, 0)  # F24: не клавиша режима, её получает игра
+        u32.keybd_event(0x87, 0, 2, 0)
+        pump(0.3)
+        info["raw_after_f24"] = list(raw)
+        u32.SetCursorPos(int(r.x + r.w * 0.5), int(r.y + r.h * 0.2))  # пустое место
+        pump(0.1)
+        u32.mouse_event(0x0002, 0, 0, 0, 0)
+        pump(0.2)
+        info["closed_on_press"] = done == ["outside"]
+        u32.mouse_event(0x0004, 0, 0, 0, 0)  # отпускание уже после закрытия режима: тоже не игре
+        pump(0.3)
+        info["raw_after_close"] = list(raw)
+        info["hooks_removed"] = not sh.running
+        info["blocked"] = sh.blocked
+        info["game_clicks_during_mode"] = game.clicks
+        u32.mouse_event(0x0002, 0, 0, 0, 0)  # режим закрыт: клик снова игры
+        u32.mouse_event(0x0004, 0, 0, 0, 0)
+        pump(0.3)
+        info["raw_after_mode"] = list(raw)
+        info["game_clicks_after_mode"] = game.clicks
+        sh.close()
+        hm.clear()
+        iw.close()
+        layer.close()
+        game.close()
+        pump(0.1)
+        ok = (
+            info["started"]
+            and info["picked"] == [[0]]
+            and not info["async_down_while_held"]
+            and info["raw_after_click"] == []
+            and info["raw_after_wheel_x2"] == []
+            and info["raw_buttons"] == []
+            and info["buttons"] == [6]
+            and info["actions"] == ["words_enter"]
+            and info["hotkeys_fired"] == []
+            and info["raw_after_enter"] == []
+            and info["raw_after_f24"] == ["key"]
+            and info["closed_on_press"]
+            and info["raw_after_close"] == ["key"]
+            and info["hooks_removed"]
+            and info["game_clicks_during_mode"] == 0
+            and "mouse" in info["raw_after_mode"]  # type: ignore[operator]
+            and info["game_clicks_after_mode"] >= 1  # type: ignore[operator]
+        )
+        return ("ok" if ok else "fail"), info
+
+    _check("word_mode_keeps_input_from_game", shield)
+
     def no_activate() -> tuple[str, object]:
         import ctypes
 
@@ -1217,9 +1393,10 @@ def run(report: str) -> int:
             "lexoplay.ui.progress_page",
             "lexoplay.timeline",
             "lexoplay.progress",
+            "lexoplay.shield",
         ]
         if sys.platform == "win32":
-            mods += ["lexoplay.win.input", "lexoplay.app", "lexoplay.win.winapi", "lexoplay.win.capture", "lexoplay.win.hooks", "lexoplay.win.ocr"]
+            mods += ["lexoplay.win.input", "lexoplay.win.llhooks", "lexoplay.app", "lexoplay.win.winapi", "lexoplay.win.capture", "lexoplay.win.hooks", "lexoplay.win.ocr"]
         for m in mods:
             importlib.import_module(m)
         import anthropic  # noqa: F401

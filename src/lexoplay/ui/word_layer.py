@@ -1,13 +1,13 @@
 """Режим слов (F3) и разбор реплики (F7): подчёркивания под словами, карточка слова, разбор.
 
-Отдельное окно поверх игры размером с display_rect. Пока режим открыт, оно ловит все
-клики над игрой (слегка затемняет её): клик по слову, по кнопкам или по пустому месту
-до игры не доходит, поэтому реплика не пропустится случайно. Клик по пустому месту
-просто закрывает режим, колесо мыши тоже не листает текст в игре.
+Отдельное окно поверх игры размером с display_rect. Пока режим открыт, оно лежит над
+всей игрой (слегка затемняет её) и отвечает на все клики над ней: по слову, по кнопкам,
+по пустому месту (это просто закрывает режим). Сами клики и колесо до игры не доходят:
+их ещё до окон забирает хук (win/llhooks.py) и передаёт сюда в click(). Иначе игры,
+которые читают мышь через Raw Input или DirectInput, пропускали бы реплику.
 
 Фокус окно не берёт (WS_EX_NOACTIVATE): полноэкранные игры, потеряв фокус, сворачиваются.
-Поэтому Esc, Enter и стрелки приходят не сюда, а глобальными клавишами через App, пока
-режим открыт. Стрелками слова выбираются и без мыши: это выручает, когда игра держит
+Поэтому Esc, Enter и стрелки приходят не сюда, а через App (тот же хук), пока режим открыт. Стрелками слова выбираются и без мыши: это выручает, когда игра держит
 курсор у себя (тогда App ещё и забирает фокус на время режима, см. CursorGuard).
 
 Перед тем как спрятаться, окно рисует пустой кадр: иначе при следующем F3 Windows на
@@ -270,14 +270,23 @@ class WordLayer(QWidget):
             self.update()
 
     def mousePressEvent(self, e: QMouseEvent) -> None:  # noqa: N802
+        e.accept()  # клик дальше в игру не идёт (если хук не стоит: см. click)
+        if e.button() in (Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton):
+            shift = bool(e.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+            self.click(e.position(), right=e.button() == Qt.MouseButton.RightButton, shift=shift)
+        elif self._open:
+            self._idle.start()
+
+    def click(self, pos: QPointF, *, right: bool = False, shift: bool = False) -> None:
+        """Клик по слою в точке pos (логические пиксели окна).
+
+        Обычно приходит от хука: он забрал клик у игры, и до окна тот уже не дошёл."""
+        if not self._open:
+            return
         self._idle.start()
-        e.accept()  # клик дальше в игру не идёт
-        if e.button() == Qt.MouseButton.RightButton:
+        if right:
             self.finish("outside")
             return
-        if e.button() != Qt.MouseButton.LeftButton:
-            return
-        pos = e.position()
         if self._explain_btn and self._explain_btn.contains(pos):
             self.explain_clicked.emit()
             return
@@ -303,7 +312,6 @@ class WordLayer(QWidget):
             return
         self._explain_open = False  # слово важнее: разбор спрячется, F7 вернёт
         self._pick.stop()
-        shift = bool(e.modifiers() & Qt.KeyboardModifier.ShiftModifier)
         sel = selection_range(self._anchor, idx) if shift else [idx]
         if not shift:
             self._anchor = idx

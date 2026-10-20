@@ -91,10 +91,11 @@ src/lexoplay/
   vocab.py        слова из Lexo для жёлтой подсветки
   words.py        служебные слова, формы слова (did → do), обрезка пунктуации
   wordmode.py     F3 без Qt: какие слова кликабельны, фраза до 5 слов, где поставить карточку
+  shield.py       F3: какие клики и клавиши забрать у игры, пока открыт режим слов (хуки в win/llhooks.py)
   store.py        SQLite: профили игр, outbox, vocab
   bg.py           фоновый поток с asyncio: захват, OCR, сеть
   app.py          трей, хоткеи, события окон, F2, F3, связка с Lexo
-  win/            ctypes: окна и Magpie, PrintWindow/mss, winrt OCR, RegisterHotKey, WinEventHook
+  win/            ctypes: окна и Magpie, PrintWindow/mss, winrt OCR, RegisterHotKey, WinEventHook, хуки ввода
   games.py        что считать игрой (браузеры и лаунчеры нет), список окон
   report.py       zip-отчёт: лог, настройки, игры, кадры отладки (без секретов)
   ui/             окно LexoPlay (main_window), оверлей, режим слов, выделение области, выбор окна, клавиши

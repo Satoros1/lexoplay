@@ -33,7 +33,7 @@ from datetime import UTC, date, datetime
 from typing import Any
 
 from PIL import Image
-from PySide6.QtCore import QObject, QTimer, QUrl, Signal
+from PySide6.QtCore import QObject, QPointF, QTimer, QUrl, Signal
 from PySide6.QtGui import QAction, QDesktopServices, QFont, QGuiApplication, QImage
 from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon, QWidget
 
@@ -55,7 +55,7 @@ from lexoplay.games import NOT_GAMES, WindowInfo, clean_title, is_game_exe
 from lexoplay.geometry import Rect
 from lexoplay.history import LineCache
 from lexoplay.cursorguard import CursorGuard
-from lexoplay.hotkeys import MOD_NOREPEAT, Hotkey, HotkeyError, parse
+from lexoplay.hotkeys import MOD_NOREPEAT, MOD_SHIFT, Hotkey, HotkeyError, parse
 from lexoplay.lexo import Account, Deck, GameRef, LexoClient, LexoError, LexoOffline, Sense, Usage
 from lexoplay.lookup import (
     AnthropicLookup,
@@ -94,6 +94,7 @@ from lexoplay.watch import LineWatcher
 from lexoplay.win import capture, winapi
 from lexoplay.win.hooks import HotkeyManager, WindowEvents
 from lexoplay.win.input import InputWatch
+from lexoplay.win.llhooks import InputShield, to_local
 from lexoplay.win.ocr import INSTALL_HINT, OcrUnavailable, WinOcr
 from lexoplay.wordmode import CardState, ExplainRow, ExplainState, WordView, build_views, match_phrase, selected_text
 
@@ -326,6 +327,12 @@ class App(QObject):
         self.hotkeys.mouse_changed.connect(self._sync_input)
         self.hotkeys.failed.connect(self._on_hotkey_failed)
         self._define_hotkeys()
+        # режим слов: клики над слоем и клавиши режима забираем у игры ещё до окон (win/llhooks.py),
+        # иначе игры на Raw Input и DirectInput получают их тоже и пропускают реплику
+        self.shield = InputShield()
+        self.shield.clicked.connect(self._on_shield_click)
+        self.shield.button.connect(self._on_mouse_button)
+        self.shield.action.connect(self._on_hotkey)
 
         self.events = WindowEvents()
         self.events.foreground.connect(self._on_foreground)
@@ -400,6 +407,7 @@ class App(QObject):
         except Exception:
             log.info("httpx-клиент не закрылся за 2 с")
         self.hotkeys.clear()
+        self.shield.close()
         self.input.close()
         self.events.close()
         self.tray.hide()
@@ -1966,6 +1974,7 @@ class App(QObject):
         self.word_layer.retranslating = False
         self.word_layer.open(self.display, game.region, views, strip=self.overlay.strip_rect())
         self.hotkeys.set_group("words", not self._hotkeys_paused)
+        self._shield_on()
         self._sync_ignored_keys()
         self._cursor_guard.reset()
         self._cursor_timer.start()
@@ -2536,8 +2545,23 @@ class App(QObject):
         if reason not in ("focus", "switch", "closed"):
             self._return_to_game()
 
+    def _shield_on(self) -> None:
+        """Режим слов открыт: клики над слоем и клавиши режима больше не доходят до игры."""
+        keys = {} if self._hotkeys_paused else self.hotkeys.group_keys("words")
+        if not self.shield.start(int(self.word_layer.winId()), keys, WORDS_REPEAT):
+            log.warning("хуки режима слов не встали (%s): клики могут дойти до игры", self.shield.failed)
+
+    def _on_shield_click(self, vk: int, x: int, y: int, mods: int) -> None:
+        """Клик над слоем слов, который хук не пустил в игру: отвечаем на него сами."""
+        layer = self.word_layer
+        if not layer.is_open:
+            return
+        lx, ly = to_local(int(layer.winId()), x, y, layer.devicePixelRatioF())
+        layer.click(QPointF(lx, ly), right=vk == 2, shift=bool(mods & MOD_SHIFT))
+
     def _on_words_finished(self, reason: str) -> None:
         self.word_ctx = None
+        self.shield.stop()
         self.hotkeys.set_group("words", False)
         self._sync_ignored_keys()
         self._cursor_timer.stop()

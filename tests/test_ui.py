@@ -7,7 +7,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 QtWidgets = pytest.importorskip("PySide6.QtWidgets")
 
-from PySide6.QtCore import QPoint, Qt  # noqa: E402
+from PySide6.QtCore import QPoint, QPointF, Qt  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
 
 from lexoplay.geometry import Rect  # noqa: E402
@@ -172,6 +172,34 @@ def test_word_layer_click_select_and_add(qapp):
     QTest.keyClick(layer, Qt.Key.Key_Escape)
     assert done == ["esc"] and not layer.is_open
     assert img.width() == 1000
+    layer.close()
+    layer.deleteLater()
+    qapp.processEvents()
+
+
+def test_word_layer_clicks_from_hook(qapp):
+    """Клики, которые хук забрал у игры, приходят в click(): тот же выбор, что и мышью по окну."""
+    res = OcrResult((_ocr_line("This place feels eerie after dark."),))
+    views = build_views(res)
+    layer = WordLayer()
+    picked, done = [], []
+    layer.selected.connect(picked.append)
+    layer.finished.connect(done.append)
+    layer.click(QPointF(10, 10))  # режим ещё закрыт: ничего
+    assert done == [] and picked == []
+    layer.open(Rect(0, 0, 1000, 700), Rect(0.05, 0.8, 0.9, 0.15), views)
+    qapp.processEvents()
+
+    def center(v):  # type: ignore[no-untyped-def]
+        return QPointF((v.rect.x + v.rect.w / 2) * layer.width(), (v.rect.y + v.rect.h / 2) * layer.height())
+
+    layer.click(center(views[3]))
+    layer.click(center(views[4]), shift=True)
+    assert picked == [[3], [3, 4]]
+    layer.click(center(views[3]), right=True)  # правая кнопка закрывает режим, как и раньше
+    assert done == ["outside"] and not layer.is_open
+    layer.click(center(views[2]))  # запоздалый клик после закрытия
+    assert picked == [[3], [3, 4]]
     layer.close()
     layer.deleteLater()
     qapp.processEvents()

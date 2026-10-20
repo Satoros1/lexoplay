@@ -81,6 +81,18 @@ class HotkeyManager(QObject):
     def mouse_vks(self) -> set[int]:
         return {hk.vk for hk in self._mouse.values()}
 
+    def group_keys(self, group: str) -> dict[tuple[int, int], str]:
+        """Клавиши группы, которые сейчас действуют: (vk, модификаторы без MOD_NOREPEAT) -> имя.
+
+        Для хука режима слов: клавиша, которую не удалось зарегистрировать (занята), сюда не
+        попадает, и хук её не забирает, как и раньше."""
+        out: dict[tuple[int, int], str] = {}
+        for name in self._active:
+            hk, g = self._defs[name]
+            if g == group and not hk.mouse:
+                out[(hk.vk, hk.mods & ~MOD_NOREPEAT)] = name
+        return out
+
     def mouse_pressed(self, vk: int, mods: int) -> bool:
         """Нажата кнопка мыши (из Raw Input) при зажатых mods: сработал ли хоткей."""
         for name, hk in self._mouse.items():
