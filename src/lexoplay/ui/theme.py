@@ -131,6 +131,7 @@ QFrame#segments {{ background: #ECEAE4; border: none; border-radius: 9px; }}
 QFrame#sessionHead {{ background: transparent; border: none; }}
 QFrame#sessionHead:hover {{ background: #FAF9F6; border-radius: 12px; }}
 QFrame#sessionBody {{ background: transparent; border: none; border-top: 1px solid #EEECE6; }}
+QFrame#explainBox {{ background: #F7F6F2; border: 1px solid #ECEAE3; border-radius: 10px; }}
 QLabel#wordChip {{ background: {GREEN_SOFT}; color: {GREEN_INK}; border-radius: 9px; padding: 2px 9px;
                   font-size: 9pt; font-weight: 600; }}
 QLabel#recordValue {{ font-size: 11.5pt; font-weight: 700; }}
@@ -233,6 +234,8 @@ _ICONS = {
     'a1.5 1.5 0 0 0-.4 1.3l1 5.8a.6.6 0 0 1-.8.6l-5.2-2.7a1.5 1.5 0 0 0-1.4 0l-5.2 2.7a.6.6 0 0 1-.8-.6l1-5.8'
     'a1.5 1.5 0 0 0-.4-1.3L1.7 10.5a.6.6 0 0 1 .3-1l5.8-.8a1.5 1.5 0 0 0 1.1-.8z"/>',
     "chevron-down": '<path d="m6 9 6 6 6-6"/>',
+    "lightbulb": '<path d="M15 14c.2-1 .7-1.7 1.5-2.5 1-.9 1.5-2.2 1.5-3.5A6 6 0 0 0 6 8c0 1 .2 2.2 1.5 3.5.7.7 1.3 1.5 1.5 2.5"/>'
+    '<path d="M9 18h6"/><path d="M10 22h4"/>',
     "chevron-up": '<path d="m18 15-6-6-6 6"/>',
 }
 

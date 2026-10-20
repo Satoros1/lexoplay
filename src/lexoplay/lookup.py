@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -55,6 +56,29 @@ def parse_sense(raw: str, selection: str) -> Sense:
         senses=senses,
         marked_translation=no_dash(str(data.get("marked_translation") or "")),
     )
+
+
+def sense_json(s: Sense) -> str:
+    """Значение слова для кеша на диске (in_deck не храним: он меняется)."""
+    return json.dumps(
+        {"lemma": s.lemma, "pos": s.pos, "ipa": s.ipa, "senses": list(s.senses), "marked_translation": s.marked_translation},
+        ensure_ascii=False,
+    )
+
+
+def sense_from_json(raw: str, selection: str) -> Sense | None:
+    try:
+        return parse_sense(raw, selection)
+    except (ValueError, json.JSONDecodeError):
+        return None
+
+
+def lookup_key(model: str, target_lang: str, source_lang: str, selection: str, sentence: str, translation: str | None) -> str:
+    """Ключ кеша значения: то же слово в той же реплике (с тем же переводом) той же моделью."""
+    from lexoplay.dedupe import normalize_text
+
+    raw = "|".join((model, target_lang, source_lang, selection.strip().lower(), normalize_text(sentence), translation or ""))
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
 
 
 class AnthropicLookup:
@@ -201,6 +225,21 @@ def build_explain_prompt(
         sentence=sentence.replace('"', "'")[:1500],
         translation_line=f'Its translation shown to the player: "{translation}"\n' if translation else "",
     )
+
+
+def explanation_json(exp: Explanation) -> str:
+    """Разбор для хранения на диске (таблица explains)."""
+    return json.dumps(
+        {"items": [{"phrase": i.phrase, "meaning": i.meaning, "note": i.note} for i in exp.items], "summary": exp.summary},
+        ensure_ascii=False,
+    )
+
+
+def explanation_from_json(raw: str) -> Explanation | None:
+    try:
+        return parse_explanation(raw)
+    except (ValueError, json.JSONDecodeError):
+        return None
 
 
 def parse_explanation(raw: str) -> Explanation:

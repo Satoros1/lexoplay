@@ -122,3 +122,51 @@ def test_records_streaks_parts_of_speech_and_words_read(tmp_path):
     assert pos_breakdown(Store(tmp_path / "empty")) == []
     top = store.speaker_counts("dr1_us.exe", 1)
     assert top == [("Kyoko", 4)]
+
+
+def test_explains_lookups_and_speaker_share(tmp_path):
+    from lexoplay.lexo import Sense
+    from lexoplay.lookup import (
+        Explanation,
+        ExplainItem,
+        explanation_from_json,
+        explanation_json,
+        lookup_key,
+        sense_from_json,
+        sense_json,
+    )
+
+    store = Store(tmp_path / "db")
+    exp = Explanation((ExplainItem("jump to conclusions", "спешить с выводами", "идиома"),), "Спокойный совет.")
+    store.explain_put("DR1_US.exe", "ru", "dont jump", explanation_json(exp))
+    assert explanation_from_json(store.explain_get("dr1_us.exe", "ru", "dont jump")) == exp
+    assert store.explained("dr1_us.exe", "ru", ["dont jump", "other"]) == {"dont jump"}
+    assert store.explained("dr1_us.exe", "ru", []) == set()
+    store.explain_delete("dr1_us.exe", "ru", "dont jump")
+    assert store.explain_get("dr1_us.exe", "ru", "dont jump") is None
+    assert explanation_from_json("не json") is None
+
+    sense = Sense("despair", "noun", "dɪˈspɛr", ["отчаяние", "безысходность"], "Добро пожаловать в **отчаяние**!")
+    key = lookup_key("claude-haiku-5-5", "ru", "en", "Despair ", "Welcome to despair!", "Добро пожаловать в отчаяние!")
+    assert key == lookup_key("claude-haiku-5-5", "ru", "en", "despair", "welcome to DESPAIR", "Добро пожаловать в отчаяние!")
+    assert key != lookup_key("claude-haiku-5-5", "ru", "en", "despair", "Welcome to despair!", None)
+    store.lookup_put(key, sense_json(sense))
+    back = sense_from_json(store.lookup_get(key), "despair")
+    assert back is not None and back.senses == sense.senses and back.marked_translation == sense.marked_translation
+    for i in range(5):  # старые значения вытесняются
+        store.lookup_put(f"k{i}", sense_json(sense), keep=3)
+    assert store.lookup_get(key) is None and store.lookup_get("k4") is not None
+
+    for i in range(20):
+        store.line_add("vn.exe", "ru", f"n{i}", "Mira" if i < 2 else None, f"Line {i}", f"Реплика {i}")
+    assert store.speaker_share("vn.exe") == (2, 20)
+
+
+def test_retranslate_from_history_keeps_line_in_its_session(tmp_path):
+    store = Store(tmp_path / "db")
+    _line(store, "dr1_us.exe", "old", "My view became warped.", "Мой... исказился,", T0)
+    store.line_retranslated("dr1_us.exe", "ru", "old", "Всё поплыло.", 3, touch=False)
+    line = store.lines_list()[0]
+    assert line.translation == "Всё поплыло." and line.seen_at == T0
+    store.line_retranslated("dr1_us.exe", "ru", "old", "Всё поплыло и исказилось.", 3)
+    assert store.lines_list()[0].seen_at > T0  # из игры («Перевести иначе» в F3): реплика свежая

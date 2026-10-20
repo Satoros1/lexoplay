@@ -56,7 +56,15 @@ from lexoplay.geometry import Rect
 from lexoplay.history import LineCache
 from lexoplay.hotkeys import HotkeyError, parse
 from lexoplay.lexo import Account, Deck, GameRef, LexoClient, LexoError, LexoOffline, Sense, Usage
-from lexoplay.lookup import AnthropicLookup, Explanation
+from lexoplay.lookup import (
+    AnthropicLookup,
+    Explanation,
+    explanation_from_json,
+    explanation_json,
+    lookup_key,
+    sense_from_json,
+    sense_json,
+)
 from lexoplay.ocr_model import OcrResult
 from lexoplay.ocrscore import Quality
 from lexoplay.outbox import Outbox
@@ -1971,8 +1979,8 @@ class App(QObject):
             if pipeline is not None:
                 pipeline.memory.replace(rec)
             self.cache.retranslated(ctx.exe, self.settings.target_lang, rec)
+            self._forget_explain(ctx.exe, self._explain_norm(line))  # разбор говорил о старом переводе
             line.record = rec
-            self._explain_cache.pop((ctx.exe, normalize_text(line.sentence)), None)
             ctx.explain = None
             if model:
                 self.own_usage.add("line", res.usage, model)
@@ -1995,8 +2003,8 @@ class App(QObject):
         if ctx.explain is not None and ctx.explain.phase == "ready":
             self.word_layer.set_explain(ctx.explain)
             return
-        key = (ctx.exe, normalize_text(ctx.line.sentence))
-        cached = self._explain_cache.get(key)
+        norm = self._explain_norm(ctx.line)
+        cached = self._saved_explain(ctx.exe, norm)
         if cached is not None:
             ctx.explain = self._explain_state(ctx, cached)
             self.word_layer.set_explain(ctx.explain)
@@ -2013,28 +2021,65 @@ class App(QObject):
         self.word_layer.set_explain(ctx.explain)
 
         def finished(result: Any, err: BaseException | None) -> None:
+            if err is None:
+                self._remember_explain(ctx.exe, norm, result)  # за разбор уже заплачено: сохраняем, даже если слова закрыли
             if self.word_ctx is not ctx:
                 return
             if err is None:
-                self._explain_cache[key] = result
-                if len(self._explain_cache) > 100:
-                    self._explain_cache.pop(next(iter(self._explain_cache)))
                 ctx.explain = self._explain_state(ctx, result)
             else:
-                if isinstance(err, LexoError) and err.status in (401, 426):
-                    self._on_lexo_error(err)
-                note = (
-                    err.message if isinstance(err, LexoError) else
-                    "Нет связи с Lexo." if isinstance(err, LexoOffline) else
-                    str(err) if isinstance(err, TranslationError) else "Не получилось разобрать реплику."
-                )
-                if not isinstance(err, (LexoError, LexoOffline, TranslationError)):
-                    log.error("разбор реплики упал", exc_info=err)
-                ctx.explain = ExplainState("error", note=note)
+                ctx.explain = ExplainState("error", note=self._explain_error(err))
             if self.word_layer.is_open:
                 self.word_layer.set_explain(ctx.explain, show=self.word_layer.explain_open)
 
         self.run_bg(self._explain_call(ctx), finished)
+
+    def _explain_error(self, err: BaseException) -> str:
+        if isinstance(err, LexoError) and err.status in (401, 426):
+            self._on_lexo_error(err)
+        if not isinstance(err, (LexoError, LexoOffline, TranslationError)):
+            log.error("разбор реплики упал", exc_info=err)
+        return (
+            err.message if isinstance(err, LexoError) else
+            "Нет связи с Lexo." if isinstance(err, LexoOffline) else
+            str(err) if isinstance(err, TranslationError) else "Не получилось разобрать реплику."
+        )
+
+    @staticmethod
+    def _explain_norm(line: CurrentLine) -> str:
+        """Ключ разбора: как реплика записана в историю."""
+        return line.record.norm if line.record is not None and line.record.norm else normalize_text(line.sentence)
+
+    def _saved_explain(self, exe: str, norm: str) -> Explanation | None:
+        """Разбор из памяти, а после перезапуска с диска."""
+        got = self._explain_cache.get((exe, norm))
+        if got is None:
+            try:
+                raw = self.store.explain_get(exe, self.settings.target_lang, norm)
+            except Exception:
+                log.exception("разборы на диске недоступны")
+                raw = None
+            got = explanation_from_json(raw) if raw else None
+            if got is not None:
+                self._remember_explain(exe, norm, got, save=False)
+        return got
+
+    def _remember_explain(self, exe: str, norm: str, exp: Explanation, *, save: bool = True) -> None:
+        self._explain_cache[(exe, norm)] = exp
+        if len(self._explain_cache) > 100:
+            self._explain_cache.pop(next(iter(self._explain_cache)))
+        if save:
+            try:
+                self.store.explain_put(exe, self.settings.target_lang, norm, explanation_json(exp))
+            except Exception:
+                log.exception("разбор не сохранился на диск")
+
+    def _forget_explain(self, exe: str, norm: str) -> None:
+        self._explain_cache.pop((exe, norm), None)
+        try:
+            self.store.explain_delete(exe, self.settings.target_lang, norm)
+        except Exception:
+            log.exception("разбор не удалился с диска")
 
     async def _explain_call(self, ctx: WordCtx) -> Explanation:
         line = ctx.line
@@ -2042,29 +2087,133 @@ class App(QObject):
         speaker = line.utterance.speaker if line.utterance else (record.speaker if record else None)
         translation = record.translation if record else None
         pipeline = self.pipelines.get(ctx.exe)
-        norm = normalize_text(line.sentence)
-        earlier = [r for r in (pipeline.memory.context(6) if pipeline else []) if r.norm != norm]
+        norm = self._explain_norm(line)
+        earlier = [(r.speaker, r.source, r.translation) for r in (pipeline.memory.context(6) if pipeline else []) if r.norm != norm]
+        return await self._explain_fetch(ctx.exe, ctx.title, ctx.session_id, line.sentence, speaker, translation, earlier)
+
+    async def _explain_fetch(
+        self,
+        exe: str,
+        title: str,
+        session_id: str,
+        sentence: str,
+        speaker: str | None,
+        translation: str | None,
+        earlier: list[tuple[str | None, str, str]],
+    ) -> Explanation:
+        """Разбор реплики: через Lexo, а без привязки своим ключом."""
         if self.client.linked or self.own_lookup is None:
             return await self.client.explain(
-                session_id=ctx.session_id,
-                game=GameRef(ctx.title, ctx.exe),
-                sentence=line.sentence,
+                session_id=session_id,
+                game=GameRef(title, exe),
+                sentence=sentence,
                 speaker=speaker,
                 translation=translation,
-                context=[{"speaker": r.speaker, "source": r.source, "translation": r.translation} for r in earlier],
+                context=[{"speaker": s, "source": src, "translation": tr} for s, src, tr in earlier],
             )
         lookup = self.own_lookup
         result = await lookup.explain(
-            sentence=line.sentence,
+            sentence=sentence,
             speaker=speaker,
             translation=translation,
-            game=ctx.title,
-            context=[(r.speaker, r.source) for r in earlier],
+            game=title,
+            context=[(s, src) for s, src, _tr in earlier],
             target_lang=self.settings.target_lang,
             source_lang=self.settings.source_lang,
         )
         self.own_usage.add("explain", lookup.last_usage, self.settings.model)
         return result
+
+    # ------------------------------------------------------------------ история: разбор, «перевести иначе», слова
+    def _earlier_in_history(self, line: StoredLine, limit: int) -> list[StoredLine]:
+        """Реплики игры прямо перед этой (за час): контекст для разбора и перевода из истории."""
+        return self.store.lines_range(line.exe, line.seen_at - 3600, line.seen_at - 0.001, limit=limit)[0]
+
+    def line_explanation(self, line: StoredLine) -> Explanation | None:
+        return self._saved_explain(line.exe, line.norm)
+
+    def explain_history_line(self, line: StoredLine, done: Callable[[Explanation | None, str | None], None]) -> None:
+        """Кнопка «Разбор» в истории: сохранённый разбор сразу, иначе запрос (Lexo или свой ключ)."""
+        saved = self.line_explanation(line)
+        if saved is not None:
+            done(saved, None)
+            return
+        if not self.client.linked and self.own_lookup is None:
+            done(None, "Для разбора привяжи ПК к Lexo или вставь свой ключ Anthropic во вкладке «Ещё».")
+            return
+        game = self.store.get_game(line.exe)
+        title = game.title if game else line.exe
+        earlier = [(r.speaker, r.source, r.translation) for r in self._earlier_in_history(line, 6)]
+
+        def finished(result: Any, err: BaseException | None) -> None:
+            if err is None:
+                self._remember_explain(line.exe, line.norm, result)
+                done(result, None)
+            else:
+                done(None, self._explain_error(err))
+
+        coro = self._explain_fetch(line.exe, title, str(uuid.uuid4()), line.source, line.speaker, line.translation, earlier)
+        self.run_bg(coro, finished)
+
+    def retranslate_history_line(self, line: StoredLine, done: Callable[[str | None, str | None], None]) -> None:
+        """«Перевести иначе» из истории: моделью посильнее, с репликами перед этой и прошлым вариантом."""
+        translator = self._better_translator()
+        if translator is None:
+            done(None, "Перевести заново можно с привязкой к Lexo или своим ключом Anthropic.")
+            return
+        game = self.store.get_game(line.exe)
+        earlier = self._earlier_in_history(line, max(4, self.settings.context_lines))
+        req = TranslateRequest(
+            text=line.source,
+            speaker=line.speaker,
+            game=game.title if game else line.exe,
+            target_lang=self.settings.target_lang,
+            source_lang=self.settings.source_lang,
+            context=tuple(ContextLine(r.speaker, r.source, r.translation) for r in earlier),
+            glossary=self.store.glossary(line.exe),
+            line_id=str(uuid.uuid4()),
+            session_id=str(uuid.uuid4()),
+            game_exe=line.exe,
+            previous=line.translation,
+        )
+        model = self._better_model if isinstance(translator, AnthropicTranslator) else ""
+
+        def finished(res: Any, err: BaseException | None) -> None:
+            if err is not None:
+                if not isinstance(err, TranslationError):
+                    log.error("перевести иначе из истории: упало", exc_info=err)
+                done(None, str(err) if isinstance(err, TranslationError) else "Не получилось перевести заново.")
+                return
+            rec = LineRecord(req.line_id, line.speaker, res.source, res.translation, line.norm)
+            self.cache.retranslated(line.exe, self.settings.target_lang, rec, touch=False)
+            pipeline = self.pipelines.get(line.exe)
+            if pipeline is not None:
+                pipeline.memory.replace(rec)
+            self._forget_explain(line.exe, line.norm)
+            if model:
+                self.own_usage.add("line", res.usage, model)
+            log.info("перевели иначе из истории: %r -> %r", line.translation, res.translation)
+            done(res.translation, None)
+
+        self.run_bg(translator.translate(req), finished)
+
+    def save_phrase(self, line: StoredLine, phrase: str, meaning: str) -> str:
+        """«+» в разборе из истории: фраза в слова. Возвращает, куда ушла."""
+        game = self.store.get_game(line.exe)
+        title = game.title if game else line.exe
+        linked = self.client.linked
+        session_id = str(uuid.uuid4())
+        self._store_word(
+            line.exe, title, session_id,
+            selection=phrase, lemma=phrase, translation=meaning, ipa=None, pos=None,
+            sentence=line.source, sentence_translation=line.translation,
+        )
+        if linked:  # у карточек сервер ждёт сессию: короткая, закрываем сразу, как при отправке слов после привязки
+            self.outbox.enqueue(
+                "end",
+                {"session_id": session_id, "duration_s": 0, "lines_count": 0, "ended_at": datetime.now(UTC).isoformat()},
+            )
+        return "Lexo" if linked else "«Слова»"
 
     def _explain_state(self, ctx: WordCtx, exp: Explanation) -> ExplainState:
         rows = [ExplainRow(i.phrase, i.meaning, i.note, match_phrase(ctx.views, i.phrase)) for i in exp.items]
@@ -2097,19 +2246,43 @@ class App(QObject):
     ) -> None:
         """Сохранить слово или фразу из реплики: локально всегда, в Lexo, если ПК привязан."""
         record = ctx.line.record
-        game = self.store.get_game(ctx.exe)
+        self._store_word(
+            ctx.exe, ctx.title, ctx.session_id,
+            selection=selection, lemma=lemma, translation=translation, ipa=ipa, pos=pos,
+            sentence=ctx.line.sentence, sentence_translation=record.translation if record else None, marked=marked,
+        )
+        self.sessions.word_added(ctx.exe)
+        ctx.views = build_views(ctx.line.ocr, self.vocab.known)
+        self.word_layer.set_views(ctx.views)
+
+    def _store_word(
+        self,
+        exe: str,
+        title: str,
+        session_id: str,
+        *,
+        selection: str,
+        lemma: str | None,
+        translation: str | None,
+        ipa: str | None,
+        pos: str | None,
+        sentence: str,
+        sentence_translation: str | None,
+        marked: str | None = None,
+    ) -> None:
+        game = self.store.get_game(exe)
         linked = self.client.linked
         self.store.word_add(
             SavedWord(
-                exe=ctx.exe,
-                game=ctx.title,
+                exe=exe,
+                game=title,
                 selection=selection[:80],
                 lemma=(lemma or None) and lemma[:80],
                 translation=(translation or None) and translation[:200],
                 ipa=ipa,
                 pos=pos,
-                sentence=ctx.line.sentence[:2000],
-                sentence_translation=record.translation if record else None,
+                sentence=sentence[:2000],
+                sentence_translation=sentence_translation,
                 created_at=time.time(),
                 lexo=linked,
             )
@@ -2120,11 +2293,11 @@ class App(QObject):
                 "card",
                 {
                     "idempotency_key": str(uuid.uuid4()),
-                    "session_id": ctx.session_id,
-                    "game": GameRef(ctx.title, ctx.exe).to_json(),
+                    "session_id": session_id,
+                    "game": GameRef(title, exe).to_json(),
                     "selection": selection[:80],
-                    "sentence": ctx.line.sentence[:2000],
-                    "sentence_translation": record.translation if record else None,
+                    "sentence": sentence[:2000],
+                    "sentence_translation": sentence_translation,
                     "lemma": (lemma or None) and lemma[:80],
                     "translation": (translation or None) and translation[:200],
                     "marked_translation": marked,
@@ -2133,10 +2306,7 @@ class App(QObject):
                 },
             )
         self.vocab.add(lemma or selection)
-        self.sessions.word_added(ctx.exe)
-        self._stat(ctx.exe, words=1)
-        ctx.views = build_views(ctx.line.ocr, self.vocab.known)
-        self.word_layer.set_views(ctx.views)
+        self._stat(exe, words=1)
 
     def _set_card(self, card: CardState | None) -> None:
         if self.word_ctx is not None:
@@ -2160,15 +2330,24 @@ class App(QObject):
                 sentence_translation=translation,
             )
         lookup = self.own_lookup
-        sense = await lookup.lookup(
-            selection=selection,
-            sentence=ctx.line.sentence,
-            sentence_translation=translation,
-            target_lang=self.settings.target_lang,
-            source_lang=self.settings.source_lang,
-        )
+        s = self.settings
+        key = lookup_key(s.model, s.target_lang, s.source_lang, selection, ctx.line.sentence, translation)
+        raw = self.store.lookup_get(key)
+        sense = sense_from_json(raw, selection) if raw else None
+        if sense is None:
+            sense = await lookup.lookup(
+                selection=selection,
+                sentence=ctx.line.sentence,
+                sentence_translation=translation,
+                target_lang=s.target_lang,
+                source_lang=s.source_lang,
+            )
+            self.own_usage.add("word", lookup.last_usage, s.model)
+            try:
+                self.store.lookup_put(key, sense_json(sense))
+            except Exception:
+                log.exception("значение слова не сохранилось на диск")
         known = self.vocab.known(sense.lemma) or self.vocab.known(selection)
-        self.own_usage.add("word", lookup.last_usage, self.settings.model)
         return Sense(sense.lemma, sense.pos, sense.ipa, list(sense.senses), sense.marked_translation, in_deck=known)
 
     def _on_word_selected(self, indices: list) -> None:

@@ -273,6 +273,14 @@ class GamesPage(QWidget):
             state = label(f"{g.exe} · окно диалога ещё не выделено: открой игру и нажми {self.ctl.settings.hotkeys.translate}", "warn")
         state.setWordWrap(True)
         col.addWidget(state)
+        if g.region is not None and g.name_region is None and self._names_missing(g.exe):
+            tip = label(
+                "Совет: имя говорящего почти не читается. Если в игре оно в отдельной рамке, нажми «Выделить окно "
+                "диалога», потом Tab и обведи имя. Так перевод лучше понимает, кто говорит, и не путает лицо и род.",
+                "version",
+                wrap=True,
+            )
+            col.addWidget(tip)
         read = self.ctl.get_last_read(g.exe) if g.region is not None else None
         if read is not None:
             col.addLayout(self._last_read(read))
@@ -310,6 +318,14 @@ class GamesPage(QWidget):
         more.setMenu(menu)
         row.addWidget(more, 0, Qt.AlignmentFlag.AlignTop)
         return frame
+
+    def _names_missing(self, exe: str) -> bool:
+        """У последних реплик игры почти нет имени говорящего."""
+        try:
+            named, total = self.ctl.store.speaker_share(exe)
+        except Exception:
+            return False
+        return total >= 15 and named <= total * 0.1
 
     def _last_read(self, read) -> QHBoxLayout:  # type: ignore[no-untyped-def]
         """Что LexoPlay последний раз прочитал в окне диалога: сразу видно, туда ли выделено."""

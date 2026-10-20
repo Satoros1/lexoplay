@@ -70,7 +70,7 @@ class LineCache:
         except Exception:
             log.exception("реплика не записалась в кеш")
 
-    def retranslated(self, exe: str, lang: str, rec: LineRecord) -> None:
+    def retranslated(self, exe: str, lang: str, rec: LineRecord, *, touch: bool = True) -> None:
         """Перевели заново: прошлые переводы этой реплики заменить новым (или записать, если их не было)."""
         if not exe or not rec.norm:
             return
@@ -78,6 +78,6 @@ class LineCache:
             if self._store.line_find(exe, lang, rec.norm) is None:
                 self.add(exe, lang, rec)
             else:
-                self._store.line_retranslated(exe, lang, rec.norm, rec.translation, self.ver)
+                self._store.line_retranslated(exe, lang, rec.norm, rec.translation, self.ver, touch=touch)
         except Exception:
             log.exception("новый перевод не записался в кеш")

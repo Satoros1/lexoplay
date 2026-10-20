@@ -10,6 +10,8 @@ star: реплика в избранном).
 words: слова, сохранённые через F3. Без привязки к Lexo живут только здесь, после
 привязки сами уходят в карточки.
 glossary: свои переводы имён и терминов для игры, их видит модель.
+explains: разборы реплик (F7, кнопка «Разбор» в истории): второй раз открываются сразу и без запроса.
+lookups: значения слов (F3) своим ключом: тот же клик по тому же слову в той же реплике без запроса.
 stats: по дням и играм: сколько реплик переведено, слов сохранено, минут в игре.
 """
 
@@ -80,6 +82,19 @@ CREATE TABLE IF NOT EXISTS glossary (
     term TEXT NOT NULL,
     translation TEXT NOT NULL,
     PRIMARY KEY (exe, term)
+);
+CREATE TABLE IF NOT EXISTS explains (
+    exe TEXT NOT NULL,
+    lang TEXT NOT NULL,
+    norm TEXT NOT NULL,
+    data TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    PRIMARY KEY (exe, lang, norm)
+);
+CREATE TABLE IF NOT EXISTS lookups (
+    key TEXT PRIMARY KEY,
+    data TEXT NOT NULL,
+    created_at REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS stats (
     day TEXT NOT NULL,
@@ -428,13 +443,21 @@ class Store:
             self._db.commit()
             return int(cur.lastrowid or 0)
 
-    def line_retranslated(self, exe: str, lang: str, norm: str, translation: str, ver: int) -> None:
-        """«Перевести иначе»: новый перевод вместо всех прошлых этой реплики."""
+    def line_retranslated(self, exe: str, lang: str, norm: str, translation: str, ver: int, *, touch: bool = True) -> None:
+        """«Перевести иначе»: новый перевод вместо всех прошлых этой реплики.
+
+        touch=False (из истории): реплика остаётся в своей сессии, а не переезжает в сегодня."""
         with self._lock:
-            self._db.execute(
-                "UPDATE lines SET translation = ?, ver = ?, seen_at = ? WHERE exe = ? AND lang = ? AND norm = ?",
-                (translation, ver, time.time(), exe.lower(), lang, norm),
-            )
+            if touch:
+                self._db.execute(
+                    "UPDATE lines SET translation = ?, ver = ?, seen_at = ? WHERE exe = ? AND lang = ? AND norm = ?",
+                    (translation, ver, time.time(), exe.lower(), lang, norm),
+                )
+            else:
+                self._db.execute(
+                    "UPDATE lines SET translation = ?, ver = ? WHERE exe = ? AND lang = ? AND norm = ?",
+                    (translation, ver, exe.lower(), lang, norm),
+                )
             self._db.commit()
 
     def line_seen(self, line_id: int) -> None:
@@ -652,6 +675,63 @@ class Store:
         return int(total), int(local)
 
     # ------------------------------------------------------------------ glossary
+    # ------------------------------------------------------------------ разборы и значения слов
+    def explain_get(self, exe: str, lang: str, norm: str) -> str | None:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT data FROM explains WHERE exe = ? AND lang = ? AND norm = ?", (exe.lower(), lang, norm)
+            ).fetchone()
+        return row[0] if row else None
+
+    def explain_put(self, exe: str, lang: str, norm: str, data: str) -> None:
+        with self._lock:
+            self._db.execute(
+                "INSERT OR REPLACE INTO explains (exe, lang, norm, data, created_at) VALUES (?, ?, ?, ?, ?)",
+                (exe.lower(), lang, norm, data, time.time()),
+            )
+            self._db.commit()
+
+    def explain_delete(self, exe: str, lang: str, norm: str) -> None:
+        with self._lock:
+            self._db.execute("DELETE FROM explains WHERE exe = ? AND lang = ? AND norm = ?", (exe.lower(), lang, norm))
+            self._db.commit()
+
+    def explained(self, exe: str, lang: str, norms: list[str]) -> set[str]:
+        """Какие из реплик уже разобраны: для значка в истории."""
+        if not norms:
+            return set()
+        marks = ",".join("?" * len(norms))
+        with self._lock:
+            rows = self._db.execute(
+                f"SELECT norm FROM explains WHERE exe = ? AND lang = ? AND norm IN ({marks})", (exe.lower(), lang, *norms)
+            ).fetchall()
+        return {r[0] for r in rows}
+
+    def lookup_get(self, key: str) -> str | None:
+        with self._lock:
+            row = self._db.execute("SELECT data FROM lookups WHERE key = ?", (key,)).fetchone()
+        return row[0] if row else None
+
+    def lookup_put(self, key: str, data: str, keep: int = 5000) -> None:
+        with self._lock:
+            self._db.execute(
+                "INSERT OR REPLACE INTO lookups (key, data, created_at) VALUES (?, ?, ?)", (key, data, time.time())
+            )
+            # старые значения не копим бесконечно
+            self._db.execute(
+                "DELETE FROM lookups WHERE key IN (SELECT key FROM lookups ORDER BY created_at DESC LIMIT -1 OFFSET ?)",
+                (keep,),
+            )
+            self._db.commit()
+
+    def speaker_share(self, exe: str, last: int = 40) -> tuple[int, int]:
+        """(сколько из последних реплик игры с именем говорящего, сколько всего): для подсказки про рамку имени."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT speaker FROM lines WHERE exe = ? ORDER BY created_at DESC LIMIT ?", (exe.lower(), last)
+            ).fetchall()
+        return sum(1 for r in rows if r[0]), len(rows)
+
     def glossary(self, exe: str) -> dict[str, str]:
         with self._lock:
             rows = self._db.execute(

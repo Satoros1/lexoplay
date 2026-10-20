@@ -5,7 +5,11 @@
 слов. Сессия раскрывается по нажатию, внутри реплики по порядку, как сценарий. Поиск
 показывает только сессии с совпадениями и сразу найденные реплики в них, с подсветкой;
 «Вся сессия» открывает их в окружении. Звёздочка кладёт реплику в избранное.
-Удалённый перевод при следующем F2 переведётся заново: так исправляется неудачный перевод.
+
+У каждой реплики «Разбор» (то же, что F7 в игре: сленг, идиомы, трудные места, фразы
+можно сохранить в слова; сохранённый разбор открывается сразу) и «Перевести иначе»
+(моделью посильнее, с репликами перед этой; реплика остаётся в своей сессии).
+Удалённый перевод при следующем F2 переведётся заново.
 """
 
 from __future__ import annotations
@@ -213,6 +217,7 @@ class SessionCard(QFrame):
         page = self.page
         lines, total = self._lines(self.limit)
         only_found = page.filtered and not self.full
+        explained = page.explained(self.s.exe, lines)
         if not only_found:
             words = page.store.words_range(self.s.exe, self.s.start, self.s.end)
             if words:
@@ -234,7 +239,7 @@ class SessionCard(QFrame):
             self.body_lay.addLayout(box)
         query = page.query if only_found or page.query else ""
         for i, line in enumerate(lines):
-            self.body_lay.addWidget(self._row(line, query, last=i == len(lines) - 1))
+            self.body_lay.addWidget(self._row(line, query, last=i == len(lines) - 1, explained=line.norm in explained))
         foot = QHBoxLayout()
         foot.setContentsMargins(18, 8, 18, 0)
         foot.setSpacing(8)
@@ -249,7 +254,8 @@ class SessionCard(QFrame):
         foot.addStretch(1)
         self.body_lay.addLayout(foot)
 
-    def _row(self, line: StoredLine, query: str, *, last: bool) -> QFrame:
+    def _row(self, line: StoredLine, query: str, *, last: bool, explained: bool = False) -> QFrame:
+        page = self.page
         row = QFrame()
         row.setObjectName("rowLast" if last else "row")
         lay = QVBoxLayout(row)
@@ -272,14 +278,80 @@ class SessionCard(QFrame):
                 STAR if starred else "none",
             )
         )
+        if page.can_explain:
+            opened = line.id in page.explain_open
+            meta.addWidget(
+                row_tool(
+                    "lightbulb",
+                    "Свернуть разбор" if opened else ("Разбор (уже сохранён)" if explained else "Разбор: сленг, идиомы, трудные места"),
+                    lambda: page.toggle_explain(line),
+                    theme.GREEN if explained or opened else theme.MUTED,
+                )
+            )
+        if page.can_retranslate:
+            again = row_tool("refresh", "Перевести иначе: моделью посильнее, с репликами перед этой", lambda: page.retranslate(line))
+            again.setEnabled(line.id not in page.busy)
+            meta.addWidget(again)
         meta.addWidget(row_tool("copy", "Скопировать перевод", lambda: copy_text(line.translation)))
         meta.addWidget(
-            row_tool("trash", "Удалить перевод: в следующий раз реплика переведётся заново", lambda: self.page.delete_line(line.id))
+            row_tool("trash", "Удалить перевод: в следующий раз реплика переведётся заново", lambda: page.delete_line(line.id))
         )
         lay.addLayout(meta)
         lay.addWidget(text_label(line.source, "muted", query))
-        lay.addWidget(text_label(line.translation, "title", query))
+        if line.id in page.busy:
+            lay.addWidget(label("Перевожу заново…", "muted"))
+        else:
+            lay.addWidget(text_label(line.translation, "title", query))
+        note = page.notes.get(line.id)
+        if note:
+            lay.addWidget(label(note[1], "ok" if note[0] else "error", wrap=True))
+        if page.can_explain and line.id in page.explain_open:
+            lay.addWidget(self._explain_panel(line))
         return row
+
+    def _explain_panel(self, line: StoredLine) -> QWidget:
+        page = self.page
+        box = QFrame()
+        box.setObjectName("explainBox")
+        lay = QVBoxLayout(box)
+        lay.setContentsMargins(12, 10, 12, 10)
+        lay.setSpacing(6)
+        got = page.explains.get(line.id)
+        if got is None:
+            lay.addWidget(label("Разбираю реплику…", "muted"))
+            return box
+        if isinstance(got, str):
+            lay.addWidget(label(got, "error", wrap=True))
+            return box
+        if got.summary:
+            lay.addWidget(label(got.summary, "muted", wrap=True))
+        for i, item in enumerate(got.items):
+            row = QHBoxLayout()
+            row.setSpacing(8)
+            col = QVBoxLayout()
+            col.setSpacing(1)
+            head = label("", None, wrap=True)
+            head.setTextFormat(Qt.TextFormat.RichText)
+            head.setText(f"<b>{html.escape(item.phrase)}</b>: {html.escape(item.meaning)}")
+            col.addWidget(head)
+            if item.note:
+                col.addWidget(label(item.note, "version", wrap=True))
+            row.addLayout(col, 1)
+            if (line.id, i) in page.saved:
+                done = QLabel()
+                done.setPixmap(icon("check", theme.GREEN, 16).pixmap(16, 16))
+                done.setToolTip("Сохранено")
+                row.addWidget(done, 0, Qt.AlignmentFlag.AlignTop)
+            elif page.can_save:
+                row.addWidget(
+                    row_tool("plus", "Сохранить в слова", lambda i=i, item=item: page.save_phrase(line, i, item.phrase, item.meaning), theme.GREEN),
+                    0,
+                    Qt.AlignmentFlag.AlignTop,
+                )
+            lay.addLayout(row)
+        if not got.items and not got.summary:
+            lay.addWidget(label("Ничего трудного в этой реплике нет.", "muted"))
+        return box
 
     def _earlier(self) -> None:
         self.page.limits[self.s.key] = self.limit + LINES_PAGE
@@ -310,10 +382,19 @@ class HistoryPage(QWidget):
         self.limits: dict[str, int] = {}  # сколько реплик показано в сессии
         self.full: set[str] = set()  # при поиске открыты целиком
         self.cards: list[SessionCard] = []
+        self.busy: set[int] = set()  # реплики, которые сейчас переводятся заново
+        self.notes: dict[int, tuple[bool, str]] = {}  # итог «Перевести иначе» под репликой: (удачно, текст)
+        self.explain_open: set[int] = set()  # реплики с раскрытым разбором
+        self.explains: dict[int, object] = {}  # разбор (Explanation) или текст ошибки; пока грузится, ключа нет
+        self.saved: set[tuple[int, int]] = set()  # (реплика, пункт разбора), которые уже в словах
+        # что умеет контроллер (в тестах и selftest он упрощённый)
+        self.can_explain = hasattr(ctl, "explain_history_line")
+        self.can_retranslate = hasattr(ctl, "retranslate_history_line")
+        self.can_save = hasattr(ctl, "save_phrase")
         scroll, lay, _actions = page_shell(
             "История",
-            "Реплики по игровым сессиям: нажми на сессию, чтобы открыть её. Звёздочка добавляет реплику "
-            "в избранное, а удалённый перевод в следующий раз переведётся заново.",
+            "Реплики по игровым сессиям: нажми на сессию, чтобы открыть её. У каждой реплики есть разбор "
+            "(лампочка), «Перевести иначе» (стрелки) и звёздочка, чтобы добавить её в избранное.",
         )
         self.scroll = scroll
         outer = QVBoxLayout(self)
@@ -397,6 +478,8 @@ class HistoryPage(QWidget):
         self.opened.clear()
         self.limits.clear()
         self.full.clear()
+        self.notes.clear()
+        self.explain_open.clear()
         self._render(auto_open=True)
 
     def _more(self) -> None:
@@ -457,6 +540,53 @@ class HistoryPage(QWidget):
         return box
 
     # --- действия с репликами
+    def explained(self, exe: str, lines: list[StoredLine]) -> set[str]:
+        lang = getattr(getattr(self.ctl, "settings", None), "target_lang", "ru")
+        try:
+            return self.store.explained(exe, lang, [x.norm for x in lines])
+        except Exception:
+            return set()
+
+    def toggle_explain(self, line: StoredLine) -> None:
+        if line.id in self.explain_open:
+            self.explain_open.discard(line.id)
+            self._rerender_cards()
+            return
+        self.explain_open.add(line.id)
+        if isinstance(self.explains.get(line.id), str):
+            self.explains.pop(line.id)  # прошлая ошибка: пробуем ещё раз
+        if line.id not in self.explains:
+
+            def done(exp, err, line_id=line.id):  # type: ignore[no-untyped-def]
+                self.explains[line_id] = exp if err is None else err
+                self._rerender_cards()
+
+            self.ctl.explain_history_line(line, done)
+        self._rerender_cards()
+
+    def retranslate(self, line: StoredLine) -> None:
+        if line.id in self.busy:
+            return
+        self.busy.add(line.id)
+        self.notes.pop(line.id, None)
+
+        def done(text, err, line_id=line.id):  # type: ignore[no-untyped-def]
+            self.busy.discard(line_id)
+            self.notes[line_id] = (True, "Переведено заново") if err is None else (False, err)
+            if err is None:  # старый разбор говорил о прошлом переводе: свернуть, новый по кнопке
+                self.explains.pop(line_id, None)
+                self.explain_open.discard(line_id)
+            self._rerender_cards()
+
+        self.ctl.retranslate_history_line(line, done)
+        self._rerender_cards()
+
+    def save_phrase(self, line: StoredLine, index: int, phrase: str, meaning: str) -> None:
+        where = self.ctl.save_phrase(line, phrase, meaning)
+        self.saved.add((line.id, index))
+        self.notes[line.id] = (True, f"«{phrase}» сохранено в {where}")
+        self._rerender_cards()
+
     def star_line(self, line: StoredLine, on: bool) -> None:
         self.store.line_star(line.id, on)
         self._rerender_cards()

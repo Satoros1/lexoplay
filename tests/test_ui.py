@@ -158,6 +158,8 @@ class FakeCtl:
         self.checks = 0
         self.autostart = False
         self.last_reads = {}
+        self.explained_lines = []
+        self.saved_phrases = []
 
     def account_status(self):
         from lexoplay.ui.main_window import AccountStatus
@@ -238,6 +240,20 @@ class FakeCtl:
 
     def history(self, exe=None, query="", limit=100, offset=0):
         return self.store.lines_list(exe, query, limit, offset)
+
+    def explain_history_line(self, line, done):
+        from lexoplay.lookup import ExplainItem, Explanation
+
+        self.explained_lines.append(line.id)
+        done(Explanation((ExplainItem("class trial", "классный суд", "термин игры"),), "Торжественно."), None)
+
+    def retranslate_history_line(self, line, done):
+        self.store.line_retranslated(line.exe, "ru", line.norm, "Новый перевод.", 3, touch=False)
+        done("Новый перевод.", None)
+
+    def save_phrase(self, line, phrase, meaning):
+        self.saved_phrases.append(phrase)
+        return "«Слова»"
 
     def delete_line(self, line_id):
         self.store.line_delete(line_id)
@@ -329,6 +345,26 @@ def test_main_window_link_flow(window, qapp):
     decks = [lbl.text() for lbl in page.table.findChildren(QLabel)]
     assert any("Слова из игр" in t for t in decks)
     assert "Lexo: @ruslan" in w.account_chip.text()
+
+
+def test_games_page_suggests_name_frame_when_speakers_are_missing(window, qapp):
+    from PySide6.QtWidgets import QLabel
+
+    w, ctl = window
+
+    def tip_shown():
+        w.show_page("games")
+        return any("Совет: имя говорящего" in lbl.text() for lbl in w.games.findChildren(QLabel))
+
+    for i in range(10):
+        ctl.store.line_add("dr1_us.exe", "ru", f"n{i}", None, f"Line {i}", f"Реплика {i}")
+    assert not tip_shown()  # мало реплик: рано судить
+    for i in range(10, 20):
+        ctl.store.line_add("dr1_us.exe", "ru", f"n{i}", None, f"Line {i}", f"Реплика {i}")
+    assert tip_shown()
+    game = ctl.store.get_game("dr1_us.exe")
+    ctl.store.save_game(game.with_(name_region=Rect(0.05, 0.62, 0.2, 0.05)))
+    assert not tip_shown()  # рамка имени уже есть
 
 
 def test_games_page_deck_choice_and_pick(window, qapp):
@@ -448,6 +484,29 @@ def test_history_page_sessions_search_star_and_delete(window, qapp):
     page.star_btn.setChecked(False)
     page.delete_line(line.id)
     assert ctl.store.lines_count() == 2 and "2 реплики" in page.summary.text()
+
+
+def test_history_line_explain_retranslate_and_save(window, qapp):
+    from PySide6.QtWidgets import QLabel
+
+    w, ctl = window
+    ctl.store.line_add("dr1_us.exe", "ru", "the class trial begins", None, "The class trial begins.", "Классный суд начинается.")
+    w.show_page("history")
+    page = w.history
+    line = ctl.store.lines_list()[0]
+
+    def texts():
+        return " | ".join(lbl.text() for c in page.cards for lbl in c.findChildren(QLabel))
+
+    page.toggle_explain(line)
+    assert ctl.explained_lines == [line.id] and "классный суд" in texts() and "Торжественно." in texts()
+    page.save_phrase(line, 0, "class trial", "классный суд")
+    assert ctl.saved_phrases == ["class trial"] and (line.id, 0) in page.saved and "сохранено в «Слова»" in texts()
+    page.retranslate(line)
+    assert "Новый перевод." in texts() and "Переведено заново" in texts() and not page.busy
+    assert line.id not in page.explain_open  # разбор старого перевода свернулся, новый по кнопке
+    page.toggle_explain(line)
+    assert line.id in page.explain_open and ctl.explained_lines == [line.id, line.id]
 
 
 def test_session_copy_text():
