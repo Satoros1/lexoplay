@@ -85,17 +85,24 @@ def release_from_json(data: dict) -> Release | None:
     return None
 
 
-async def check(*, transport: httpx.AsyncBaseTransport | None = None) -> Release | None:
-    """Последний релиз, если он новее нашей версии. Сеть недоступна → None (молча)."""
+async def check(*, transport: httpx.AsyncBaseTransport | None = None, strict: bool = False) -> Release | None:
+    """Последний релиз, если он новее нашей версии.
+
+    Сеть недоступна → None (молча, для проверки по расписанию), а со strict (проверка
+    по кнопке) → UpdateError: иначе человек без интернета увидел бы «последняя версия»."""
     headers = {"Accept": "application/vnd.github+json", "User-Agent": f"LexoPlay/{__version__}"}
     try:
         async with httpx.AsyncClient(timeout=10, transport=transport, follow_redirects=True) as http:
             resp = await http.get(API_LATEST, headers=headers)
     except httpx.HTTPError as exc:
         log.info("проверка обновлений: нет связи (%s)", exc)
+        if strict:
+            raise UpdateError("Нет связи с GitHub. Проверь интернет и попробуй ещё раз.") from exc
         return None
     if resp.status_code != 200:
         log.info("проверка обновлений: GitHub ответил %s", resp.status_code)
+        if strict:
+            raise UpdateError(f"GitHub не ответил (код {resp.status_code}). Попробуй чуть позже.")
         return None
     rel = release_from_json(resp.json())
     if rel is None:

@@ -3,13 +3,17 @@
 Одно прозрачное окно размером с display_rect, клики проходят насквозь, фокус не берёт.
 Ставится в физических координатах через `placer` (на Windows это SetWindowPos), а рисует
 всё в логических пикселях относительно своего размера, поэтому DPI и Magpie не мешают.
+
+Плашка появляется и исчезает плавно (доли секунды), а пока идёт перевод, в ней бегут
+три точки. Логически она скрыта сразу: исчезающая копия только дорисовывается.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 
-from PySide6.QtCore import QRectF, Qt, QTimer
+from PySide6.QtCore import QEasingCurve, QRectF, Qt, QTimer, QVariantAnimation
 from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPainter, QPaintEvent
 from PySide6.QtWidgets import QWidget
 
@@ -17,6 +21,19 @@ from lexoplay.geometry import Rect, denormalize, font_px_for, place_strip
 from lexoplay.ui.theme import ACCENT, FONT_FAMILY, STRIP_BG, TEXT, TEXT_MUTED
 
 Placer = Callable[[QWidget, Rect], None]
+
+FADE_IN_MS = 120
+FADE_OUT_MS = 140
+DOTS_MS = 300  # шаг бегущих точек, пока идёт перевод
+
+
+@dataclass(frozen=True, slots=True)
+class _Strip:
+    """Что нарисовано в плашке: нужно, чтобы дорисовать её, пока она исчезает."""
+
+    region: Rect | None
+    text: str | None  # None: идёт перевод (точки)
+    original: str | None
 
 
 def _qt_placer(widget: QWidget, rect: Rect) -> None:
@@ -52,6 +69,17 @@ class Overlay(QWidget):
         self.strip_custom: Rect | None = None  # своё место для игры: x, y, ширина в долях окна
         self.font_family = ""
         self.font_bold = False
+        self.fade = True  # плавное появление и исчезание плашки
+        self._alpha = 1.0
+        self._ghost: _Strip | None = None  # исчезающая плашка
+        self._anim = QVariantAnimation(self)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._anim.valueChanged.connect(self._on_fade)
+        self._anim.finished.connect(self._fade_done)
+        self._dots = 0
+        self._dots_timer = QTimer(self)
+        self._dots_timer.setInterval(DOTS_MS)
+        self._dots_timer.timeout.connect(self._tick_dots)
         self._toast_timer = QTimer(self)
         self._toast_timer.setSingleShot(True)
         self._toast_timer.timeout.connect(self._clear_toast)
@@ -69,18 +97,71 @@ class Overlay(QWidget):
         if self.isVisible():
             self._placer(self, rect)
 
-    def show_busy(self, region: Rect) -> None:
-        self._region, self._text, self._busy, self._original = region, None, True, None
+    def show_busy(self, region: Rect, original: str | None = None) -> None:
+        appearing = not self.strip_visible
+        self._region, self._text, self._busy = region, None, True
+        self._original = original if original and original.strip() else None
+        if appearing or not self._dots_timer.isActive():
+            self._dots = 0
+            self._dots_timer.start()
+        self._appear(appearing)
         self._refresh()
 
     def show_text(self, region: Rect, text: str, original: str | None = None) -> None:
+        appearing = not self.strip_visible
         self._region, self._text, self._busy = region, text, False
         self._original = original if original and original.strip() else None
+        self._dots_timer.stop()
+        self._appear(appearing)
         self._refresh()
 
     def hide_strip(self) -> None:
+        if self.strip_visible and self.isVisible() and self.fade:
+            self._ghost = _Strip(self._region, self._text, self._original)
+            self._fade_to(0.0, FADE_OUT_MS)
         self._text, self._busy, self._original = None, False, None
+        self._dots_timer.stop()
         self._refresh()
+
+    # --- плавность ---
+    def _appear(self, appearing: bool) -> None:
+        if self._ghost is not None:  # плашка как раз исчезала: возвращаем её с той же прозрачности
+            self._ghost = None
+            self._fade_to(1.0, FADE_IN_MS)
+        elif appearing:
+            if self.fade:
+                self._alpha = 0.0
+                self._fade_to(1.0, FADE_IN_MS)
+            else:
+                self._anim.stop()
+                self._alpha = 1.0
+
+    def _fade_to(self, target: float, ms: int) -> None:
+        self._anim.stop()
+        if not self.fade:
+            self._alpha = target
+            self._fade_done()
+            return
+        self._anim.setStartValue(self._alpha)
+        self._anim.setEndValue(target)
+        self._anim.setDuration(max(1, round(ms * abs(target - self._alpha))))
+        self._anim.start()
+
+    def _on_fade(self, value: object) -> None:
+        self._alpha = float(value)  # type: ignore[arg-type]
+        self.update()
+
+    def _fade_done(self) -> None:
+        if self._ghost is not None and self._alpha <= 0.01:
+            self._ghost = None
+            self._refresh()
+
+    def _tick_dots(self) -> None:
+        if not self._busy or self._text is not None:
+            self._dots_timer.stop()
+            return
+        self._dots = (self._dots + 1) % 3
+        self.update()
 
     @property
     def text(self) -> str | None:
@@ -90,8 +171,11 @@ class Overlay(QWidget):
         """Где сейчас строка перевода, в координатах окна (оно совпадает с display_rect)."""
         if not self.strip_visible:
             return None
-        box = self._strip_geometry(self._text if self._text is not None else "…")[0]
+        box = self._strip_geometry(self._shown())[0]
         return Rect(box.x(), box.y(), box.width(), box.height())
+
+    def _shown(self) -> _Strip:
+        return _Strip(self._region, self._text, self._original)
 
     def toast(self, text: str, ms: int = 2400) -> None:
         self._toast = text
@@ -103,7 +187,7 @@ class Overlay(QWidget):
         self._refresh()
 
     def _refresh(self) -> None:
-        need = self.strip_visible or self._toast is not None
+        need = self.strip_visible or self._ghost is not None or self._toast is not None
         if need:
             if not self.isVisible():
                 self._placer(self, self._display)
@@ -114,14 +198,15 @@ class Overlay(QWidget):
             self.hide()
 
     # --- отрисовка ---
-    def _original_shown(self) -> str | None:
-        return self._original if self.show_original and self._text is not None else None
+    def _original_shown(self, strip: _Strip) -> str | None:
+        return strip.original if self.show_original else None
 
-    def _strip_geometry(self, text: str) -> tuple[QRectF, QFont, QRectF, QFont, QRectF | None]:
+    def _strip_geometry(self, strip_state: _Strip) -> tuple[QRectF, QFont, QRectF, QFont, QRectF | None]:
         """(плашка, шрифт перевода, где перевод, шрифт оригинала, где оригинал или None)."""
+        text = strip_state.text if strip_state.text is not None else "…"
         w, h = float(self.width()), float(self.height())
         bounds = Rect(0, 0, w, h)
-        region = denormalize(self._region or Rect(0.05, 0.75, 0.9, 0.2), bounds)
+        region = denormalize(strip_state.region or Rect(0.05, 0.75, 0.9, 0.2), bounds)
         if region.w < 280:  # узкая область: строку всё равно делаем читаемой ширины
             cx = region.x + region.w / 2
             nw = min(w - 16, 420.0)
@@ -136,7 +221,7 @@ class Overlay(QWidget):
             # своё место: ширина своя, текст переносится по ней
             cw = max(200.0, min(w - 16, custom.w * w))
             region = Rect(max(8.0, min(custom.x * w, w - 8 - cw)), region.y, cw, region.h)
-        original = self._original_shown()
+        original = self._original_shown(strip_state)
 
         def measure(size: float, f: QFont, value: str) -> tuple[QRectF, QFontMetricsF]:
             f.setPixelSize(max(1, round(size)))
@@ -181,26 +266,48 @@ class Overlay(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
-        if self.strip_visible:
-            text = self._text if self._text is not None else "…"
-            box, font, text_rect, small, orig_rect = self._strip_geometry(text)
-            bg = QColor(STRIP_BG)
-            bg.setAlphaF(max(0.3, min(1.0, self.opacity)))
-            p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(bg)
-            radius = min(12.0, box.height() / 2)
-            p.drawRoundedRect(box, radius, radius)
-            original = self._original_shown()
-            if orig_rect is not None and original:
-                p.setFont(small)
-                p.setPen(TEXT_MUTED)
-                p.drawText(orig_rect, int(Qt.TextFlag.TextWordWrap | Qt.AlignmentFlag.AlignLeft), original)
-            p.setFont(font)
-            p.setPen(TEXT if self._text is not None else TEXT_MUTED)
-            p.drawText(text_rect, int(Qt.TextFlag.TextWordWrap | Qt.AlignmentFlag.AlignLeft), text)
+        strip = self._shown() if self.strip_visible else self._ghost
+        if strip is not None and self._alpha > 0.0:
+            p.setOpacity(max(0.0, min(1.0, self._alpha)))
+            self._paint_strip(p, strip)
+            p.setOpacity(1.0)
         if self._toast:
             self._paint_toast(p, self._toast)
         p.end()
+
+    def _paint_strip(self, p: QPainter, strip: _Strip) -> None:
+        box, font, text_rect, small, orig_rect = self._strip_geometry(strip)
+        bg = QColor(STRIP_BG)
+        bg.setAlphaF(max(0.3, min(1.0, self.opacity)))
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(bg)
+        radius = min(12.0, box.height() / 2)
+        p.drawRoundedRect(box, radius, radius)
+        original = self._original_shown(strip)
+        if orig_rect is not None and original:
+            p.setFont(small)
+            p.setPen(TEXT_MUTED)
+            p.drawText(orig_rect, int(Qt.TextFlag.TextWordWrap | Qt.AlignmentFlag.AlignLeft), original)
+        if strip.text is None:
+            self._paint_dots(p, text_rect, font)
+            return
+        p.setFont(font)
+        p.setPen(TEXT)
+        p.drawText(text_rect, int(Qt.TextFlag.TextWordWrap | Qt.AlignmentFlag.AlignLeft), strip.text)
+
+    def _paint_dots(self, p: QPainter, text_rect: QRectF, font: QFont) -> None:
+        """Идёт перевод: три точки, яркая бежит слева направо."""
+        size = max(5.0, font.pixelSize() * 0.42)
+        gap = size * 0.75
+        cy = text_rect.center().y()
+        x = text_rect.x() + size * 0.2
+        p.setPen(Qt.PenStyle.NoPen)
+        for i in range(3):
+            c = QColor(TEXT if i == self._dots else TEXT_MUTED)
+            if i != self._dots:
+                c.setAlphaF(0.55)
+            p.setBrush(c)
+            p.drawEllipse(QRectF(x + i * (size + gap), cy - size / 2, size, size))
 
     def _paint_toast(self, p: QPainter, text: str) -> None:
         h = float(self.height())

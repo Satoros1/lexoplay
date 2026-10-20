@@ -258,6 +258,27 @@ def _ocr_auto(out_dir: Path) -> Callable[[], tuple[str, object]]:
                     "tried": reading.tried,
                     "modes": each,
                 }
+            # проверка смены реплики (свой движок) в одно время с F2, и два чтения одним движком сразу
+            frame, region = cases["novel"]
+            t0 = time.perf_counter()
+            got = await asyncio.gather(
+                p.recognize(frame, Target("t", region)),
+                p.recognize(frame, Target("t", region), explore=False, slot=3),
+                p.recognize(frame, Target("t", region), explore=False, slot=3),
+                ocr.recognize(prepare(frame, region, mode=MODES[0])),
+                ocr.recognize(prepare(frame, region, mode=MODES[0])),
+                return_exceptions=True,
+            )
+            texts = [
+                (g.result.raw_text if hasattr(g, "result") else g.raw_text).lower()
+                for g in got
+                if not isinstance(g, BaseException)
+            ]
+            report["concurrent"] = {
+                "seconds": round(time.perf_counter() - t0, 3),
+                "errors": [repr(g) for g in got if isinstance(g, BaseException)],
+                "texts_ok": len(texts) == len(got) and all("reluctant" in t for t in texts),
+            }
             report["parallel"] = p.parallel_ok
             return report
 
@@ -275,6 +296,9 @@ def _ocr_auto(out_dir: Path) -> Callable[[], tuple[str, object]]:
         all_modes = all(len(report[c]["tried"]) >= 3 for c in ("novel", "pixel", "vn_color"))  # type: ignore[index]
         if not all_modes:
             return "fail", report  # каким-то способом не прочитали вовсе: подбор способа не работает
+        conc = report["concurrent"]
+        if conc["errors"] or not conc["texts_ok"] or not report["parallel"]:  # type: ignore[index]
+            return "fail", report  # одновременные чтения ломают OCR: F2 после клика стал бы медленным
         return ("ok" if pixel["ratio"] >= 0.75 and color_ok else "warn"), report  # type: ignore[index]
 
     return run
@@ -668,15 +692,21 @@ def _qt_checks(out_dir: Path) -> None:
         ov.set_display_rect(Rect(40, 40, 960, 720))
         ov.show_text(Rect(0.04, 0.78, 0.92, 0.18), "Знаешь, мне совсем не хотелось сюда сегодня приходить. После заката здесь как-то жутко.")
         ov.toast("eerie сохранено в Lexo")
-        app.processEvents()
+        end = time.monotonic() + 0.4  # плашка появляется плавно: ждём, пока проявится
+        while time.monotonic() < end:
+            app.processEvents()
+            time.sleep(0.02)
         img = ov.grab().toImage()
         img.save(str(out_dir / "overlay.png"))
         painted = sum(
             1 for y in range(0, img.height(), 6) for x in range(0, img.width(), 6) if img.pixelColor(x, y).alpha() > 0
         )
         ov.hide_strip()
-        app.processEvents()
-        hidden_ok = ov.strip_visible is False
+        end = time.monotonic() + 0.4
+        while time.monotonic() < end:
+            app.processEvents()
+            time.sleep(0.02)
+        hidden_ok = ov.strip_visible is False and ov._ghost is None
         ov.close()
         return ("ok" if painted > 50 and hidden_ok else "fail"), {"painted_samples": painted, "size": [img.width(), img.height()]}
 

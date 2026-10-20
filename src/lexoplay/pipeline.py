@@ -212,15 +212,16 @@ class Pipeline:
                     got[i] = exc
         return got
 
-    async def recognize(self, frame: Image.Image, target: Target, *, explore: bool = True) -> Reading:
+    async def recognize(self, frame: Image.Image, target: Target, *, explore: bool = True, slot: int = 0) -> Reading:
         """Распознать окно диалога.
 
         explore=True (F2, F3): читаем всеми способами сразу, берём лучший и добавляем слова,
         которые он пропустил (выделенные другим цветом). explore=False (проверки смены
-        реплики): только способом, который подошёл игре."""
+        реплики): только способом, который подошёл игре, и своим движком OCR (slot), чтобы
+        проверка не ждала F2 и не мешала ему."""
         first = target.ocr_mode if target.ocr_mode in MODES else MODES[0]
         if not explore:
-            result = await self._read(frame, target.region, first)
+            result = await self._read(frame, target.region, first, slot=slot)
             reading = Reading(result, None, first, quality(result, self.source_lang))
         else:
             modes = [first] + [m for m in MODES if m != first]
@@ -244,7 +245,7 @@ class Pipeline:
             if mode != first or added:
                 log.info("OCR: способы %s, выбран %s, добавлено слов из других: %s", reading.tried, mode, added)
         if target.name_region is not None:
-            name_res = await self._read(frame, target.name_region, reading.mode)
+            name_res = await self._read(frame, target.name_region, reading.mode, slot=slot)
             reading.name_text = name_res.raw_text
         return reading
 
@@ -272,8 +273,10 @@ class Pipeline:
         on_partial: Callable[[str], None] | None = None,
         *,
         settle: float | None = None,
+        on_source: Callable[[str], None] | None = None,
     ) -> F2Outcome:
-        """settle: сколько ждать, пока текст допечатается (автоперевод ждёт дольше)."""
+        """settle: сколько ждать, пока текст допечатается (автоперевод ждёт дольше).
+        on_source: реплика прочитана и уходит в перевод (оригинал можно показать сразу)."""
         t0 = time.perf_counter()
         # соединение с сервером перевода открываем сразу, пока идут захват и OCR
         warm = getattr(self.translator, "warm", None)
@@ -338,6 +341,8 @@ class Pipeline:
             glossary=dict(target.glossary),
             on_partial=on_partial,
         )
+        if on_source is not None:
+            on_source(utt.text)
         t2 = time.perf_counter()
         warm_task = getattr(self, "_warm_task", None)
         if warm_task is not None and not warm_task.done():

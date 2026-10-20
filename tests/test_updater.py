@@ -49,6 +49,19 @@ def test_check_with_mock_github(monkeypatch):
     assert down is None
 
 
+def test_manual_check_reports_no_connection():
+    import pytest
+
+    def offline(req: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("no route", request=req)
+
+    assert asyncio.run(updater.check(transport=httpx.MockTransport(offline))) is None  # по расписанию: молча
+    with pytest.raises(updater.UpdateError, match="Нет связи"):
+        asyncio.run(updater.check(transport=httpx.MockTransport(offline), strict=True))  # по кнопке: честно
+    with pytest.raises(updater.UpdateError, match="403"):
+        asyncio.run(updater.check(transport=httpx.MockTransport(lambda r: httpx.Response(403)), strict=True))
+
+
 def test_download_checks_digest_and_size(tmp_path):
     rel = release_from_json(gh_release("0.4.0"))
     progress = []

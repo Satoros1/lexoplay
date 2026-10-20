@@ -58,9 +58,34 @@ def test_overlay_states(qapp):
     assert ov.isVisible() and ov.strip_visible
     ov.show_text(Rect(0.05, 0.78, 0.9, 0.18), "Привет")
     ov.hide_strip()
+    assert not ov.strip_visible  # логически скрыта сразу, а дорисовывается, пока исчезает
+    QTest.qWait(400)
     assert not ov.isVisible()
     ov.toast("тост")
     assert ov.isVisible()
+    ov.close()
+
+
+def test_overlay_fades_and_busy_dots_run(qapp):
+    ov = Overlay()
+    ov.set_display_rect(Rect(0, 0, 960, 720))
+    region = Rect(0.05, 0.78, 0.9, 0.18)
+    ov.show_busy(region)
+    assert ov._alpha < 0.5  # появляется плавно
+    QTest.qWait(700)
+    assert ov._alpha > 0.99
+    assert ov._dots_timer.isActive() and ov._dots in (1, 2)  # точки бегут, пока идёт перевод
+    ov.show_text(region, "Перевод")
+    assert not ov._dots_timer.isActive()
+    ov.hide_strip()
+    assert ov._ghost is not None and ov.isVisible()
+    ov.show_text(region, "Следующая реплика")  # новая реплика, пока старая ещё исчезала
+    assert ov._ghost is None and ov.strip_visible
+    QTest.qWait(300)
+    assert ov._alpha > 0.99
+    ov.fade = False
+    ov.hide_strip()
+    assert not ov.isVisible()  # без плавности окно прячется сразу
     ov.close()
 
 

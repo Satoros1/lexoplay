@@ -94,6 +94,11 @@ RELEASES_URL = "https://github.com/Satoros1/lexoplay/releases/latest"
 FRESH_OCR_S = 2.0  # F3 берёт распознанную для F2 реплику, если она моложе этого
 AUTO_SETTLE_S = 3.0  # автоперевод ждёт, пока реплика допечатается, дольше обычного F2
 SETTLE_S = 3.0  # сколько секунд после перевода следим, не допечаталась ли реплика (без действий игрока)
+WATCH_IDLE_MS = 400  # как часто смотреть на окно диалога, пока игрок ничего не нажимал
+WATCH_HOT_MS = 110  # сразу после клика или клавиши: реплика вот-вот сменится
+KICK_MS = 70  # первая проверка после клика: игре нужен кадр-другой, чтобы сменить текст
+WATCH_OCR_SLOT = 3  # свой движок OCR для проверок смены реплики (F2 читает слотами 0–2)
+BUSY_LIMIT_MS = 40_000  # перевод или чтение не вернулись за это время: снять «занято», чтобы F2 снова работал
 UPDATE_EVERY_MS = 6 * 3600 * 1000
 
 
@@ -213,6 +218,7 @@ class App(QObject):
         self.update = UpdateState()
         self.auto_live = False  # автоперевод идёт: игрок нажал F2, пока не нажмёт F4
         self._auto_hint = False
+        self._busy_source: str | None = None  # реплика, которая сейчас переводится (для оригинала над переводом)
         self._last_input = 0.0  # когда игрок последний раз кликал или жал клавишу (monotonic)
         self._busy_since = 0.0  # когда начался текущий перевод
 
@@ -245,6 +251,7 @@ class App(QObject):
         self.word_layer.retranslate_clicked.connect(self._retranslate)
         self._better: AnthropicTranslator | None = None
         self._better_model = ""
+        self._translator_sig: tuple | None = None  # с чем собран переводчик: пересобираем, только если это сменилось
         self._retranslate_token: object | None = None
         self.word_layer.explain_save.connect(self._on_explain_save)
         self.word_layer.finished.connect(self._on_words_finished)
@@ -263,8 +270,16 @@ class App(QObject):
         self._failed_keys: set[str] = set()
 
         self.watch_timer = QTimer(self)
-        self.watch_timer.setInterval(400)
+        self.watch_timer.setInterval(WATCH_IDLE_MS)
         self.watch_timer.timeout.connect(self._watch_tick)
+        self._kick_timer = QTimer(self)  # проверка вскоре после клика, не дожидаясь очередного тика
+        self._kick_timer.setSingleShot(True)
+        self._kick_timer.setInterval(KICK_MS)
+        self._kick_timer.timeout.connect(self._watch_tick)
+        self._busy_timer = QTimer(self)
+        self._busy_timer.setSingleShot(True)
+        self._busy_timer.setInterval(BUSY_LIMIT_MS)
+        self._busy_timer.timeout.connect(self._busy_expired)
         self.geom_timer = QTimer(self)
         self.geom_timer.setInterval(700)
         self.geom_timer.timeout.connect(self._geom_tick)
@@ -613,12 +628,20 @@ class App(QObject):
     def check_updates(self, *, manual: bool = True) -> None:
         if getattr(self, "_closing", False) or self.update.phase in ("checking", "downloading", "installing"):
             return
+        before = self.update.phase
         self.update.phase = "checking"
         self._update_changed()
 
         def finished(rel: Any, err: BaseException | None) -> None:
             if err is not None:
                 log.info("проверка обновлений упала: %s", err)
+                if manual:
+                    self.update.phase = "error"
+                    self.update.error = str(err) if isinstance(err, updater.UpdateError) else f"Не получилось проверить: {err}"
+                else:
+                    self.update.phase = before  # фоновая проверка без связи: молча оставляем как было
+                self._update_changed()
+                return
             self.update.checked_at = time.time()
             self.update.release = rel
             self.update.phase = "available" if rel is not None else "latest"
@@ -633,7 +656,7 @@ class App(QObject):
                     8000,
                 )
 
-        self.run_bg(updater.check(), finished)
+        self.run_bg(updater.check(strict=manual), finished)
 
     def install_update(self) -> None:
         rel = self.update.release
@@ -793,10 +816,12 @@ class App(QObject):
                 self.hotkeys.define(name, parse(text), group)
             except HotkeyError as exc:
                 log.warning("хоткей %s=%s: %s", name, text, exc)
-        if hasattr(self, "input"):
-            self.input.ignore_vks = self._hotkey_vks()  # наши клавиши не считаются «игрок пропустил реплику»
+        self._sync_ignored_keys()
 
     def _hotkey_vks(self) -> set[int]:
+        """Клавиши, которые забираем мы: нажатие такой не значит «игрок пропустил реплику».
+
+        Esc и Enter наши только в режиме слов: в самой игре ими часто листают реплики."""
         vks = set()
         for _name, text in self.settings.hotkeys.items():
             try:
@@ -804,7 +829,13 @@ class App(QObject):
                     vks.add(parse(text).vk)
             except HotkeyError:
                 pass
-        return vks | {0x1B, 0x0D}  # Esc и Enter режима слов
+        if self.word_layer.is_open:
+            vks |= {0x1B, 0x0D}
+        return vks
+
+    def _sync_ignored_keys(self) -> None:
+        if hasattr(self, "input"):
+            self.input.ignore_vks = self._hotkey_vks()
 
     def _apply_hotkey_groups(self) -> None:
         paused = self._hotkeys_paused
@@ -822,16 +853,23 @@ class App(QObject):
         self.word_layer.font_scale = self.settings.font_scale
 
     def _rebuild_translator(self) -> None:
-        self.own_lookup = None
-        self._better = None  # ключ или модель могли смениться
-        if self.client.linked:
-            self.translator = LexoTranslator(
-                self.client, on_usage=lambda u: self.bridge.call.emit(lambda: self._set_usage(u))
-            )
-        else:
-            key = get_api_key()
-            self.translator = AnthropicTranslator(key, self.settings.model) if key else None
-            self.own_lookup = AnthropicLookup(key, self.settings.model) if key else None
+        """Переводчик под привязку или свой ключ. Пересобирается, только когда сменились
+        привязка, ключ, сервер или модель: при сдвиге ползунка в «Виде» соединение с API
+        остаётся тёплым, и следующий перевод не ждёт нового рукопожатия."""
+        linked = self.client.linked
+        key = None if linked else get_api_key()
+        sig = (linked, id(self.client), self.client.server, self.client.token if linked else None, key, self.settings.model)
+        if sig != self._translator_sig:
+            self._translator_sig = sig
+            self.own_lookup = None
+            self._better = None  # ключ или модель сменились
+            if linked:
+                self.translator = LexoTranslator(
+                    self.client, on_usage=lambda u: self.bridge.call.emit(lambda: self._set_usage(u))
+                )
+            else:
+                self.translator = AnthropicTranslator(key, self.settings.model) if key else None
+                self.own_lookup = AnthropicLookup(key, self.settings.model) if key else None
         for p in self.pipelines.values():
             if self.translator:
                 p.translator = self.translator
@@ -1272,6 +1310,8 @@ class App(QObject):
             return
         if self.word_layer.is_open and name in ("translate", "words", "hide"):
             self._close_words("hotkey")
+            if name == "hide":
+                self._hide_strip()  # F4 прячет всё: и слова, и перевод, и останавливает автоперевод
             return
         if name == "add_game":
             self.add_current_game()
@@ -1404,7 +1444,8 @@ class App(QObject):
         p._debug = self.dump if self.settings.debug else None  # noqa: SLF001
         return p
 
-    def _target(self, game: Game, session_id: str = "") -> Target:
+    def _target(self, game: Game, session_id: str = "", *, glossary: bool = True) -> Target:
+        """glossary=False для проверок смены реплики: они идут часто, а глоссарий им не нужен."""
         assert game.region is not None
         mode = game.ocr_mode or ("pixel" if game.binarize else None)
         return Target(
@@ -1414,7 +1455,7 @@ class App(QObject):
             ocr_mode=mode,
             game_exe=game.exe,
             session_id=session_id,
-            glossary=self.store.glossary(game.exe),
+            glossary=self.store.glossary(game.exe) if glossary else {},
         )
 
     def _make_grab(self, active: Active, game: Game, display: Rect):  # type: ignore[no-untyped-def]
@@ -1477,11 +1518,9 @@ class App(QObject):
         if display is None:
             return
         session = self.sessions.touch(game.exe, game.title)
-        self.state = "busy"
-        self.token += 1
+        self._set_busy()
         token = self.token
-        self.watch_timer.stop()
-        self.watcher = None
+        self._stop_watch(keep_input=True)
         # клик, пока идёт перевод, тоже считается: реплика могла смениться раньше, чем пришёл перевод
         self._busy_since = time.monotonic()
         self.input.start()
@@ -1493,22 +1532,35 @@ class App(QObject):
         target = self._target(game, session.id)
         region = game.region
 
+        self._busy_source = None
+
         def partial(text: str, t: int = token) -> None:
             # из фонового потока: перевод дописывается, показываем как есть
             self.bridge.call.emit(lambda: self._show_partial(t, region, text))
+
+        def source(text: str, t: int = token) -> None:
+            self.bridge.call.emit(lambda: self._show_source(t, region, text))
 
         coro = pipeline.run(
             self._make_grab(self.active, game, display),
             target,
             on_partial=partial,
             settle=AUTO_SETTLE_S if auto else None,
+            on_source=source,
         )
         fut = self.bg.submit(coro)
         fut.add_done_callback(lambda f, t=token, a=auto: self.bridge.f2_done.emit(f, (t, a)))
 
+    def _show_source(self, token: int, region: Rect, text: str) -> None:
+        """Реплика прочитана, перевод в пути: оригинал (если включён) виден сразу, плашка потом не прыгает."""
+        if token == self.token and self.state == "busy":
+            self._busy_source = text
+            if self.overlay.text is None:
+                self.overlay.show_busy(region, original=text)
+
     def _show_partial(self, token: int, region: Rect, text: str) -> None:
         if token == self.token and self.state == "busy" and text:
-            self.overlay.show_text(region, text)
+            self.overlay.show_text(region, text, original=self._busy_source)
 
     def _remember_reading(
         self,
@@ -1527,11 +1579,28 @@ class App(QObject):
         if self.window is not None:
             self.window.refresh_games()
 
+    def _set_busy(self) -> None:
+        self.state = "busy"
+        self.token += 1
+        self._busy_timer.start()
+
+    def _set_idle(self) -> None:
+        self.state = "idle"
+        self._busy_timer.stop()
+
+    def _busy_expired(self) -> None:
+        """Сторож: запрос завис (сеть, OCR). Без него F2 и F3 молчали бы до перезапуска."""
+        if self.state != "busy":
+            return
+        log.warning("F2/F3 не вернулись за %s с: снимаем «занято»", self._busy_timer.interval() // 1000)
+        self._hide_strip()
+        self.overlay.toast("Перевод не пришёл. Нажми ещё раз", 3500)
+
     def _on_f2_done(self, fut: concurrent.futures.Future, info: tuple[int, bool]) -> None:
         token, auto = info
         if token != self.token:
             return
-        self.state = "idle"
+        self._set_idle()
         try:
             out: F2Outcome = fut.result()
         except Exception as exc:
@@ -1605,7 +1674,7 @@ class App(QObject):
     def _hide_strip(self, *, keep_auto: bool = False) -> None:
         if self.state == "busy":
             self.token += 1  # результат пришедшего позже запроса не показываем
-            self.state = "idle"
+            self._set_idle()
         if not keep_auto:
             self.auto_live = False
         self.overlay.hide_strip()
@@ -1622,9 +1691,7 @@ class App(QObject):
             return
         gated = self.input.start()  # не включился Raw Input: следим без него, как раньше
         self.watcher = LineWatcher(text, thumb, gated=gated, settle_for=SETTLE_S if settle else 0.0)
-        if self._last_input > self._busy_since:
-            self.watcher.arm()  # игрок кликнул, пока шёл перевод: сразу проверить, та ли ещё реплика
-        self.watch_timer.start()
+        self._start_watch()
 
     def _watch_wait(self, last_text: str, thumb: Image.Image | None) -> None:
         """Автоперевод: перевода на экране нет, ждём, когда в окне диалога появится новая реплика."""
@@ -1632,14 +1699,34 @@ class App(QObject):
             return
         gated = self.input.start()
         self.watcher = LineWatcher(last_text, thumb, gated=gated, waiting=True)
-        if self._last_input > self._busy_since:
-            self.watcher.arm()
-        self.watch_timer.start()
+        self._start_watch()
 
-    def _stop_watch(self) -> None:
+    def _start_watch(self) -> None:
+        self._set_watch_pace(hot=False)
+        self.watch_timer.start()
+        if self.watcher is not None and self._last_input > self._busy_since:
+            self.watcher.arm()  # игрок кликнул, пока шёл перевод: сразу проверить, та ли ещё реплика
+            self._watch_soon()
+
+    def _stop_watch(self, *, keep_input: bool = False) -> None:
         self.watch_timer.stop()
+        self._kick_timer.stop()
         self.watcher = None
-        self.input.stop()
+        if not keep_input:
+            self.input.stop()
+
+    def _set_watch_pace(self, *, hot: bool) -> None:
+        ms = WATCH_HOT_MS if hot else WATCH_IDLE_MS
+        if self.watch_timer.interval() != ms:
+            self.watch_timer.setInterval(ms)  # перезапускает таймер, поэтому только когда темп меняется
+
+    def _watch_soon(self) -> None:
+        """Игрок действовал: проверить реплику через пару кадров и дальше смотреть чаще."""
+        if not self.watch_timer.isActive():
+            return
+        self._set_watch_pace(hot=True)
+        if not self._kick_timer.isActive():
+            self._kick_timer.start()
 
     def _on_user_input(self, kind: str = "key") -> None:
         if kind == "mouse" and winapi.cursor_over_own_window():
@@ -1647,17 +1734,21 @@ class App(QObject):
         self._last_input = time.monotonic()
         if self.watcher is not None:
             self.watcher.arm()
+            self._watch_soon()
 
     def _watch_tick(self) -> None:
         watcher = self.watcher
         watching = self.overlay.strip_visible or self.word_layer.is_open or bool(watcher and watcher.waiting)
         if not watching or watcher is None or self.state != "idle" or self._watch_pending or not self.active:
             return
+        self._set_watch_pace(hot=watcher.hot)
+        if not watcher.armed:
+            return  # игрок ничего не нажимал: кадр даже не снимаем
         game = self.store.get_game(self.active.exe)
         if not game or not game.region or self.display is None:
             return
         grab = self._make_grab(self.active, game, self.display)
-        target = self._target(game)
+        target = self._target(game, glossary=False)
         pipeline = self._pipeline(game.exe)
 
         async def check() -> tuple[str | None, Image.Image | None]:
@@ -1667,7 +1758,7 @@ class App(QObject):
                 return None, None
             if pipeline is None:
                 return "gone", thumb  # перечитать текст нечем: как раньше, по пикселям
-            reading = await pipeline.recognize(img, target, explore=False)
+            reading = await pipeline.recognize(img, target, explore=False, slot=WATCH_OCR_SLOT)
             text = to_utterance(reading.result, reading.name_text).text
             verdict = watcher.check(text, thumb)
             log.debug("проверка реплики: похожесть %s, %r", watcher.last_score, text[:80])
@@ -1750,10 +1841,8 @@ class App(QObject):
         pipeline = self._pipeline(game.exe)
         if pipeline is None:
             return
-        self.state = "busy"
-        self.token += 1
+        self._set_busy()  # проверки смены реплики пока молчат сами (state busy), наблюдатель не трогаем
         token = self.token
-        self.watch_timer.stop()
         self.overlay.show_busy(game.region)
         target = self._target(game, session.id)
         grab = self._make_grab(self.active, game, display)
@@ -1761,7 +1850,7 @@ class App(QObject):
         def finished(out: Any, err: BaseException | None) -> None:
             if token != self.token:
                 return
-            self.state = "idle"
+            self._set_idle()
             self.overlay.hide_strip()
             if err is not None or out is None:
                 log.error("F3 упал", exc_info=err)
@@ -1805,7 +1894,9 @@ class App(QObject):
         self.word_layer.retranslating = False
         self.word_layer.open(self.display, game.region, views, strip=self.overlay.strip_rect())
         self.hotkeys.set_group("words", not self._hotkeys_paused)
-        if self.watcher is None:
+        self._sync_ignored_keys()
+        if self.watcher is None or self.watcher.waiting:
+            # следим за открытой репликой (автоперевод ждал следующую: теперь ждёт после неё)
             self._watch_line(line.sentence, line.thumb)
 
     # ------------------------------------------------------------------ «Перевести иначе»
@@ -1843,7 +1934,7 @@ class App(QObject):
         self._retranslate_token = token
 
         def partial(t: str) -> None:
-            self.bridge.call.emit(lambda: self._retranslate_partial(token, region, t))
+            self.bridge.call.emit(lambda: self._retranslate_partial(token, region, t, text))
 
         req = TranslateRequest(
             text=text,
@@ -1892,9 +1983,9 @@ class App(QObject):
 
         self.run_bg(translator.translate(req), done)
 
-    def _retranslate_partial(self, token: object, region: Rect, text: str) -> None:
+    def _retranslate_partial(self, token: object, region: Rect, text: str, original: str | None = None) -> None:
         if token is self._retranslate_token and text:
-            self.overlay.show_text(region, text)
+            self.overlay.show_text(region, text, original=original)
 
     # ------------------------------------------------------------------ разбор реплики (F7)
     def _request_explain(self) -> None:
@@ -2157,6 +2248,13 @@ class App(QObject):
     def _on_words_finished(self, reason: str) -> None:
         self.word_ctx = None
         self.hotkeys.set_group("words", False)
+        self._sync_ignored_keys()
         log.debug("режим слов закрыт: %s", reason)
-        if not self.overlay.strip_visible:
+        if self.overlay.strip_visible:
+            return
+        watcher = self.watcher
+        keep = reason in ("esc", "outside", "idle", "hotkey")
+        if watcher is not None and keep and self.auto_live and self.settings.auto_translate:
+            self._watch_wait(watcher.norm, watcher.baseline)  # автоперевод: ждём следующую реплику дальше
+        else:
             self._stop_watch()

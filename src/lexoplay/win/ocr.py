@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import array
+import asyncio
 import logging
 
 from PIL import Image
@@ -42,7 +43,9 @@ def _make_buffer(data: bytes):  # type: ignore[no-untyped-def]
 
 class WinOcr:
     """parallel: у каждого «слота» свой OcrEngine, чтобы читать несколькими способами сразу.
-    Один движок одновременные вызовы не переносит (проверено в CI: часть падает)."""
+    Один движок одновременные вызовы не переносит (проверено в CI: часть падает), поэтому
+    вызовы одного движка ещё и идут строго по очереди: проверка смены реплики и F2 могут
+    совпасть по времени."""
 
     parallel = True
 
@@ -50,7 +53,15 @@ class WinOcr:
         self._lang_tag = lang
         self._engine = None
         self._extra: dict[int, object] = {}
+        self._locks: dict[int, asyncio.Lock] = {}
         self.language_used: str | None = None
+
+    def _lock_for(self, engine: object, slot: int) -> asyncio.Lock:
+        key = 0 if engine is self._engine else slot  # запасной путь отдаёт общий движок: и замок общий
+        lock = self._locks.get(key)
+        if lock is None:
+            lock = self._locks[key] = asyncio.Lock()
+        return lock
 
     def _engine_for(self, slot: int):  # type: ignore[no-untyped-def]
         base = self._ensure()
@@ -112,7 +123,8 @@ class WinOcr:
         bitmap = SoftwareBitmap.create_copy_from_buffer(
             _make_buffer(rgba.tobytes()), BitmapPixelFormat.RGBA8, rgba.width, rgba.height
         )
-        result = await engine.recognize_async(bitmap)
+        async with self._lock_for(engine, slot):
+            result = await engine.recognize_async(bitmap)
         out = []
         for line in result.lines:
             words = []

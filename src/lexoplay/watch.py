@@ -15,7 +15,12 @@
 * совсем другой текст (игрок пропустил реплику, началась следующая) → «new» сразу;
 * тот же, но заметно длиннее (реплика допечаталась после клика) → тоже «new»;
 * текста нет (окно диалога закрылось) или он похож наполовину → «gone»/«new», если так
-  два раза подряд: одна вспышка или переход экрана не уберёт перевод зря.
+  два раза подряд: одна вспышка или переход экрана не уберёт перевод зря. Но если текста
+  нет, а окно диалога заметно поменялось (стёрлось или закрылось), «gone» сразу.
+
+Первые полторы секунды после действия игрока проверяем чаще (hot): кадр раз в ~0.1 с,
+текст не чаще раза в 0.2 с. Обычно реплика меняется сразу после клика, и перевод
+пропадает почти вместе со старой. Дальше до конца ARMED_FOR спокойнее: OCR не бесплатный.
 
 Без автоперевода и «new», и «gone» просто прячут перевод. С автопереводом «new»
 сразу переводит следующую реплику, а после «gone» наблюдатель ждёт (waiting), когда
@@ -34,12 +39,16 @@ from collections.abc import Callable
 from PIL import Image
 
 from lexoplay.dedupe import normalize_text, similarity
-from lexoplay.preprocess import changed
+from lexoplay.preprocess import changed, thumb_diff
 
 SAME = 0.8  # не ниже: та же реплика, OCR чуть плавает
 DIFFERENT = 0.5  # ниже: точно другая реплика
 ARMED_FOR = 3.0  # сколько секунд после действия игрока ждём смены реплики
+HOT_FOR = 1.5  # из них первые секунды смотрим часто
 MIN_LETTERS = 3  # меньше букв в ожидании: шум рамки окна диалога, а не реплика
+OCR_EVERY = 0.45  # перечитывать текст не чаще, пока игрок ничего не нажимал (или нет Raw Input)
+OCR_EVERY_HOT = 0.2  # сразу после клика или клавиши: реплика вот-вот сменится
+BIG_CHANGE = 0.012  # доля пикселей: текст стёрся или окно диалога закрылось, а не мигнула стрелка
 
 
 def grown(old: str, new: str) -> bool:
@@ -73,7 +82,8 @@ class LineWatcher:
         baseline: Image.Image,
         *,
         pixel_threshold: float = 0.006,
-        ocr_every: float = 0.45,
+        ocr_every: float = OCR_EVERY,
+        ocr_every_hot: float = OCR_EVERY_HOT,
         gated: bool = False,
         armed_for: float = ARMED_FOR,
         waiting: bool = False,
@@ -86,10 +96,12 @@ class LineWatcher:
         self._gated = gated
         self._armed_for = armed_for
         self._armed_until = float("-inf")
+        self._hot_until = float("-inf")
         self.acted = False  # игрок что-то нажимал с момента показа перевода
         self.baseline = baseline
         self._pixel_threshold = pixel_threshold
         self._ocr_every = ocr_every
+        self._ocr_every_hot = ocr_every_hot
         self._clock = clock
         self._last_ocr = float("-inf")
         self._strikes = 0
@@ -99,7 +111,9 @@ class LineWatcher:
     def arm(self) -> None:
         """Игрок кликнул или нажал клавишу: ближайшие секунды ждём смену реплики."""
         self.acted = True
-        self._armed_until = self._clock() + self._armed_for
+        now = self._clock()
+        self._armed_until = now + self._armed_for
+        self._hot_until = now + min(HOT_FOR, self._armed_for)
 
     @property
     def by_input(self) -> bool:
@@ -110,6 +124,11 @@ class LineWatcher:
     def armed(self) -> bool:
         return self.by_input or self._clock() < self._settle_until
 
+    @property
+    def hot(self) -> bool:
+        """Игрок только что кликнул или нажал клавишу: реплика вот-вот сменится, смотрим чаще."""
+        return self._gated and self._clock() <= self._hot_until
+
     def needs_ocr(self, thumb: Image.Image) -> bool:
         """Игрок действовал и пиксели окна диалога сдвинулись: стоит перечитать текст."""
         if not self.armed:
@@ -118,8 +137,8 @@ class LineWatcher:
             self._strikes = 0
             return False
         now = self._clock()
-        if now - self._last_ocr < self._ocr_every:
-            return False  # не чаще пары раз в секунду: OCR не бесплатный
+        if now - self._last_ocr < (self._ocr_every_hot if self.hot else self._ocr_every):
+            return False  # OCR не бесплатный: чаще только сразу после действия игрока
         self._last_ocr = now
         self.checks += 1
         return True
@@ -149,7 +168,10 @@ class LineWatcher:
             return "new"
         if not now:
             self._strikes += 1
-            return "gone" if self._strikes >= 2 else None
+            if self._strikes >= 2:
+                return "gone"
+            # текст пропал вместе с заметной частью окна диалога: не вспышка, а конец реплики
+            return "gone" if thumb is not None and thumb_diff(self.baseline, thumb) >= BIG_CHANGE else None
         score = likeness(self.norm, now)
         self.last_score = score
         if score >= SAME:

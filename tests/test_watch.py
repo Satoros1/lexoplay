@@ -148,3 +148,36 @@ def test_settle_window_catches_text_that_kept_typing():
     assert w.check("Oh, and they mentioned the Ultimate Biker Gang Leader too.") == "grown"
     t[0] = 5.0
     assert not w.armed  # окно settle прошло, дальше только после действия игрока
+
+
+def test_after_click_text_is_checked_more_often():
+    clock = Clock()
+    w = LineWatcher(LINE, thumbnail(frame(LINE), REGION), gated=True, clock=clock)
+    moving = thumbnail(frame(LINE, bg=90), REGION)
+    w.arm()
+    assert w.hot and w.needs_ocr(moving)
+    clock.t += 0.22
+    assert w.needs_ocr(moving)  # сразу после клика: чаще, чем раз в 0.45 с
+    clock.t += 1.4
+    assert not w.hot and w.armed  # дальше спокойнее, но ещё ждём смену реплики
+    assert w.needs_ocr(moving)
+    clock.t += 0.25
+    assert not w.needs_ocr(moving)
+    clock.t += 3.5
+    assert not w.armed and not w.needs_ocr(moving)
+
+
+def test_dialog_text_erased_hides_at_once():
+    clock = Clock()
+    w = LineWatcher(LINE, thumbnail(frame(LINE), REGION), gated=True, clock=clock)
+    w.arm()
+    empty = thumbnail(frame(""), REGION)
+    assert w.needs_ocr(empty)
+    assert w.check("", empty) == "gone"  # текст стёрся целиком: вторую проверку не ждём
+
+
+def test_ocr_miss_without_big_change_waits():
+    w = watcher(Clock())
+    same = thumbnail(frame(LINE), REGION)
+    assert w.check("", same) is None  # OCR ничего не прочитал, а окно то же: проверим ещё раз
+    assert w.check("", same) == "gone"
