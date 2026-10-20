@@ -1,11 +1,22 @@
-"""Из строк OCR собираем реплику: склейка переносов, имя говорящего, проверка «есть ли текст»."""
+"""Из строк OCR собираем реплику: склейка переносов, имя говорящего, проверка «есть ли текст».
+
+Ещё убираем повтор: бывает, что тот же текст на экране дважды (в Danganronpa правило
+школы стоит в рамке на фоне и тут же в окне диалога), и OCR читает обе копии. Тогда
+модель переводит реплику дважды или даже досочиняет связку между копиями.
+"""
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
 
+from lexoplay.dedupe import normalize_text, similarity
 from lexoplay.ocr_model import OcrResult
+
+REPEAT_SAME = 0.85  # так похожи две копии текста (OCR читает их чуть по-разному)
+REPEAT_MIN_CHARS = 15  # короче не трогаем: «No! No!» и «Wait. Wait.» повторяют нарочно
+REPEAT_MIN_WORDS = 3
+_SENTENCE = re.compile(r"\S.*?(?:[.!?…]+[\"'»”’)\]]*(?=\s|$)|$)")
 
 _TERMINAL = tuple(".,!?…:;\"'”’»)")
 _NAME_COLON = re.compile(r"^\s*([A-Z][\w'.\- ]{0,24}?)\s*[:：]\s+(\S.*)$")
@@ -25,6 +36,49 @@ def letters_count(text: str) -> int:
 def has_text(text: str) -> bool:
     """Меньше двух букв считаем шумом OCR, а не репликой."""
     return letters_count(text) >= 2
+
+
+def _long(norm: str) -> bool:
+    return len(norm) >= REPEAT_MIN_CHARS and len(norm.split()) >= REPEAT_MIN_WORDS
+
+
+def _clean_score(text: str) -> float:
+    """Насколько чисто прочитан текст: сколько в нём настоящих слов (копия на фоне часто бледнее)."""
+    from lexoplay.ocrscore import token_score
+
+    total = 0.0
+    for tok in text.split():
+        weight, score = token_score(tok)
+        total += weight * (score - 0.5)
+    return total
+
+
+def drop_repeats(lines: list[str]) -> str:
+    """Строки окна диалога в реплику без повторённого текста (две копии на экране).
+
+    Сначала целыми блоками: верхние строки повторяют нижние (рамка на фоне и окно диалога
+    переносят строки по-разному, поэтому сравниваем склеенный текст). Потом по предложениям:
+    длинное предложение, которое уже было, второй раз не берём."""
+    lines = [x for x in lines if x.strip()]
+    for cut in range(1, len(lines)):
+        top, bottom = join_lines(lines[:cut]), join_lines(lines[cut:])
+        nt, nb = normalize_text(top), normalize_text(bottom)
+        if _long(nt) and _long(nb) and similarity(nt, nb) >= REPEAT_SAME:
+            # берём копию, прочитанную чище; поровну: нижнюю (окно диалога обычно внизу, рамка с текстом над ним)
+            return top if _clean_score(top) > _clean_score(bottom) else bottom
+    text = join_lines(lines)
+    sentences = [s.strip() for s in _SENTENCE.findall(text) if s.strip()]
+    if len(sentences) < 2:
+        return text
+    kept: list[str] = []
+    seen: list[str] = []
+    for s in sentences:
+        n = normalize_text(s)
+        if _long(n) and any(similarity(n, k) >= REPEAT_SAME for k in seen):
+            continue
+        kept.append(s)
+        seen.append(n)
+    return text if len(kept) == len(sentences) else " ".join(kept)
 
 
 def join_lines(lines: list[str]) -> str:
@@ -89,7 +143,7 @@ def to_utterance(result: OcrResult, name_text: str | None = None, *, guess_speak
     lines = [line.text for line in result.lines if line.text.strip()]
     if name_text is not None:
         speaker = join_lines([name_text]) or None
-        return Utterance(speaker if speaker and has_text(speaker) else None, join_lines(lines))
+        return Utterance(speaker if speaker and has_text(speaker) else None, drop_repeats(lines))
     if not lines:
         return Utterance(None, "")
     if guess_speaker:
@@ -97,7 +151,7 @@ def to_utterance(result: OcrResult, name_text: str | None = None, *, guess_speak
         m = _NAME_BRACKETS.match(first) or _NAME_COLON.match(first)
         if m and has_text(m.group(1)):
             rest = [m.group(2)] + lines[1:] if m.group(2).strip() else lines[1:]
-            return Utterance(m.group(1).strip(), join_lines(rest))
+            return Utterance(m.group(1).strip(), drop_repeats(rest))
         if len(lines) >= 2 and _looks_like_name(first, lines[1:]):
-            return Utterance(first.strip(), join_lines(lines[1:]))
-    return Utterance(None, join_lines(lines))
+            return Utterance(first.strip(), drop_repeats(lines[1:]))
+    return Utterance(None, drop_repeats(lines))

@@ -250,11 +250,14 @@ def _ocr_auto(out_dir: Path) -> Callable[[], tuple[str, object]]:
                 t0 = time.perf_counter()
                 reading = await p.recognize(frame, Target("t", region))
                 report[f"{name}_seconds"] = round(time.perf_counter() - t0, 3)
+                from lexoplay.textproc import to_utterance
+
                 report[name] = {
                     "chosen": reading.mode,
                     "quality": str(reading.quality),
                     "ratio": round(reading.quality.ratio, 3),
                     "text": reading.result.raw_text,
+                    "utterance": to_utterance(reading.result, reading.name_text).text,
                     "tried": reading.tried,
                     "modes": each,
                 }
@@ -299,6 +302,11 @@ def _ocr_auto(out_dir: Path) -> Callable[[], tuple[str, object]]:
         conc = report["concurrent"]
         if conc["errors"] or not conc["texts_ok"] or not report["parallel"]:  # type: ignore[index]
             return "fail", report  # одновременные чтения ломают OCR: F2 после клика стал бы медленным
+        twice = report.get("photo_twice")
+        if isinstance(twice, dict):  # один и тот же текст на экране дважды: в реплику должен попасть один раз
+            report["twice_once"] = str(twice["utterance"]).lower().count("reside") == 1
+            if not report["twice_once"]:
+                return "warn", report
         return ("ok" if pixel["ratio"] >= 0.75 and color_ok else "warn"), report  # type: ignore[index]
 
     return run

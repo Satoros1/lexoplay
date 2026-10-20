@@ -67,3 +67,30 @@ def test_sentence_start_is_not_a_speaker():
     assert to_utterance(r("I know", "what you did.")).text == "I know what you did."
     assert to_utterance(r("MIRA", "GET OUT OF MY HOUSE")).speaker == "MIRA"
     assert to_utterance(r("Old Man", "Back again?")).speaker == "Old Man"
+
+
+def test_same_text_twice_on_screen_is_read_once():
+    from lexoplay.textproc import drop_repeats
+
+    # Danganronpa: правило в рамке на фоне и тут же в окне диалога, переносы строк разные
+    both = [
+        "Students may reside only within the school.",
+        "Leaving campus is an unacceptable use of time.",
+        "Students may reside only within the school. Leaving",
+        "campus is an unacceptable use of time.",
+    ]
+    once = "Students may reside only within the school. Leaving campus is an unacceptable use of time."
+    assert drop_repeats(both) == once
+    # копия на фоне прочитана хуже: берём чистую
+    noisy = ["Students may reside only within the schooI.", "Leaving campus is an unacceptab1e use of time.", *both[2:]]
+    assert drop_repeats(noisy) == once
+    # повтор одного предложения внутри реплики
+    assert drop_repeats(["Rule one: Students may reside only within the school.", "Students may reside only within the school. Got it?"]) == (
+        "Rule one: Students may reside only within the school. Got it?"
+    )
+    # нарочные короткие повторы и обычный перенос не трогаем
+    assert drop_repeats(["No! No! No!"]) == "No! No! No!"
+    assert drop_repeats(["I said run. I said run."]) == "I said run. I said run."
+    assert drop_repeats(["Before we go any farther, I guess I should", "introduce myself."]) == (
+        "Before we go any farther, I guess I should introduce myself."
+    )
