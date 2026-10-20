@@ -48,6 +48,10 @@ class Overlay(QWidget):
         self.font_scale = 1.0
         self.opacity = 0.84
         self.show_original = False
+        self.strip_place = "above"  # above | below | top
+        self.strip_custom: Rect | None = None  # своё место для игры: x, y, ширина в долях окна
+        self.font_family = ""
+        self.font_bold = False
         self._toast_timer = QTimer(self)
         self._toast_timer.setSingleShot(True)
         self._toast_timer.timeout.connect(self._clear_toast)
@@ -123,9 +127,15 @@ class Overlay(QWidget):
             nw = min(w - 16, 420.0)
             region = Rect(max(8.0, min(cx - nw / 2, w - 8 - nw)), region.y, nw, region.h)
         px = font_px_for(h, 19.0, self.font_scale)
-        font = QFont(FONT_FAMILY)
-        font.setWeight(QFont.Weight.Medium)
-        small = QFont(FONT_FAMILY)
+        family = self.font_family or FONT_FAMILY
+        font = QFont(family)
+        font.setWeight(QFont.Weight.Bold if self.font_bold else QFont.Weight.Medium)
+        small = QFont(family)
+        custom = self.strip_custom
+        if custom is not None:
+            # своё место: ширина своя, текст переносится по ней
+            cw = max(200.0, min(w - 16, custom.w * w))
+            region = Rect(max(8.0, min(custom.x * w, w - 8 - cw)), region.y, cw, region.h)
         original = self._original_shown()
 
         def measure(size: float, f: QFont, value: str) -> tuple[QRectF, QFontMetricsF]:
@@ -148,7 +158,16 @@ class Overlay(QWidget):
             )
             orig_h = orig_br.height() + px * 0.35
         strip_h = br.height() + orig_h + 2 * pad_y
-        strip = place_strip(region, strip_h, bounds, gap=max(6.0, px * 0.4))
+        gap = max(6.0, px * 0.4)
+        if custom is not None:
+            y = max(4.0, min(custom.y * h, h - strip_h - 4))
+            strip = Rect(region.x, y, region.w, strip_h)
+        elif self.strip_place == "top":
+            strip = Rect(region.x, max(8.0, h * 0.03), region.w, strip_h)
+        elif self.strip_place == "below" and region.bottom + gap + strip_h <= h:
+            strip = Rect(region.x, region.bottom + gap, region.w, strip_h)
+        else:
+            strip = place_strip(region, strip_h, bounds, gap=gap)
         box = QRectF(strip.x, strip.y, strip.w, strip.h)
         orig_rect = None
         top = strip.y + pad_y

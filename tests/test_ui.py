@@ -24,7 +24,7 @@ def test_picker_drag_and_enter(qapp):
     picker = RegionPicker(Rect(0, 0, 800, 600), "Test Game")
     picker.open()
     got = {}
-    picker.accepted.connect(lambda r, n: got.update(region=r, name=n))
+    picker.accepted.connect(lambda r, n, s: got.update(region=r, name=n))
     QTest.mousePress(picker, Qt.MouseButton.LeftButton, pos=QPoint(40, 450))
     QTest.mouseMove(picker, QPoint(760, 580))
     QTest.mouseRelease(picker, Qt.MouseButton.LeftButton, pos=QPoint(760, 580))
@@ -262,6 +262,11 @@ class FakeCtl:
     def install_update(self):
         self.installs += 1
 
+    def progress(self):
+        from lexoplay.progress import progress
+
+        return progress(self.store, self.settings.daily_goal)
+
 
 @pytest.fixture
 def window(qapp, tmp_path, monkeypatch):
@@ -370,7 +375,7 @@ def test_picker_draws_freeze_frame(qapp):
     px = img.pixelColor(400, 500)
     assert px.red() > 120  # светлый кадр под лёгким затемнением, а не чёрный экран
     got = {}
-    picker.accepted.connect(lambda r, n: got.update(region=r))
+    picker.accepted.connect(lambda r, n, s: got.update(region=r))
     QTest.mousePress(picker, Qt.MouseButton.LeftButton, pos=QPoint(40, 450))
     QTest.mouseMove(picker, QPoint(760, 580))
     QTest.mouseRelease(picker, Qt.MouseButton.LeftButton, pos=QPoint(760, 580))
@@ -472,3 +477,76 @@ def test_game_card_shows_last_reading_and_glossary(window, qapp):
     dlg._add()  # noqa: SLF001
     assert ctl.store.glossary("dr1_us.exe") == {"Monokuma": "Монокума"}
     dlg.deleteLater()
+
+
+def test_picker_moves_and_resets_translation_strip(qapp):
+    picker = RegionPicker(Rect(0, 0, 800, 600), "Test Game", region=Rect(0.05, 0.75, 0.9, 0.2))
+    picker.open()
+    got = {}
+    picker.accepted.connect(lambda r, n, s: got.update(region=r, strip=s))
+    strip = picker.strip_rect()
+    assert strip is not None and strip.bottom() <= 450  # по умолчанию над окном диалога
+    start = strip.center().toPoint()
+    QTest.mousePress(picker, Qt.MouseButton.LeftButton, pos=start)
+    QTest.mouseMove(picker, QPoint(start.x(), 60))
+    QTest.mouseRelease(picker, Qt.MouseButton.LeftButton, pos=QPoint(start.x(), 60))
+    QTest.keyClick(picker, Qt.Key.Key_Return)
+    s = got["strip"]
+    assert s is not None and s.y < 0.15  # перетащили наверх
+    assert abs(got["region"].y - 0.75) < 1e-6  # окно диалога не тронули
+    picker2 = RegionPicker(Rect(0, 0, 800, 600), "Test Game", region=Rect(0.05, 0.75, 0.9, 0.2), strip=s)
+    picker2.open()
+    got2 = {}
+    picker2.accepted.connect(lambda r, n, s2: got2.update(strip=s2))
+    QTest.keyClick(picker2, Qt.Key.Key_R)
+    QTest.keyClick(picker2, Qt.Key.Key_Return)
+    assert got2["strip"] is None
+
+
+def test_progress_page_shows_today_week_and_goal(window, qapp):
+    from datetime import date
+
+    w, ctl = window
+    today = date.today().isoformat()
+    ctl.store.stats_add(today, "dr1_us.exe", lines=12, words=3, seconds=1500)
+    w.show_page("progress")
+    page = w.progress
+    assert page.lines_today.text() == "12"
+    assert page.words_today.text() == "3 из 10"
+    assert page.time_today.text() == "25 мин" and page.streak.text() == "1"
+    assert "реплик 12" in page.week_note.text()
+    page._goal(3)  # noqa: SLF001
+    assert ctl.settings.daily_goal == 3 and page.words_note.text() == "цель выполнена"
+
+
+def test_word_layer_explain_panel_and_clicks_stay_out_of_the_game(qapp):
+    from lexoplay.wordmode import ExplainRow, ExplainState, match_phrase
+
+    res = OcrResult((_ocr_line("Oh, and they mentioned the Ultimate Biker Gang Leader too."),))
+    views = build_views(res)
+    layer = WordLayer()
+    clicked, saves, done = [], [], []
+    layer.explain_clicked.connect(lambda: clicked.append(1))
+    layer.explain_save.connect(saves.append)
+    layer.finished.connect(done.append)
+    layer.open(Rect(0, 0, 1000, 700), Rect(0.05, 0.8, 0.9, 0.15), views)
+    qapp.processEvents()
+    layer.grab()  # отрисовка: появилась кнопка «Разбор реплики»
+    assert layer._explain_btn is not None  # noqa: SLF001
+    b = layer._explain_btn.center()  # noqa: SLF001
+    QTest.mouseClick(layer, Qt.MouseButton.LeftButton, pos=QPoint(int(b.x()), int(b.y())))
+    assert clicked == [1] and layer.is_open
+    rows = [ExplainRow("Ultimate Biker Gang Leader", "Абсолютный главарь банды байкеров", "титул в игре")]
+    rows[0].indices = match_phrase(views, rows[0].phrase)
+    layer.set_explain(ExplainState("ready", rows, "Спокойный тон."))
+    img = layer.grab().toImage()
+    assert layer.explain_open and len(layer._explain_saves) == 1 and img.width() == 1000  # noqa: SLF001
+    s = layer._explain_saves[0].center()  # noqa: SLF001
+    QTest.mouseClick(layer, Qt.MouseButton.LeftButton, pos=QPoint(int(s.x()), int(s.y())))
+    assert saves == [0]
+    # колесо и клик по пустому месту в игру не уходят: колесо глотаем, клик закрывает режим
+    QTest.mouseClick(layer, Qt.MouseButton.LeftButton, pos=QPoint(500, 40))
+    assert done == ["outside"] and not layer.is_open
+    layer.close()
+    layer.deleteLater()
+    qapp.processEvents()

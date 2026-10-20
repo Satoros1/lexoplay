@@ -156,6 +156,9 @@ QSlider::add-page:horizontal {{ background: #E4E1D8; border-radius: 2px; }}
 QSlider::handle:horizontal {{ background: {CARD}; border: 1px solid #C9C5BA; width: 16px; height: 16px;
                              margin: -7px 0; border-radius: 9px; }}
 QSlider::handle:horizontal:hover {{ border: 2px solid {GREEN}; width: 14px; height: 14px; }}
+QLabel#statValue {{ font-family: "{d}", "Segoe UI"; font-size: 20pt; font-weight: 600; }}
+QSpinBox {{ background: {CARD}; border: 1px solid {BORDER_STRONG}; border-radius: 8px; padding: 6px 8px; font-size: 10.5pt; }}
+QSpinBox:focus {{ border: 2px solid {GREEN}; padding: 5px 7px; }}
 QLabel#valueChip {{ background: #F1EFE9; border: 1px solid {BORDER}; border-radius: 7px; padding: 3px 0;
                    font-size: 9.5pt; font-weight: 700; color: {INK}; }}
 QProgressBar {{ background: #ECEAE4; border: none; border-radius: 4px; height: 8px; max-height: 8px; }}
@@ -209,6 +212,7 @@ _ICONS = {
     "trash": '<path d="M3 6h18M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/>',
     "download": '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/>',
     "search": '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>',
+    "progress": '<path d="M3 3v16a2 2 0 0 0 2 2h16"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/>',
 }
 
 

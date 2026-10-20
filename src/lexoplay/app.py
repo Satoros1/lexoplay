@@ -29,7 +29,7 @@ import time
 import uuid
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 
 from PIL import Image
@@ -50,13 +50,13 @@ from lexoplay.config import (
     set_token,
 )
 from lexoplay.debugdump import DebugDump
-from lexoplay.dedupe import LineMemory, LineRecord
+from lexoplay.dedupe import LineMemory, LineRecord, normalize_text
 from lexoplay.games import NOT_GAMES, WindowInfo, clean_title, is_game_exe
 from lexoplay.geometry import Rect
 from lexoplay.history import LineCache
 from lexoplay.hotkeys import HotkeyError, parse
 from lexoplay.lexo import Account, Deck, GameRef, LexoClient, LexoError, LexoOffline, Sense, Usage
-from lexoplay.lookup import AnthropicLookup
+from lexoplay.lookup import AnthropicLookup, Explanation
 from lexoplay.ocr_model import OcrResult
 from lexoplay.ocrscore import Quality
 from lexoplay.outbox import Outbox
@@ -78,13 +78,14 @@ from lexoplay.win import capture, winapi
 from lexoplay.win.hooks import HotkeyManager, WindowEvents
 from lexoplay.win.input import InputWatch
 from lexoplay.win.ocr import INSTALL_HINT, OcrUnavailable, WinOcr
-from lexoplay.wordmode import CardState, WordView, build_views, selected_text
+from lexoplay.wordmode import CardState, ExplainRow, ExplainState, WordView, build_views, match_phrase, selected_text
 
 log = logging.getLogger(__name__)
 
 RELEASES_URL = "https://github.com/Satoros1/lexoplay/releases/latest"
 FRESH_OCR_S = 2.0  # F3 берёт распознанную для F2 реплику, если она моложе этого
 AUTO_SETTLE_S = 3.0  # автоперевод ждёт, пока реплика допечатается, дольше обычного F2
+SETTLE_S = 3.0  # сколько секунд после перевода следим, не допечаталась ли реплика (без действий игрока)
 UPDATE_EVERY_MS = 6 * 3600 * 1000
 
 
@@ -156,6 +157,7 @@ class WordCtx:
     card: CardState | None = None
     seq: int = 0
     lookups: dict[str, Sense] = field(default_factory=dict)
+    explain: ExplainState | None = None
 
 
 class Bridge(QObject):
@@ -231,7 +233,10 @@ class App(QObject):
         self._apply_overlay_settings()
         self.word_layer.selected.connect(self._on_word_selected)
         self.word_layer.add_clicked.connect(self._on_word_add)
+        self.word_layer.explain_clicked.connect(self._request_explain)
+        self.word_layer.explain_save.connect(self._on_explain_save)
         self.word_layer.finished.connect(self._on_words_finished)
+        self._explain_cache: dict[tuple[str, str], Explanation] = {}
         self.word_ctx: WordCtx | None = None
         self.current: CurrentLine | None = None
         self.window: MainWindow | None = None
@@ -260,6 +265,9 @@ class App(QObject):
         self.update_timer = QTimer(self)
         self.update_timer.setInterval(UPDATE_EVERY_MS)
         self.update_timer.timeout.connect(lambda: self.check_updates(manual=False))
+        self.play_timer = QTimer(self)  # минуты в игре для вкладки «Прогресс»
+        self.play_timer.setInterval(60_000)
+        self.play_timer.timeout.connect(self._play_tick)
 
         self.input = InputWatch()  # клики и клавиши игрока: после них перевод может смениться
         self.input.pressed.connect(self._on_user_input)
@@ -292,6 +300,7 @@ class App(QObject):
         self._outbox_worker = self.bg.submit(self.outbox.run_forever())
         self.session_timer.start()
         self.vocab_timer.start()
+        self.play_timer.start()
         self._update_tray()
         self.tray.show()
         if self.client.linked:
@@ -320,6 +329,7 @@ class App(QObject):
     def shutdown(self) -> None:
         self._closing = True
         self.update_timer.stop()
+        self.play_timer.stop()
         self.word_layer.finish("closed")
         self.sessions.end_all()
         try:  # дослать конец сессий и свежие слова; что не успело, уйдёт при следующем запуске
@@ -495,6 +505,29 @@ class App(QObject):
             "failed_hotkeys": sorted(k for k in self._failed_keys if not k.startswith("warned:")),
             "translator": type(self.translator).__name__ if self.translator else None,
         }
+
+    # ------------------------------------------------------------------ прогресс
+    def _stat(self, exe: str, *, lines: int = 0, words: int = 0, seconds: int = 0) -> None:
+        today = date.today().isoformat()
+        before = self.store.stats_days(today).get(today, (0, 0, 0))[1] if words else 0
+        try:
+            self.store.stats_add(today, exe, lines=lines, words=words, seconds=seconds)
+        except Exception:
+            log.exception("статистика не записалась")
+            return
+        goal = self.settings.daily_goal
+        if words and goal > 0 and before < goal <= before + words:
+            self.overlay.toast(f"Цель на сегодня выполнена: {goal} новых слов", 4000)
+            self.tray.showMessage("LexoPlay", f"Цель на сегодня выполнена: {goal} новых слов. Так держать!", app_icon(), 5000)
+
+    def _play_tick(self) -> None:
+        if self.active and self._game_in_focus():
+            self._stat(self.active.exe, seconds=60)
+
+    def progress(self):  # type: ignore[no-untyped-def]
+        from lexoplay.progress import progress
+
+        return progress(self.store, self.settings.daily_goal)
 
     # ------------------------------------------------------------------ свой ключ
     def usage_summary(self) -> str:
@@ -737,6 +770,7 @@ class App(QObject):
             ("words", hk.words, "game"),
             ("hide", hk.hide, "game"),
             ("reselect", hk.reselect, "game"),
+            ("explain", hk.explain, "game"),
             ("add_game", hk.add_game, "global"),
             ("words_esc", "Escape", "words"),
             ("words_enter", "Enter", "words"),
@@ -770,6 +804,9 @@ class App(QObject):
         self.overlay.font_scale = self.settings.font_scale
         self.overlay.opacity = self.settings.strip_opacity
         self.overlay.show_original = self.settings.show_original
+        self.overlay.strip_place = self.settings.strip_place
+        self.overlay.font_family = self.settings.strip_font
+        self.overlay.font_bold = self.settings.strip_bold
         self.word_layer.font_scale = self.settings.font_scale
 
     def _rebuild_translator(self) -> None:
@@ -1026,6 +1063,10 @@ class App(QObject):
             day = self.own_usage.today()
             if day.lines or day.words:
                 text += f"\nСвоим ключом сегодня: реплик {day.lines}, слов {day.words}"
+        if self.settings.daily_goal > 0:
+            today = date.today().isoformat()
+            words = self.store.stats_days(today).get(today, (0, 0, 0))[1]
+            text += f"\nНовых слов сегодня: {words} из {self.settings.daily_goal}"
         if self.settings.auto_translate:
             text += "\nАвтоперевод включён"
         return text[:127]
@@ -1133,6 +1174,7 @@ class App(QObject):
                 self._hide_strip()
                 self._close_words("switch")
             self.active = Active(root, pid, game.exe)
+            self.overlay.strip_custom = game.strip_pos
             self.events.watch_game(root, pid)
             self.hotkeys.set_group("game", not self._hotkeys_paused)
             self.store.touch(game.exe)
@@ -1209,6 +1251,12 @@ class App(QObject):
             if self.word_layer.is_open:
                 self.word_layer.press_enter()
             return
+        if name == "explain" and self.word_layer.is_open:
+            if self.word_layer.explain_open:
+                self.word_layer.hide_explain()
+            else:
+                self._request_explain()
+            return
         if self.word_layer.is_open and name in ("translate", "words", "hide"):
             self._close_words("hotkey")
             return
@@ -1225,6 +1273,8 @@ class App(QObject):
             self.open_picker()
         elif name == "words":
             self.f3()
+        elif name == "explain":
+            self.f3(explain=True)
 
     def add_current_game(self) -> None:
         hwnd = winapi.root_window(winapi.foreground_window())
@@ -1280,6 +1330,9 @@ class App(QObject):
             placer=native_place,
             on_native=winapi.exclude_from_capture,
             background=background,
+            strip=game.strip_pos,
+            strip_place=self.settings.strip_place,
+            font_scale=self.settings.font_scale,
         )
         picker.accepted.connect(self._on_picked)
         picker.cancelled.connect(self._on_pick_cancelled)
@@ -1287,15 +1340,16 @@ class App(QObject):
         picker.open()
         winapi.force_foreground(int(picker.winId()))
 
-    def _on_picked(self, region: Rect, name_region: Rect | None) -> None:
+    def _on_picked(self, region: Rect, name_region: Rect | None, strip: Rect | None = None) -> None:
         self.picker = None
         self.state = "idle"
         if not self.active:
             return
         game = self.store.get_game(self.active.exe)
         if game:
-            self.store.save_game(game.with_(region=region, name_region=name_region))
-            log.info("область диалога %s: %s", game.exe, region.to_dict())
+            self.store.save_game(game.with_(region=region, name_region=name_region, strip_pos=strip))
+            self.overlay.strip_custom = strip
+            log.info("область диалога %s: %s, плашка перевода: %s", game.exe, region.to_dict(), strip.to_dict() if strip else "по умолчанию")
         self._return_to_game()
         self._set_status()
         QTimer.singleShot(300, lambda: self._f2_when_back(0))  # сразу показать перевод текущей реплики
@@ -1418,6 +1472,7 @@ class App(QObject):
         # клик, пока идёт перевод, тоже считается: реплика могла смениться раньше, чем пришёл перевод
         self._busy_since = time.monotonic()
         self.input.start()
+        self.overlay.strip_custom = game.strip_pos
         self.overlay.show_busy(game.region)
         self.geom_timer.start()
         if self.settings.debug:
@@ -1490,6 +1545,7 @@ class App(QObject):
         if out.kind in ("translated", "repeat") and out.record and game and game.region:
             if out.kind == "translated" or out.cached:
                 self.sessions.line_translated(game.exe)
+                self._stat(game.exe, lines=1)
             if own and out.kind == "translated":
                 self.own_usage.add("line", out.usage)
             elif own and out.cached:
@@ -1498,7 +1554,7 @@ class App(QObject):
                 self.current = CurrentLine(game.exe, out.ocr, out.utterance, out.record, time.time(), out.thumb)
             source = out.utterance.text if out.utterance else out.record.source
             self.overlay.show_text(game.region, out.record.translation, original=source)
-            self._watch_line(source, out.thumb)
+            self._watch_line(source, out.thumb, settle=True)
             if self.settings.auto_translate:
                 self.auto_live = True
                 if not self._auto_hint:
@@ -1544,13 +1600,15 @@ class App(QObject):
             self._stop_watch()
 
     # ------------------------------------------------------------------ смена реплики
-    def _watch_line(self, text: str, thumb: Image.Image | None) -> None:
-        """Следить за показанной репликой: перевод уберём, когда игрок её пропустит."""
+    def _watch_line(self, text: str, thumb: Image.Image | None, *, settle: bool = False) -> None:
+        """Следить за показанной репликой: перевод уберём, когда игрок её пропустит.
+
+        settle: первые секунды проверять и без действий игрока, не допечаталась ли реплика."""
         if thumb is None:
             self.watcher = None
             return
         gated = self.input.start()  # не включился Raw Input: следим без него, как раньше
-        self.watcher = LineWatcher(text, thumb, gated=gated)
+        self.watcher = LineWatcher(text, thumb, gated=gated, settle_for=SETTLE_S if settle else 0.0)
         if self._last_input > self._busy_since:
             self.watcher.arm()  # игрок кликнул, пока шёл перевод: сразу проверить, та ли ещё реплика
         self.watch_timer.start()
@@ -1570,7 +1628,9 @@ class App(QObject):
         self.watcher = None
         self.input.stop()
 
-    def _on_user_input(self) -> None:
+    def _on_user_input(self, kind: str = "key") -> None:
+        if kind == "mouse" and winapi.cursor_over_own_window():
+            return  # клик по словам или разбору реплики: в игру он не попал, реплика та же
         self._last_input = time.monotonic()
         if self.watcher is not None:
             self.watcher.arm()
@@ -1625,7 +1685,11 @@ class App(QObject):
         # реплика сменилась (игрок кликнул в игру): старый перевод и подчёркивания убираем
         self._close_words("changed")
         self.current = None
-        if auto and verdict == "new":
+        if verdict == "grown" and self._game_in_focus():
+            # реплика допечаталась: переводим её целиком, а не прячем
+            self._hide_strip(keep_auto=True)
+            self.f2(auto=auto)
+        elif auto and verdict == "new":
             self._hide_strip(keep_auto=True)
             self.f2(auto=True)
         elif auto:
@@ -1639,7 +1703,8 @@ class App(QObject):
         if self.word_layer.is_open:
             self.word_layer.finish(reason)
 
-    def f3(self) -> None:
+    def f3(self, *, explain: bool = False) -> None:
+        """Режим слов. explain: сразу открыть разбор реплики (F7)."""
         if self.state != "idle" or not self.active:
             return
         game = self.store.get_game(self.active.exe)
@@ -1666,6 +1731,8 @@ class App(QObject):
             and (self.overlay.strip_visible or time.time() - cur.at < FRESH_OCR_S)
         ):
             self._open_words(game, session, cur)
+            if explain:
+                self._request_explain()
             return
         pipeline = self._pipeline(game.exe)
         if pipeline is None:
@@ -1705,6 +1772,8 @@ class App(QObject):
             s = self.sessions.get(game.exe)
             if g and s:
                 self._open_words(g, s, line)
+                if explain:
+                    self._request_explain()
 
         self.run_bg(pipeline.scan(grab, target), finished)
 
@@ -1718,10 +1787,162 @@ class App(QObject):
             self.word_layer.deck_label = f"Колода {game.deck_label}"
         else:
             self.word_layer.deck_label = "Сохранится во вкладку «Слова» в LexoPlay"
+        self.word_layer.explain_key = self.settings.hotkeys.explain
         self.word_layer.open(self.display, game.region, views, strip=self.overlay.strip_rect())
         self.hotkeys.set_group("words", not self._hotkeys_paused)
         if self.watcher is None:
             self._watch_line(line.sentence, line.thumb)
+
+    # ------------------------------------------------------------------ разбор реплики (F7)
+    def _request_explain(self) -> None:
+        ctx = self.word_ctx
+        if ctx is None or not self.word_layer.is_open:
+            return
+        if ctx.explain is not None and ctx.explain.phase == "ready":
+            self.word_layer.set_explain(ctx.explain)
+            return
+        key = (ctx.exe, normalize_text(ctx.line.sentence))
+        cached = self._explain_cache.get(key)
+        if cached is not None:
+            ctx.explain = self._explain_state(ctx, cached)
+            self.word_layer.set_explain(ctx.explain)
+            return
+        if ctx.explain is not None and ctx.explain.phase == "loading":
+            self.word_layer.set_explain(ctx.explain)
+            return
+        if not self.client.linked and self.own_lookup is None:
+            self.word_layer.set_explain(
+                ExplainState("error", note="Для разбора привяжи ПК к Lexo или вставь свой ключ Anthropic во вкладке «Ещё».")
+            )
+            return
+        ctx.explain = ExplainState("loading")
+        self.word_layer.set_explain(ctx.explain)
+
+        def finished(result: Any, err: BaseException | None) -> None:
+            if self.word_ctx is not ctx:
+                return
+            if err is None:
+                self._explain_cache[key] = result
+                if len(self._explain_cache) > 100:
+                    self._explain_cache.pop(next(iter(self._explain_cache)))
+                ctx.explain = self._explain_state(ctx, result)
+            else:
+                if isinstance(err, LexoError) and err.status in (401, 426):
+                    self._on_lexo_error(err)
+                note = (
+                    err.message if isinstance(err, LexoError) else
+                    "Нет связи с Lexo." if isinstance(err, LexoOffline) else
+                    str(err) if isinstance(err, TranslationError) else "Не получилось разобрать реплику."
+                )
+                if not isinstance(err, (LexoError, LexoOffline, TranslationError)):
+                    log.error("разбор реплики упал", exc_info=err)
+                ctx.explain = ExplainState("error", note=note)
+            if self.word_layer.is_open:
+                self.word_layer.set_explain(ctx.explain, show=self.word_layer.explain_open)
+
+        self.run_bg(self._explain_call(ctx), finished)
+
+    async def _explain_call(self, ctx: WordCtx) -> Explanation:
+        line = ctx.line
+        record = line.record
+        speaker = line.utterance.speaker if line.utterance else (record.speaker if record else None)
+        translation = record.translation if record else None
+        pipeline = self.pipelines.get(ctx.exe)
+        norm = normalize_text(line.sentence)
+        earlier = [r for r in (pipeline.memory.context(6) if pipeline else []) if r.norm != norm]
+        if self.client.linked or self.own_lookup is None:
+            return await self.client.explain(
+                session_id=ctx.session_id,
+                game=GameRef(ctx.title, ctx.exe),
+                sentence=line.sentence,
+                speaker=speaker,
+                translation=translation,
+                context=[{"speaker": r.speaker, "source": r.source, "translation": r.translation} for r in earlier],
+            )
+        lookup = self.own_lookup
+        result = await lookup.explain(
+            sentence=line.sentence,
+            speaker=speaker,
+            translation=translation,
+            game=ctx.title,
+            context=[(r.speaker, r.source) for r in earlier],
+            target_lang=self.settings.target_lang,
+            source_lang=self.settings.source_lang,
+        )
+        self.own_usage.add("explain", lookup.last_usage)
+        return result
+
+    def _explain_state(self, ctx: WordCtx, exp: Explanation) -> ExplainState:
+        rows = [ExplainRow(i.phrase, i.meaning, i.note, match_phrase(ctx.views, i.phrase)) for i in exp.items]
+        return ExplainState("ready", rows, exp.summary)
+
+    def _on_explain_save(self, index: int) -> None:
+        """«+» у пункта разбора: фраза уходит в слова (в Lexo или во вкладку «Слова»)."""
+        ctx = self.word_ctx
+        if ctx is None or ctx.explain is None or not 0 <= index < len(ctx.explain.rows):
+            return
+        row = ctx.explain.rows[index]
+        if row.saved:
+            return
+        self._save_word(ctx, selection=row.phrase, lemma=row.phrase, translation=row.meaning, ipa=None, pos=None)
+        row.saved = True
+        self.word_layer.set_explain(ctx.explain)
+        where = "Lexo" if self.client.linked else "«Слова»"
+        self.overlay.toast(f"{row.phrase}: сохранено в {where}")
+
+    def _save_word(
+        self,
+        ctx: WordCtx,
+        *,
+        selection: str,
+        lemma: str | None,
+        translation: str | None,
+        ipa: str | None,
+        pos: str | None,
+        marked: str | None = None,
+    ) -> None:
+        """Сохранить слово или фразу из реплики: локально всегда, в Lexo, если ПК привязан."""
+        record = ctx.line.record
+        game = self.store.get_game(ctx.exe)
+        linked = self.client.linked
+        self.store.word_add(
+            SavedWord(
+                exe=ctx.exe,
+                game=ctx.title,
+                selection=selection[:80],
+                lemma=(lemma or None) and lemma[:80],
+                translation=(translation or None) and translation[:200],
+                ipa=ipa,
+                pos=pos,
+                sentence=ctx.line.sentence[:2000],
+                sentence_translation=record.translation if record else None,
+                created_at=time.time(),
+                lexo=linked,
+            )
+        )
+        if linked:
+            deck_mode = game.deck_mode if game else self.settings.deck
+            self.outbox.enqueue(
+                "card",
+                {
+                    "idempotency_key": str(uuid.uuid4()),
+                    "session_id": ctx.session_id,
+                    "game": GameRef(ctx.title, ctx.exe).to_json(),
+                    "selection": selection[:80],
+                    "sentence": ctx.line.sentence[:2000],
+                    "sentence_translation": record.translation if record else None,
+                    "lemma": (lemma or None) and lemma[:80],
+                    "translation": (translation or None) and translation[:200],
+                    "marked_translation": marked,
+                    "deck": "current" if deck_mode == "current" else "game",
+                    "deck_id": game.deck_id if game and deck_mode == "deck" else None,
+                },
+            )
+        self.vocab.add(lemma or selection)
+        self.sessions.word_added(ctx.exe)
+        self._stat(ctx.exe, words=1)
+        ctx.views = build_views(ctx.line.ocr, self.vocab.known)
+        self.word_layer.set_views(ctx.views)
 
     def _set_card(self, card: CardState | None) -> None:
         if self.word_ctx is not None:
@@ -1807,83 +2028,28 @@ class App(QObject):
         if ctx is None or not ctx.selection or ctx.card is None or not ctx.card.button_enabled:
             return
         sense = ctx.sense
-        record = ctx.line.record
-        game = self.store.get_game(ctx.exe)
-        deck_mode = game.deck_mode if game else self.settings.deck
-        linked = self.client.linked
-        self.store.word_add(
-            SavedWord(
-                exe=ctx.exe,
-                game=ctx.title,
-                selection=ctx.selection[:80],
-                lemma=sense.lemma[:80] if sense else None,
-                translation=sense.translation[:200] if sense and sense.translation else None,
-                ipa=sense.ipa if sense else None,
-                pos=sense.pos if sense else None,
-                sentence=ctx.line.sentence[:2000],
-                sentence_translation=record.translation if record else None,
-                created_at=time.time(),
-                lexo=linked,
-            )
+        self._save_word(
+            ctx,
+            selection=ctx.selection,
+            lemma=sense.lemma if sense else None,
+            translation=sense.translation if sense and sense.translation else None,
+            ipa=sense.ipa if sense else None,
+            pos=sense.pos if sense else None,
+            marked=(sense.marked_translation or None) if sense else None,
         )
-        if not linked:
-            self._word_saved_locally(ctx, sense)
-            return
-        payload = {
-            "idempotency_key": str(uuid.uuid4()),
-            "session_id": ctx.session_id,
-            "game": GameRef(ctx.title, ctx.exe).to_json(),
-            "selection": ctx.selection[:80],
-            "sentence": ctx.line.sentence[:2000],
-            "sentence_translation": record.translation if record else None,
-            "lemma": sense.lemma[:80] if sense else None,
-            "translation": sense.translation[:200] if sense and sense.translation else None,
-            "marked_translation": (sense.marked_translation or None) if sense else None,
-            "deck": "current" if deck_mode == "current" else "game",
-            "deck_id": game.deck_id if game and deck_mode == "deck" else None,
-        }
-        self.outbox.enqueue("card", payload)
         word = sense.lemma if sense else ctx.selection
-        self.vocab.add(word)
-        self.sessions.word_added(ctx.exe)
-        in_deck = bool(sense and sense.in_deck)
         card = ctx.card
-        deck = game.deck_label if game else ""
-        self._set_card(
-            CardState(
-                "saved",
-                card.title,
-                card.ipa,
-                card.pos,
-                list(card.senses),
-                in_deck=in_deck,
-                note="Пример из игры добавлен к карточке" if in_deck else f"Сохранено в колоду {deck}",
-            )
-        )
-        ctx.views = build_views(ctx.line.ocr, self.vocab.known)
-        self.word_layer.set_views(ctx.views)
-        self.overlay.toast(f"{word}: сохранено в Lexo")
-
-    def _word_saved_locally(self, ctx: WordCtx, sense: Sense | None) -> None:
-        word = sense.lemma if sense else ctx.selection
-        self.vocab.add(word)
-        self.sessions.word_added(ctx.exe)
-        card = ctx.card
-        assert card is not None
-        self._set_card(
-            CardState(
-                "saved",
-                card.title,
-                card.ipa,
-                card.pos,
-                list(card.senses),
-                note="Сохранено во вкладку «Слова». После привязки к Lexo уйдёт в карточки само",
-                local=True,
-            )
-        )
-        ctx.views = build_views(ctx.line.ocr, self.vocab.known)
-        self.word_layer.set_views(ctx.views)
-        self.overlay.toast(f"{word}: сохранено в «Слова»")
+        if self.client.linked:
+            game = self.store.get_game(ctx.exe)
+            in_deck = bool(sense and sense.in_deck)
+            deck = game.deck_label if game else ""
+            note = "Пример из игры добавлен к карточке" if in_deck else f"Сохранено в колоду {deck}"
+            self._set_card(CardState("saved", card.title, card.ipa, card.pos, list(card.senses), in_deck=in_deck, note=note))
+            self.overlay.toast(f"{word}: сохранено в Lexo")
+        else:
+            note = "Сохранено во вкладку «Слова». После привязки к Lexo уйдёт в карточки само"
+            self._set_card(CardState("saved", card.title, card.ipa, card.pos, list(card.senses), note=note, local=True))
+            self.overlay.toast(f"{word}: сохранено в «Слова»")
 
     def _on_words_finished(self, reason: str) -> None:
         self.word_ctx = None

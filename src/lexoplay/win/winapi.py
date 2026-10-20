@@ -81,6 +81,25 @@ WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, HWND, wintypes.LPARAM)
 user32.EnumWindows.argtypes = [WNDENUMPROC, wintypes.LPARAM]
 
 
+user32.GetCursorPos.argtypes = [ctypes.POINTER(wintypes.POINT)]
+user32.WindowFromPoint.argtypes = [wintypes.POINT]
+user32.WindowFromPoint.restype = HWND
+
+
+def cursor_window() -> int:
+    """Окно под курсором мыши (прозрачные для кликов окна Windows пропускает)."""
+    pt = wintypes.POINT()
+    if not user32.GetCursorPos(ctypes.byref(pt)):
+        return 0
+    return _hwnd(user32.WindowFromPoint(pt))
+
+
+def cursor_over_own_window() -> bool:
+    """Клик пришёлся в окно LexoPlay (режим слов, разбор реплики), а не в игру."""
+    hwnd = cursor_window()
+    return bool(hwnd) and window_pid(root_window(hwnd)) == os.getpid()
+
+
 def _hwnd(h: int | None) -> int:
     return int(h or 0)
 

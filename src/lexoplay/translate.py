@@ -46,6 +46,7 @@ How to translate a line:
 - The text was read from the screen by OCR: silently fix recognition errors (l/I, 0/O, rn/m, missing spaces, stray symbols). ALL CAPS is just the game's font: use normal capitalization.
 - If the speaker label looks like a piece of the sentence rather than a name, treat it as part of the line.
 - If a line is cut off, translate what is there without inventing the rest.
+- Keep the punctuation of the original: the same ? ! and three dots (...) inside and at the end, and a period where the original has one. If the original ends with a comma or breaks off because the sentence continues in the next text box, end the translation with "..." and never with a comma.
 
 Reply with the translation of the line after "Translate this line" and nothing else: no quotes, no notes, no original text, no speaker name.
 Never use the em dash character; use a comma, a colon or a new sentence instead."""
@@ -141,8 +142,68 @@ def build_user(req: TranslateRequest) -> str:
 
 
 def no_dash(text: str) -> str:
-    """Длинное тире в переводе читается как машинный текст: в Lexo его нет нигде."""
-    return text.replace(" — ", ", ").replace("—", ", ").strip()
+    """Длинное тире в переводе читается как машинный текст: в Lexo его нет нигде.
+
+    Тире в конце (речь оборвалась) становится многоточием, а не запятой."""
+    t = text.strip()
+    t = re.sub(r"\s*[—–]\s*([\"'»”’)\]]*)$", r"…\1", t)
+    return t.replace(" — ", ", ").replace("—", ", ").strip()
+
+
+_CLOSERS = "\"'»”’)]"
+_MARKS = ".!?…,;:—–-"
+
+
+def line_ending(text: str) -> str:
+    """Чем кончается реплика: «…», «?», «!», «?!», «.», «,» (фраза продолжится), «—» (оборвалась) или ""."""
+    t = text.rstrip().rstrip(_CLOSERS).rstrip()
+    if t.endswith(("...", "…", "..")):
+        return "…"
+    m = re.search(r"[.!?,;:—–-]+$", t)
+    if not m:
+        return ""
+    tail = m.group(0)
+    if "?" in tail or "!" in tail:
+        q = "".join(c for c in tail if c in "?!")
+        return "?!" if "?" in q and "!" in q else q[0]
+    if tail[-1] in ",;:":
+        return ","
+    if tail[-1] in "—–-":
+        return "—"
+    return "."
+
+
+def fix_punctuation(source: str, translation: str) -> str:
+    """Конец перевода как у оригинала: без висячей запятой, с точкой и многоточием там, где они были.
+
+    Модель иногда теряет точку или «...» в конце, а реплику, которая продолжается в следующем
+    окне диалога (оригинал кончается запятой), заканчивает запятой. Такое чиним здесь."""
+    t = translation.rstrip()
+    if not t:
+        return t
+    i = len(t)
+    while i > 0 and (t[i - 1] in _CLOSERS or t[i - 1] in _MARKS or t[i - 1].isspace()):
+        i -= 1
+    body, trail = t[:i], t[i:]
+    marks = "".join(c for c in trail if c in _MARKS)
+    closers = "".join(c for c in trail if c in _CLOSERS)
+    marks_after = bool(closers) and bool(marks) and trail.rstrip()[-1] in _MARKS  # «Лидер».
+    src = line_ending(source)
+    cont = "…" if src in ("…", ",", "—", "") else src
+    if marks and marks[-1] in ",;:—–-":
+        fixed = marks.rstrip(",;:—–- ") or ""
+        fixed = fixed if fixed and fixed[-1] in ".!?…" else cont
+    elif not marks:
+        fixed = {"": "", ",": "…", "—": "…"}.get(src, src)
+    elif marks in (".",) and src == "…":
+        fixed = "…"
+    else:
+        return t
+    if not fixed:
+        return (body + closers) if closers else body
+    if marks_after or (closers and not marks and fixed == "."):
+        return body + closers + fixed
+    return body + fixed + closers
 
 
 _QUOTES = "\"'«»“”„`"
@@ -265,7 +326,7 @@ class AnthropicTranslator:
                 raise friendly_error(a, exc, self._model) from exc
             except Exception as exc:
                 raise friendly_error(a, exc, self._model) from exc
-            translation = clean_translation(raw, req.speaker)
+            translation = fix_punctuation(req.text, clean_translation(raw, req.speaker))
             if translation:
                 return TranslateResult(source=req.text, translation=translation, usage=usage)
             if stop == "refusal":
@@ -375,4 +436,4 @@ class LexoTranslator:
             raise TranslationError(exc.message, exc.code) from exc
         if usage and self._on_usage:
             self._on_usage(usage)
-        return TranslateResult(source=source or req.text, translation=no_dash(translation))
+        return TranslateResult(source=source or req.text, translation=fix_punctuation(req.text, no_dash(translation)))

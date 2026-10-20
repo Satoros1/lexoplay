@@ -20,9 +20,10 @@ from typing import Literal, Protocol
 
 from PIL import Image
 
-from lexoplay.dedupe import LineMemory, LineRecord, normalize_text
+from lexoplay.dedupe import LineMemory, LineRecord, normalize_text, similarity
 from lexoplay.geometry import Rect
 from lexoplay.ocr_model import OcrResult
+from lexoplay.ocrfuse import fuse
 from lexoplay.ocrscore import Quality, quality
 from lexoplay.preprocess import MODES, Prepared, changed, prepare, preview, thumbnail
 from lexoplay.textproc import Utterance, has_text, to_utterance
@@ -144,11 +145,19 @@ class Pipeline:
         except Exception as exc:  # GDI/WinRT бросают что угодно
             raise CaptureError(str(exc)) from exc
 
-    async def stable_frame(self, grab: Grab, region: Rect, max_wait: float | None = None) -> Image.Image:
-        """Ждём, пока текст допечатается: два кадра подряд с одинаковой областью."""
+    async def stable_frame(
+        self, grab: Grab, region: Rect, max_wait: float | None = None, mode: str | None = None
+    ) -> Image.Image:
+        """Ждём, пока текст допечатается.
+
+        Обычно хватает двух одинаковых кадров подряд. Но если за текстом шевелится сцена
+        (Danganronpa, анимированные фоны), одинаковых кадров не будет никогда, и раньше
+        перевод брался с недопечатанной реплики. Тогда сравниваем уже текст: читаем OCR,
+        пока он не перестанет расти."""
+        wait = max_wait or self._max_wait
         frame = await self._grab(grab)
         prev = thumbnail(frame, region)
-        steps = max(1, int((max_wait or self._max_wait) / self._stable_wait))
+        steps = max(1, int(min(wait, 0.6) / self._stable_wait))
         for _ in range(steps):
             await self._sleep(self._stable_wait)
             nxt = await self._grab(grab)
@@ -157,38 +166,60 @@ class Pipeline:
             if not changed(prev, cur, self._stable_threshold):
                 return frame
             prev = cur
+        # сцена шевелится: ждём, пока перестанет меняться сам текст
+        read_mode = mode if mode in MODES else MODES[0]
+        last = normalize_text((await self._read(frame, region, read_mode)).raw_text)
+        for _ in range(max(1, int(wait * 2 / 0.3))):
+            await self._sleep(0.3)
+            nxt = await self._grab(grab)
+            now = normalize_text((await self._read(nxt, region, read_mode)).raw_text)
+            frame = nxt
+            if now and similarity(now, last) >= 0.95 and len(now) <= len(last) + 2:
+                return frame
+            last = now
         return frame
 
     async def _read(self, frame: Image.Image, region: Rect, mode: str) -> OcrResult:
-        prepared = prepare(frame, region, mode=mode)
+        prepared = await asyncio.to_thread(prepare, frame, region, mode=mode)
         if self._debug:
             self._debug(f"prepared_{mode}", prepared.image)
         return await self._ocr.recognize(prepared)
 
     async def recognize(self, frame: Image.Image, target: Target, *, explore: bool = True) -> Reading:
-        """Распознать окно диалога. explore=False: только уже выбранным способом (проверки смены реплики)."""
+        """Распознать окно диалога.
+
+        explore=True (F2, F3): читаем всеми способами сразу, берём лучший и добавляем слова,
+        которые он пропустил (выделенные другим цветом). explore=False (проверки смены
+        реплики): только способом, который подошёл игре."""
         first = target.ocr_mode if target.ocr_mode in MODES else MODES[0]
-        result = await self._read(frame, target.region, first)
-        q = quality(result, self.source_lang)
-        best = Reading(result, None, first, q, {first: str(q)})
-        if explore and not q.ok:
-            # прочитано плохо: мусор вместо слов. Пробуем другие способы, лучший запомнит приложение
-            for mode in MODES:
-                if mode == first:
+        if not explore:
+            result = await self._read(frame, target.region, first)
+            reading = Reading(result, None, first, quality(result, self.source_lang))
+        else:
+            modes = [first] + [m for m in MODES if m != first]
+            got = await asyncio.gather(*(self._read(frame, target.region, m) for m in modes), return_exceptions=True)
+            readings = []
+            for mode, res in zip(modes, got, strict=True):
+                if isinstance(res, BaseException):
+                    log.warning("OCR способом %s не прочитал: %s", mode, res)
                     continue
-                res = await self._read(frame, target.region, mode)
-                mq = quality(res, self.source_lang)
-                best.tried[mode] = str(mq)
-                if mq.rank > best.quality.rank + 0.5:
-                    best.result, best.mode, best.quality = res, mode, mq
-                if mq.ok:
-                    break
-            if len(best.tried) > 1:
-                log.info("OCR: способы %s, выбран %s", best.tried, best.mode)
+                readings.append((mode, res, quality(res, self.source_lang)))
+            if not readings:
+                raise got[0] if isinstance(got[0], BaseException) else RuntimeError("OCR не прочитал")
+            # лучший по оценке; при равенстве тот, что уже подошёл игре
+            mode, best, q = max(readings, key=lambda r: (r[2].rank, r[0] == first))
+            others = [r[1] for r in sorted(readings, key=lambda r: -r[2].rank) if r[0] != mode]
+            fused, added = fuse(best, others, self.source_lang)
+            reading = Reading(fused, None, mode, quality(fused, self.source_lang) if added else q)
+            reading.tried = {m: str(qq) for m, _r, qq in readings}
+            if added:
+                reading.tried["+слов"] = str(added)
+            if mode != first or added:
+                log.info("OCR: способы %s, выбран %s, добавлено слов из других: %s", reading.tried, mode, added)
         if target.name_region is not None:
-            name_res = await self._read(frame, target.name_region, best.mode)
-            best.name_text = name_res.raw_text
-        return best
+            name_res = await self._read(frame, target.name_region, reading.mode)
+            reading.name_text = name_res.raw_text
+        return reading
 
     def context_for(self, target: Target, text: str) -> list[LineRecord]:
         """Прошлые реплики для перевода: из этой сессии, а в её начале ещё и из истории игры.
@@ -222,7 +253,7 @@ class Pipeline:
         self._warm_task = asyncio.ensure_future(warm()) if warm is not None else None
         timings: dict[str, float] = {}
         try:
-            frame = await self.stable_frame(grab, target.region, settle)
+            frame = await self.stable_frame(grab, target.region, settle, target.ocr_mode)
         except CaptureError as exc:
             return F2Outcome("error", message=f"Не получилось захватить окно игры ({exc}).")
         timings["capture"] = time.perf_counter() - t0
@@ -309,7 +340,7 @@ class Pipeline:
     async def scan(self, grab: Grab, target: Target) -> ScanOutcome:
         """Для F3: дождаться стабильного кадра и распознать, без запроса перевода."""
         try:
-            frame = await self.stable_frame(grab, target.region)
+            frame = await self.stable_frame(grab, target.region, None, target.ocr_mode)
         except CaptureError as exc:
             return ScanOutcome(False, message=f"Не получилось захватить окно игры ({exc}).")
         if self._debug:

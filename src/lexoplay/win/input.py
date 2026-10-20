@@ -124,10 +124,14 @@ class _Filter(QAbstractNativeEventFilter):
         return False, 0
 
 
-class InputWatch(QObject):
-    """pressed: игрок кликнул, крутанул колесо или нажал клавишу где угодно."""
+def action_kind(raw: RAWINPUT) -> str:
+    return "mouse" if raw.header.dwType == RIM_TYPEMOUSE else "key"
 
-    pressed = Signal()
+
+class InputWatch(QObject):
+    """pressed(kind): игрок кликнул или крутанул колесо ("mouse") или нажал клавишу ("key") где угодно."""
+
+    pressed = Signal(str)
 
     def __init__(self) -> None:
         super().__init__()
@@ -167,7 +171,7 @@ class InputWatch(QObject):
         if got in (0, 0xFFFFFFFF):
             return
         if is_action(self._buf, self.ignore_vks):
-            self.pressed.emit()
+            self.pressed.emit(action_kind(self._buf))
 
     def close(self) -> None:
         self.stop()

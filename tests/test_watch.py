@@ -116,7 +116,7 @@ def test_verdicts_new_gone_and_grown():
     assert w.check("Welcome to the class tria1.") is None
     assert w.check("Totally different words appear now") == "new"
     w2 = LineWatcher("Welcome to the", base)
-    assert w2.check("Welcome to the class trial, everyone. Let us begin the debate now.") == "new"  # допечаталась
+    assert w2.check("Welcome to the class trial, everyone. Let us begin the debate now.") == "grown"  # допечаталась
     w3 = LineWatcher("Welcome to the class trial.", base)
     assert w3.check("") is None and w3.check("") == "gone"
 
@@ -132,3 +132,19 @@ def test_waiting_watcher_waits_for_new_text():
     assert w.check("|l") is None  # шум рамки
     assert w.check("Welcome to the class trial.") is None  # та же реплика снова
     assert w.check("Who could the killer be?") == "new"
+
+
+def test_settle_window_catches_text_that_kept_typing():
+    from PIL import Image
+
+    from lexoplay.watch import LineWatcher
+
+    t = [0.0]
+    base = Image.new("L", (40, 10), 0)
+    w = LineWatcher("Oh, and they mentioned the", base, gated=True, settle_for=3.0, clock=lambda: t[0])
+    assert w.armed and not w.by_input
+    # без действий игрока «другой текст» не прячет перевод (мигание, шум OCR)
+    assert w.check("Something totally different here") is None
+    assert w.check("Oh, and they mentioned the Ultimate Biker Gang Leader too.") == "grown"
+    t[0] = 5.0
+    assert not w.armed  # окно settle прошло, дальше только после действия игрока

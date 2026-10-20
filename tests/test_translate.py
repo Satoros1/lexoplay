@@ -200,3 +200,25 @@ def test_real_sdk_errors_are_readable():
     with pytest.raises(TranslationError) as e2:
         asyncio.run(_sdk_translator(deprecated).translate(TranslateRequest("Hi", None, "G")))
     assert "отклонил" in str(e2.value)
+
+
+def test_translation_ending_follows_the_original():
+    from lexoplay.translate import fix_punctuation, no_dash
+
+    cases = [
+        ("Oh, and they mentioned the", "А, и они упомянули,", "А, и они упомянули…"),  # фраза продолжится
+        ("I wanted to tell you,", "Я хотел сказать тебе,", "Я хотел сказать тебе…"),
+        ("Well, I guess...", "Ну, наверное", "Ну, наверное…"),  # потерянное многоточие
+        ("Well, I guess...", "Ну, наверное.", "Ну, наверное…"),
+        ("Well, I guess...", "Ну, наверное...", "Ну, наверное..."),
+        ("You came back.", "Ты вернулся", "Ты вернулся."),  # потерянная точка
+        ("You came back?", "Ты вернулся", "Ты вернулся?"),
+        ("What?!", "Что", "Что?!"),
+        ("I wanted to—", no_dash("Я хотел —"), "Я хотел…"),  # оборвалась речь: не запятая
+        ('They mentioned the "Leader" too.', "Ещё они упомянули «Лидера»", "Ещё они упомянули «Лидера»."),
+        ("Makoto Naegi", "Макото Наэги", "Макото Наэги"),  # без знаков в оригинале: не трогаем
+        ("Fine.", "Ладно, ", "Ладно."),
+    ]
+    for source, translation, expected in cases:
+        assert fix_punctuation(source, translation) == expected, (source, translation)
+    assert "never with a comma" in build_system(TranslateRequest(text="x", speaker=None, game="g"))

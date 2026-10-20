@@ -148,6 +148,56 @@ def pixel_frame(lines: list[str], seed: int = 3):  # type: ignore[no-untyped-def
     return frame
 
 
+def vn_color_frame():  # type: ignore[no-untyped-def]
+    """Кадр «как Danganronpa»: голубой текст с тёмной обводкой, ключевые слова жёлто-оранжевые
+    с оранжевой обводкой, без подложки, поверх пёстрой сцены."""
+    import random
+
+    from PIL import Image, ImageDraw, ImageFilter, ImageFont
+
+    rnd = random.Random(7)
+    candidates = [
+        Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts" / "arialbd.ttf",
+        Path("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"),
+    ]
+    bold = next((p for p in candidates if p.exists()), None)
+    font = ImageFont.truetype(str(bold), 46) if bold else ImageFont.load_default()
+    name_font = ImageFont.truetype(str(bold), 36) if bold else font
+    bg = Image.new("RGB", (1280, 720), (90, 60, 70))
+    d = ImageDraw.Draw(bg)
+    for _ in range(140):  # пёстрая сцена: красные флаги, светлые пятна, силуэты
+        x, y = rnd.randint(-100, 1280), rnd.randint(-100, 720)
+        w, h = rnd.randint(30, 260), rnd.randint(30, 260)
+        color = rnd.choice([(200, 40, 50), (230, 210, 215), (40, 35, 40), (150, 120, 130), (240, 240, 235), (90, 80, 85)])
+        d.ellipse((x, y, x + w, y + h), fill=color)
+    bg = bg.filter(ImageFilter.GaussianBlur(3))
+    d = ImageDraw.Draw(bg)
+
+    def blue(xy, text, f=font):  # type: ignore[no-untyped-def]
+        d.text(xy, text, font=f, fill=(170, 222, 236), stroke_width=4, stroke_fill=(25, 30, 45))
+        return xy[0] + d.textlength(text, font=f)
+
+    def yellow(xy, text):  # type: ignore[no-untyped-def]
+        d.text(xy, text, font=font, fill=(235, 110, 20), stroke_width=4, stroke_fill=(190, 60, 10))
+        mask = Image.new("L", bg.size, 0)
+        ImageDraw.Draw(mask).text(xy, text, font=font, fill=255)
+        grad = Image.new("RGB", bg.size)
+        gd = ImageDraw.Draw(grad)
+        top, height = xy[1], 56
+        for yy in range(bg.size[1]):
+            t = max(0.0, min(1.0, (yy - top) / height))
+            gd.line([(0, yy), (bg.size[0], yy)], fill=(255, round(236 - 90 * t), round(80 - 70 * t)))
+        bg.paste(grad, (0, 0), mask)
+        return xy[0] + d.textlength(text, font=font)
+
+    d.text((70, 455), "Makoto Naegi", font=name_font, fill=(245, 245, 245), stroke_width=4, stroke_fill=(30, 30, 35))
+    x = blue((120, 520), 'Oh, and they mentioned the "')
+    yellow((x, 520), "Ultimate Biker Gang")
+    x = yellow((120, 590), "Leader")
+    blue((x, 590), '" too.')
+    return bg
+
+
 def _ocr_auto(out_dir: Path) -> Callable[[], tuple[str, object]]:
     """Автовыбор распознавания на настоящем Windows OCR: обычная новелла и пиксельный шрифт."""
 
@@ -173,6 +223,7 @@ def _ocr_auto(out_dir: Path) -> Callable[[], tuple[str, object]]:
                 pixel_frame(["YOU'RE NOT LEAVING THIS ROOM ALIVE.", "Who are you people anyway?"]),
                 Rect(40 / 1280, 520 / 720, 1200 / 1280, 160 / 720),
             ),
+            "vn_color": (vn_color_frame(), Rect(40 / 1280, 440 / 720, 1220 / 1280, 230 / 720)),
         }
 
         async def go():  # type: ignore[no-untyped-def]
@@ -196,6 +247,7 @@ def _ocr_auto(out_dir: Path) -> Callable[[], tuple[str, object]]:
                     "quality": str(reading.quality),
                     "ratio": round(reading.quality.ratio, 3),
                     "text": reading.result.raw_text,
+                    "tried": reading.tried,
                     "modes": each,
                 }
             return report
@@ -206,10 +258,12 @@ def _ocr_auto(out_dir: Path) -> Callable[[], tuple[str, object]]:
             bg.stop()
         if "error" in report:
             return "warn", report
-        novel, pixel = report["novel"], report["pixel"]
+        novel, pixel, color = report["novel"], report["pixel"], report["vn_color"]
         if novel["ratio"] < 0.8 or "reluctant" not in str(novel["text"]).lower():  # type: ignore[index]
             return "fail", report
-        return ("ok" if pixel["ratio"] >= 0.75 else "warn"), report  # type: ignore[index]
+        color_text = str(color["text"]).lower()  # type: ignore[index]
+        color_ok = all(w in color_text for w in ("mentioned", "ultimate", "biker", "leader", "too"))
+        return ("ok" if pixel["ratio"] >= 0.75 and color_ok else "warn"), report  # type: ignore[index]
 
     return run
 
@@ -484,12 +538,24 @@ def _own_key_flow(out_dir: Path) -> Callable[[], tuple[str, object]]:
                 return httpx.Response(200, json={"items": [], "server_time": "2026-10-19T00:00:00Z"})
             return httpx.Response(404, json={"detail": "not found"})
 
+        from lexoplay.lookup import ExplainItem, Explanation
+
         class FakeLookup:
             last_usage = (120, 30)
 
             async def lookup(self, **kw):  # type: ignore[no-untyped-def]
                 calls.append(("anthropic-lookup", kw))
                 return Sense("eerie", "adj", "ˈɪəri", ["жуткий", "зловещий"])
+
+            async def explain(self, **kw):  # type: ignore[no-untyped-def]
+                calls.append(("anthropic-explain", kw))
+                return Explanation(
+                    (
+                        ExplainItem("feels eerie", "кажется жутким", "feel + прилагательное: «ощущается каким-то»"),
+                        ExplainItem("after dark", "после наступления темноты", "устойчивое выражение"),
+                    ),
+                    "Тревожный, тихий тон.",
+                )
 
         def pump(cond: Callable[[], bool], seconds: float = 5.0) -> bool:
             end = time.time() + seconds
@@ -525,8 +591,19 @@ def _own_key_flow(out_dir: Path) -> Callable[[], tuple[str, object]]:
             app._on_word_add()
             saved = store.words_list()
             info["saved_local"] = [(w.word, w.translation, w.lexo) for w in saved]
+            # F7: разбор реплики, пункт разбора в слова
+            app._request_explain()
+            info["explain_ready"] = pump(
+                lambda: bool(app.word_ctx and app.word_ctx.explain and app.word_ctx.explain.phase == "ready")
+            )
+            app.word_layer.grab().save(str(out_dir / "explain-panel.png"))
+            app._on_explain_save(1)
+            info["explain_saved"] = [w.word for w in store.words_list()][:1]
             info["outbox_before_link"] = app.outbox.counts()
             info["usage_words"] = app.own_usage.today().words
+            from datetime import date as _date
+
+            info["stats_words_today"] = store.stats_days(_date.today().isoformat()).get(_date.today().isoformat(), (0, 0, 0))[1]
             app.word_layer.finish("esc")
             info["server_calls_before_link"] = [c[0] for c in calls if c[0].startswith("/")]
             # привязали ПК: слова сами уходят в Lexo
@@ -548,11 +625,14 @@ def _own_key_flow(out_dir: Path) -> Callable[[], tuple[str, object]]:
             info["card_ready"]
             and info["button"] == "+ в мои слова"
             and info["saved_local"] == [("eerie", "жуткий, зловещий", False)]
+            and info["explain_ready"]
+            and info["explain_saved"] == ["after dark"]
             and info["outbox_before_link"] == (0, 0)
             and info["usage_words"] == 1
             and not info["server_calls_before_link"]
             and info["sent_after_link"]
-            and info["marked"] == [True]
+            and info["marked"] == [True, True]
+            and info["stats_words_today"] == 2
             and card.get("lemma") == "eerie"
             and card.get("sentence") == "This place feels eerie after dark."
         )
@@ -640,6 +720,11 @@ def _qt_checks(out_dir: Path) -> None:
                       "Puhuhu! Welcome to despair!", "Пухуху! Добро пожаловать в отчаяние!", created_at=time.time())
         )
         shot = pixel_frame(["WELCOME TO HOPE'S PEAK ACADEMY!"]).crop((40, 520, 1240, 680))
+        from datetime import date, timedelta
+
+        for back, (lines, words, secs) in enumerate([(46, 7, 3900), (12, 2, 1200), (0, 0, 0), (31, 4, 2700), (58, 11, 5100), (22, 3, 1500), (9, 1, 600)]):
+            day = (date.today() - timedelta(days=back)).isoformat()
+            store.stats_add(day, "dr1_us.exe", lines=lines, words=words, seconds=secs)
 
         class Ctl:
             settings = Settings()
@@ -686,6 +771,11 @@ def _qt_checks(out_dir: Path) -> None:
             def autostart_enabled(self):  # type: ignore[no-untyped-def]
                 return False
 
+            def progress(self):  # type: ignore[no-untyped-def]
+                from lexoplay.progress import progress
+
+                return progress(store, 10)
+
             def __getattr__(self, _name):  # type: ignore[no-untyped-def]
                 return lambda *a, **k: None
 
@@ -693,7 +783,7 @@ def _qt_checks(out_dir: Path) -> None:
         w.resize(1000, 700)
         w.show()
         saved = []
-        for key in ("games", "history", "words", "lexo", "keys", "view", "more"):
+        for key in ("games", "history", "words", "progress", "lexo", "keys", "view", "more"):
             w.show_page(key)
             for _ in range(5):
                 app.processEvents()
@@ -810,7 +900,7 @@ def _qt_checks(out_dir: Path) -> None:
         }
         iw = rawin.InputWatch()
         got: list[int] = []
-        iw.pressed.connect(lambda: got.append(1))
+        iw.pressed.connect(lambda kind: got.append(kind))
         info["started"] = iw.start()
         u32 = ctypes.windll.user32
 
@@ -833,8 +923,33 @@ def _qt_checks(out_dir: Path) -> None:
         u32.mouse_event(0x0800, 0, 0, 120, 0)  # колесо
         pump(0.4)
         info["after_wheel"] = len(got)
+        info["kinds"] = sorted(set(got))
         iw.close()
-        ok = info["started"] and info["ignored_key_events"] == 0 and info["key_events"] >= 1 and info["after_wheel"] >= 2
+        # клик в окно LexoPlay не считается «игрок пропустил реплику»
+        from PySide6.QtWidgets import QWidget as _W
+
+        from lexoplay.win import winapi as _wa
+
+        probe = _W()
+        probe.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.Tool)
+        probe.setGeometry(300, 300, 200, 120)
+        probe.show()
+        pump(0.3)
+        u32.SetCursorPos(400, 360)
+        pump(0.1)
+        info["cursor_over_own"] = _wa.cursor_over_own_window()
+        probe.hide()
+        pump(0.2)
+        info["cursor_over_own_after_hide"] = _wa.cursor_over_own_window()
+        ok = (
+            info["started"]
+            and info["ignored_key_events"] == 0
+            and info["key_events"] >= 1
+            and info["after_wheel"] >= 2
+            and info["kinds"] == ["key", "mouse"]
+            and info["cursor_over_own"]
+            and not info["cursor_over_own_after_hide"]
+        )
         return ("ok" if ok else "warn"), info
 
     _check("raw_input_player_actions", raw_input)

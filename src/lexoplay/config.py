@@ -46,6 +46,7 @@ class Hotkeys:
     words: str = "F3"
     hide: str = "F4"
     reselect: str = "F6"
+    explain: str = "F7"
     add_game: str = ""
 
     def items(self) -> list[tuple[str, str]]:
@@ -56,7 +57,8 @@ HOTKEY_LABELS = {
     "translate": ("Перевести реплику", "Ещё раз спрячет перевод"),
     "words": ("Слова в Lexo", "Подчеркнуть слова реплики и добавить в карточки"),
     "hide": ("Спрятать перевод", ""),
-    "reselect": ("Выделить окно диалога заново", "Если перевод встал не туда"),
+    "reselect": ("Выделить окно диалога заново", "Если перевод встал не туда, и поставить плашку перевода, куда удобно"),
+    "explain": ("Разбор реплики", "Сленг, идиомы и трудные места реплики с объяснением, их можно сохранить в слова"),
     "add_game": ("Добавить текущее окно как игру", "Работает в любой программе, поэтому по умолчанию выключено"),
 }
 
@@ -78,6 +80,10 @@ class Settings:
     auto_translate: bool = False  # после пропуска реплики следующая переводится сама
     show_original: bool = False  # английский оригинал мелко над переводом
     check_updates: bool = True
+    strip_place: str = "above"  # above | below | top: где плашка перевода, если для игры не задано своё место
+    strip_font: str = ""  # шрифт перевода; пусто = как в окне LexoPlay (Segoe UI)
+    strip_bold: bool = False
+    daily_goal: int = 10  # цель на день: столько новых слов
     hotkeys: Hotkeys = field(default_factory=Hotkeys)
     version: int = SETTINGS_VERSION
 

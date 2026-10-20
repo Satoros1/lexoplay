@@ -302,6 +302,39 @@ class LexoClient:
             card_id=data.get("card_id"),
         )
 
+    async def explain(
+        self,
+        *,
+        session_id: str,
+        game: GameRef,
+        sentence: str,
+        speaker: str | None,
+        translation: str | None,
+        context: list[dict[str, Any]],
+    ):  # type: ignore[no-untyped-def]
+        """Разбор реплики: сленг, идиомы, трудные места. -> lookup.Explanation"""
+        from lexoplay.lookup import ExplainItem, Explanation
+
+        data = await self._request(
+            "POST",
+            "/desktop/explain",
+            json={
+                "session_id": session_id,
+                "game": game.to_json(),
+                "sentence": sentence[:2000],
+                "speaker": (speaker or None) and speaker[:64],
+                "translation": (translation or None) and translation[:2000],
+                "context": context[-6:],
+            },
+            timeout=25,
+        )
+        items = tuple(
+            ExplainItem(str(i.get("phrase") or ""), str(i.get("meaning") or ""), str(i.get("note") or ""))
+            for i in data.get("items", [])
+            if i.get("phrase") and i.get("meaning")
+        )
+        return Explanation(items, str(data.get("summary") or ""))
+
     async def add_card(self, payload: dict[str, Any]) -> dict[str, Any]:
         return await self._request("POST", "/desktop/cards", json=payload, timeout=20)
 

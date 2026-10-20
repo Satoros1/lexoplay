@@ -1,4 +1,4 @@
-"""Главное окно LexoPlay: Игры, История, Слова, Lexo, Клавиши, Вид, Ещё.
+"""Главное окно LexoPlay: Игры, История, Слова, Прогресс, Lexo, Клавиши, Вид, Ещё.
 
 Настройки применяются сразу, без кнопки «Сохранить». Закрытие окна прячет его в трей:
 LexoPlay продолжает работать, пока его не закроют через меню трея.
@@ -12,7 +12,18 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 from PySide6.QtCore import QRectF, QSize, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QAction, QCloseEvent, QColor, QDesktopServices, QFont, QFontMetricsF, QImage, QPainter, QPixmap
+from PySide6.QtGui import (
+    QAction,
+    QCloseEvent,
+    QColor,
+    QDesktopServices,
+    QFont,
+    QFontDatabase,
+    QFontMetricsF,
+    QImage,
+    QPainter,
+    QPixmap,
+)
 from PySide6.QtWidgets import (
     QButtonGroup,
     QComboBox,
@@ -42,7 +53,7 @@ from lexoplay.lexo import Deck
 from lexoplay.store import Game, SavedWord, Store, StoredLine
 from lexoplay.ui import theme
 from lexoplay.ui.hotkey_edit import HotkeyEdit
-from lexoplay.ui.pages import GlossaryDialog, HistoryPage, WordsPage
+from lexoplay.ui.pages import GlossaryDialog, HistoryPage, ProgressPage, WordsPage
 from lexoplay.ui.theme import app_icon, draw_logo, icon
 
 RELEASES_URL = "https://github.com/Satoros1/lexoplay/releases/latest"
@@ -123,6 +134,7 @@ class Controller(Protocol):
     def set_autostart(self, on: bool) -> bool: ...
     def check_updates(self, *, manual: bool = True) -> None: ...
     def install_update(self) -> None: ...
+    def progress(self): ...  # type: ignore[no-untyped-def]
 
 
 from lexoplay.ui.widgets import (  # noqa: E402,F401
@@ -219,7 +231,8 @@ class GamesPage(QWidget):
             (hk.translate, "перевести реплику, ещё раз спрятать"),
             (hk.words, "подчеркнуть слова: клик по слову, потом «+» или Enter сохраняет его. Shift+клик выбирает фразу"),
             (hk.hide, "спрятать перевод"),
-            (hk.reselect, "выделить окно диалога заново, если перевод встал не туда"),
+            (hk.explain, "разбор реплики: сленг, идиомы и трудные места, их можно сохранить в слова"),
+            (hk.reselect, "выделить окно диалога заново и поставить плашку перевода, куда удобно"),
         ]
         for i, (key, text) in enumerate(rows):
             grid.addWidget(keycap(key), i, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
@@ -776,15 +789,15 @@ class StripPreview(QWidget):
         p.drawText(dlg.adjusted(14, 0, -14, 0), int(Qt.AlignmentFlag.AlignVCenter), "I was reluctant to come here tonight, you know.")
         # строка перевода над ним
         px = font_px_for(720, 19.0, self.settings.font_scale)
-        sf = QFont("Segoe UI")
+        sf = QFont(self.settings.strip_font or theme.FONT_FAMILY)
         sf.setPixelSize(round(px))
-        sf.setWeight(QFont.Weight.Medium)
+        sf.setWeight(QFont.Weight.Bold if self.settings.strip_bold else QFont.Weight.Medium)
         fm = QFontMetricsF(sf)
         text = "Знаешь, мне совсем не хотелось сюда сегодня приходить."
         inner_w = dlg.width() - 2 * px * 0.9
         th = fm.boundingRect(QRectF(0, 0, inner_w, 1000), int(Qt.TextFlag.TextWordWrap), text).height()
         original = "I was reluctant to come here tonight, you know."
-        of = QFont("Segoe UI")
+        of = QFont(self.settings.strip_font or theme.FONT_FAMILY)
         of.setPixelSize(round(max(12.0, px * 0.78)))
         oh = 0.0
         if self.settings.show_original:
@@ -832,8 +845,40 @@ class ViewPage(QWidget):
         self.size, self.opacity = self.size_ctl.slider, self.opacity_ctl.slider
         self.size_val, self.opacity_val = self.size_ctl.value, self.opacity_ctl.value
         self.original = Toggle(s.show_original)
+        self.place = QComboBox()
+        for code, text in (("above", "Над окном диалога"), ("below", "Под окном диалога"), ("top", "Вверху экрана")):
+            self.place.addItem(text, code)
+        self.place.setCurrentIndex(max(0, self.place.findData(s.strip_place)))
+        self.place.setMinimumWidth(220)
+        self.place.activated.connect(self._place)
+        font_ctl = QWidget()
+        fl = QHBoxLayout(font_ctl)
+        fl.setContentsMargins(0, 0, 0, 0)
+        fl.setSpacing(10)
+        self.font = QComboBox()
+        self.font.addItem("Как в окне LexoPlay", "")
+        families = set(QFontDatabase.families())
+        for fam in ("Segoe UI", "Arial", "Calibri", "Verdana", "Tahoma", "Trebuchet MS", "Bahnschrift", "Georgia", "Comic Sans MS", "Consolas"):
+            if fam in families or fam == s.strip_font:
+                self.font.addItem(fam, fam)
+        self.font.setCurrentIndex(max(0, self.font.findData(s.strip_font)))
+        self.font.setMinimumWidth(200)
+        self.font.activated.connect(self._font)
+        self.bold = Toggle(s.strip_bold)
+        self.bold.toggled.connect(self._bold)
+        fl.addWidget(self.font)
+        fl.addWidget(label("жирный", "muted"))
+        fl.addWidget(self.bold)
         bl.addWidget(setting_row("Размер текста", "Насколько крупно перевод поверх игры", self.size_ctl))
         bl.addWidget(setting_row("Плотность фона", "Чем выше, тем меньше игра просвечивает сквозь плашку", self.opacity_ctl))
+        bl.addWidget(
+            setting_row(
+                "Где показывать",
+                f"Для отдельной игры можно своё место: в игре нажми {s.hotkeys.reselect} и перетащи плашку перевода",
+                self.place,
+            )
+        )
+        bl.addWidget(setting_row("Шрифт перевода", "", font_ctl))
         bl.addWidget(
             setting_row(
                 "Английский оригинал над переводом",
@@ -906,6 +951,20 @@ class ViewPage(QWidget):
         self.ctl.settings.strip_opacity = self.opacity.value() / 100
         self.preview.update()
         self._save_timer.start()
+
+    def _place(self) -> None:
+        self.ctl.settings.strip_place = self.place.currentData()
+        self.ctl.settings_changed()
+
+    def _font(self) -> None:
+        self.ctl.settings.strip_font = self.font.currentData() or ""
+        self.preview.update()
+        self.ctl.settings_changed()
+
+    def _bold(self, on: bool) -> None:
+        self.ctl.settings.strip_bold = on
+        self.preview.update()
+        self.ctl.settings_changed()
 
     def _original(self, on: bool) -> None:
         self.ctl.settings.show_original = on
@@ -1235,6 +1294,7 @@ class MainWindow(QWidget):
         ("games", "Игры", "games"),
         ("history", "История", "history"),
         ("words", "Слова", "words"),
+        ("progress", "Прогресс", "progress"),
         ("lexo", "Lexo", "lexo"),
         ("keys", "Клавиши", "keys"),
         ("view", "Вид", "view"),
@@ -1277,6 +1337,7 @@ class MainWindow(QWidget):
         self.games = GamesPage(ctl, self.decks)
         self.history = HistoryPage(ctl)
         self.words = WordsPage(ctl, lambda: self.ctl.account_status().linked, lambda: self.ctl.settings.hotkeys.words)
+        self.progress = ProgressPage(ctl)
         self.lexo = LexoPage(ctl, self.decks)
         self.keys = KeysPage(ctl)
         self.view = ViewPage(ctl)
@@ -1285,6 +1346,7 @@ class MainWindow(QWidget):
             ("games", self.games),
             ("history", self.history),
             ("words", self.words),
+            ("progress", self.progress),
             ("lexo", self.lexo),
             ("keys", self.keys),
             ("view", self.view),
@@ -1335,6 +1397,8 @@ class MainWindow(QWidget):
             self.history.refresh()
         elif key == "words":
             self.words.refresh()
+        elif key == "progress":
+            self.progress.refresh()
         elif key == "lexo":
             self.lexo.refresh()
             if not self.decks.loaded:

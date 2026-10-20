@@ -131,3 +131,43 @@ class CardState:
     @property
     def button_enabled(self) -> bool:
         return self.phase in ("ready", "offline", "error")
+
+
+# ---------------------------------------------------------------------- разбор реплики
+@dataclass
+class ExplainRow:
+    phrase: str
+    meaning: str
+    note: str = ""
+    indices: list[int] = field(default_factory=list)  # слова реплики, к которым относится
+    saved: bool = False
+
+
+@dataclass
+class ExplainState:
+    phase: Literal["loading", "ready", "error"]
+    rows: list[ExplainRow] = field(default_factory=list)
+    summary: str = ""
+    note: str = ""  # текст ошибки
+
+
+def _norm_token(text: str) -> str:
+    return "".join(ch for ch in text.lower().replace("’", "'") if ch.isalnum() or ch == "'").strip("'")
+
+
+def match_phrase(views: list[WordView], phrase: str) -> list[int]:
+    """Индексы слов реплики, из которых состоит фраза (первое совпадение подряд)."""
+    want = [t for t in (_norm_token(w) for w in phrase.split()) if t]
+    if not want:
+        return []
+    have = [_norm_token(v.text) for v in views]
+    n = len(want)
+    for i in range(len(have) - n + 1):
+        if have[i : i + n] == want:
+            return [views[j].index for j in range(i, i + n)]
+    # OCR склеил или разбил слова иначе: ищем хотя бы самое длинное слово фразы
+    longest = max(want, key=len)
+    for i, t in enumerate(have):
+        if t == longest and len(t) >= 4:
+            return [views[i].index]
+    return []

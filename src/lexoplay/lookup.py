@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from dataclasses import dataclass
 
 from lexoplay.lexo import Sense
 from lexoplay.translate import TranslationError, friendly_error, lang_name, no_dash, usage_of
@@ -106,3 +107,116 @@ class AnthropicLookup:
             except (ValueError, json.JSONDecodeError):
                 log.warning("значение слова не разобралось: %r", raw[:200])
         raise TranslationError("Не получилось найти значение, попробуй ещё раз.")
+
+    async def explain(
+        self,
+        *,
+        sentence: str,
+        speaker: str | None,
+        translation: str | None,
+        game: str,
+        context: list[tuple[str | None, str]],
+        target_lang: str = "ru",
+        source_lang: str = "en",
+    ) -> Explanation:
+        a = self._anthropic
+        prompt = build_explain_prompt(
+            sentence=sentence,
+            speaker=speaker,
+            translation=translation,
+            game=game,
+            context=context,
+            target_lang=target_lang,
+            source_lang=source_lang,
+        )
+        params: dict = {"model": self._model, "max_tokens": 1200, "messages": [{"role": "user", "content": prompt}]}
+        for _attempt in range(3):
+            if self._thinking_off:
+                params["thinking"] = {"type": "disabled"}
+                params.pop("output_config", None)
+            else:
+                params.pop("thinking", None)
+                params["output_config"] = {"effort": "low"}
+            try:
+                msg = await self._client.messages.create(**params)
+            except a.BadRequestError as exc:
+                if self._thinking_off and "thinking" in str(exc).lower():
+                    self._thinking_off = False
+                    continue
+                raise friendly_error(a, exc, self._model) from exc
+            except Exception as exc:
+                raise friendly_error(a, exc, self._model) from exc
+            self.last_usage = usage_of(msg)
+            raw = "".join(getattr(b, "text", "") for b in msg.content if getattr(b, "type", "") == "text")
+            try:
+                return parse_explanation(raw)
+            except (ValueError, json.JSONDecodeError):
+                log.warning("разбор реплики не разобрался: %r", raw[:200])
+        raise TranslationError("Не получилось разобрать реплику, попробуй ещё раз.")
+
+
+# ---------------------------------------------------------------------- разбор реплики
+EXPLAIN_PROMPT = """A learner whose native language is {tgt} is playing the video game "{game}" in {src}.
+Explain one line of its dialogue so they understand what is really said and learn from it.
+{context}Line{speaker}: "{sentence}"
+{translation_line}Reply with JSON only:
+{{"items": [{{"phrase": "<exact words copied from the line>", "meaning": "<what it means here, in {tgt}, a few words>", "note": "<one short sentence in {tgt}: why it is tricky (idiom, slang, phrasal verb, grammar, wordplay, a reference to the game) or how it is used>"}}],
+ "summary": "<one or two sentences in {tgt}: the tone of the line and what a word-by-word reading would miss>"}}
+Rules: at most 5 items, the most useful for a learner: idioms, slang, phrasal verbs, set phrases, tricky grammar, names and references. Skip simple everyday words. Copy each phrase exactly as it is in the line. Write meanings, notes and the summary in {tgt}. Never use the em dash character."""
+
+
+@dataclass(frozen=True, slots=True)
+class ExplainItem:
+    phrase: str
+    meaning: str
+    note: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class Explanation:
+    items: tuple[ExplainItem, ...]
+    summary: str = ""
+
+
+def build_explain_prompt(
+    *,
+    sentence: str,
+    speaker: str | None,
+    translation: str | None,
+    game: str,
+    context: list[tuple[str | None, str]],
+    target_lang: str,
+    source_lang: str,
+) -> str:
+    ctx = ""
+    if context:
+        lines = "\n".join(f"{(s + ': ') if s else ''}{t}" for s, t in context[-6:])
+        ctx = f"Earlier lines, for context:\n{lines}\n"
+    return EXPLAIN_PROMPT.format(
+        tgt=lang_name(target_lang),
+        src=lang_name(source_lang),
+        game=(game or "unknown").replace('"', "'"),
+        context=ctx,
+        speaker=f" ({speaker})" if speaker else "",
+        sentence=sentence.replace('"', "'")[:1500],
+        translation_line=f'Its translation shown to the player: "{translation}"\n' if translation else "",
+    )
+
+
+def parse_explanation(raw: str) -> Explanation:
+    match = re.search(r"\{.*\}", raw, re.S)
+    if not match:
+        raise ValueError(f"no JSON in reply: {raw[:80]!r}")
+    data = json.loads(match.group(0))
+    items = []
+    for it in data.get("items") or []:
+        if not isinstance(it, dict):
+            continue
+        phrase = str(it.get("phrase") or "").strip().strip('"«»')
+        meaning = no_dash(str(it.get("meaning") or ""))
+        if phrase and meaning:
+            items.append(ExplainItem(phrase[:80], meaning[:200], no_dash(str(it.get("note") or ""))[:300]))
+    summary = no_dash(str(data.get("summary") or ""))[:600]
+    if not items and not summary:
+        raise ValueError("empty explanation")
+    return Explanation(tuple(items[:5]), summary)

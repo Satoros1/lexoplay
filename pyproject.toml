@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lexoplay"
-version = "0.4.1"
+version = "0.5.0"
 description = "Перевод реплик в играх по клавише + слова в Lexo"
 requires-python = ">=3.11,<3.14"
 dependencies = [

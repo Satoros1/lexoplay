@@ -1,13 +1,12 @@
-"""Режим слов (F3): подчёркивания под словами реплики и карточка слова.
+"""Режим слов (F3) и разбор реплики (F7): подчёркивания под словами, карточка слова, разбор.
 
-Отдельное окно поверх игры размером с display_rect. В отличие от строки перевода, оно
-принимает клики, но только там, где что-то нарисовано: прозрачные пиксели слоистого окна
-Windows пропускает в игру. Поэтому область диалога заливаем почти невидимым цветом
-(альфа 1/255), а всё остальное остаётся игрой.
+Отдельное окно поверх игры размером с display_rect. Пока режим открыт, оно ловит все
+клики над игрой (слегка затемняет её): клик по слову, по кнопкам или по пустому месту
+до игры не доходит, поэтому реплика не пропустится случайно. Клик по пустому месту
+просто закрывает режим, колесо мыши тоже не листает текст в игре.
 
 Фокус окно не берёт (WS_EX_NOACTIVATE): полноэкранные игры, потеряв фокус, сворачиваются.
 Поэтому Esc и Enter приходят не сюда, а глобальными клавишами через App, пока режим открыт.
-Клик мимо области уходит в игру: реплика сменится, и App закроет режим.
 """
 
 from __future__ import annotations
@@ -15,12 +14,22 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QFontMetricsF, QKeyEvent, QMouseEvent, QPainter, QPaintEvent, QPen
+from PySide6.QtGui import (
+    QColor,
+    QFont,
+    QFontMetricsF,
+    QKeyEvent,
+    QMouseEvent,
+    QPainter,
+    QPaintEvent,
+    QPen,
+    QWheelEvent,
+)
 from PySide6.QtWidgets import QWidget
 
 from lexoplay.geometry import Rect, denormalize, font_px_for
-from lexoplay.ui.theme import ACCENT, FONT_FAMILY, STRIP_BG, TEXT, TEXT_MUTED
-from lexoplay.wordmode import CardState, WordView, place_card, selection_range, union
+from lexoplay.ui.theme import ACCENT, FONT_FAMILY, NAME, STRIP_BG, TEXT, TEXT_MUTED
+from lexoplay.wordmode import CardState, ExplainState, WordView, place_card, selection_range, union
 
 Placer = Callable[[QWidget, Rect], None]
 
@@ -36,7 +45,9 @@ def _qt_placer(widget: QWidget, rect: Rect) -> None:
 class WordLayer(QWidget):
     selected = Signal(list)  # индексы выбранных слов
     add_clicked = Signal()
-    finished = Signal(str)  # причина: esc, idle, focus, hotkey, closed
+    explain_clicked = Signal()  # кнопка «Разбор реплики»
+    explain_save = Signal(int)  # «+» у пункта разбора
+    finished = Signal(str)  # причина: esc, idle, focus, hotkey, closed, outside
 
     def __init__(self, placer: Placer | None = None, on_native: Callable[[int], None] | None = None) -> None:
         super().__init__(
@@ -64,8 +75,14 @@ class WordLayer(QWidget):
         self._card_rect: QRectF | None = None
         self._strip: Rect | None = None  # строка перевода: карточка её не закрывает
         self._open = False
+        self._explain: ExplainState | None = None
+        self._explain_open = False
+        self._explain_btn: QRectF | None = None
+        self._explain_rect: QRectF | None = None
+        self._explain_saves: list[QRectF] = []
         self.font_scale = 1.0
         self.deck_label = ""
+        self.explain_key = "F7"
         self._idle = QTimer(self)
         self._idle.setSingleShot(True)
         self._idle.setInterval(IDLE_MS)
@@ -86,6 +103,7 @@ class WordLayer(QWidget):
     def open(self, display: Rect, region: Rect, views: list[WordView], strip: Rect | None = None) -> None:
         self._display, self._region, self._views, self._strip = display, region, views, strip
         self._sel, self._anchor, self._hover, self._card = [], None, None, None
+        self._explain, self._explain_open = None, False
         self._open = True
         self._placer(self, display)
         self.show()
@@ -110,6 +128,23 @@ class WordLayer(QWidget):
 
     def set_card(self, card: CardState | None) -> None:
         self._card = card
+        self.update()
+
+    @property
+    def explain_open(self) -> bool:
+        return self._explain_open
+
+    def set_explain(self, state: ExplainState | None, *, show: bool = True) -> None:
+        """Разбор реплики: показать панель (карточка слова при этом прячется)."""
+        self._explain = state
+        if show and state is not None:
+            self._explain_open = True
+            self._sel, self._card = [], None
+        self._idle.start()
+        self.update()
+
+    def hide_explain(self) -> None:
+        self._explain_open = False
         self.update()
 
     def select(self, indices: list[int]) -> None:
@@ -155,9 +190,23 @@ class WordLayer(QWidget):
 
     def mousePressEvent(self, e: QMouseEvent) -> None:  # noqa: N802
         self._idle.start()
+        e.accept()  # клик дальше в игру не идёт
+        if e.button() == Qt.MouseButton.RightButton:
+            self.finish("outside")
+            return
         if e.button() != Qt.MouseButton.LeftButton:
             return
         pos = e.position()
+        if self._explain_btn and self._explain_btn.contains(pos):
+            self.explain_clicked.emit()
+            return
+        if self._explain_open and self._explain_rect is not None:
+            for i, r in enumerate(self._explain_saves):
+                if r.contains(pos):
+                    self.explain_save.emit(i)
+                    return
+            if self._explain_rect.contains(pos):
+                return
         if self._button_rect and self._button_rect.contains(pos):
             if self._card and self._card.button_enabled:
                 self.add_clicked.emit()
@@ -166,7 +215,9 @@ class WordLayer(QWidget):
             return
         idx = self._hit_word(pos)
         if idx is None:
+            self.finish("outside")  # пустое место: закрыть режим, в игру клик не попадёт
             return
+        self._explain_open = False  # слово важнее: разбор спрячется, F7 вернёт
         shift = bool(e.modifiers() & Qt.KeyboardModifier.ShiftModifier)
         sel = selection_range(self._anchor, idx) if shift else [idx]
         if not shift:
@@ -174,6 +225,9 @@ class WordLayer(QWidget):
         self._sel = sel
         self.update()
         self.selected.emit(sel)
+
+    def wheelEvent(self, e: QWheelEvent) -> None:  # noqa: N802
+        e.accept()  # колесо над игрой в новеллах листает текст: пока режим открыт, не пускаем
 
     def keyPressEvent(self, e: QKeyEvent) -> None:  # noqa: N802
         # обычно сюда не попадает (фокуса нет), но если окно всё же активировали
@@ -192,11 +246,14 @@ class WordLayer(QWidget):
         p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
         bounds = self._bounds()
         region = denormalize(self._region, bounds)
-        catch = QRectF(region.x, region.y, region.w, region.h).adjusted(-10, -10, 10, 10)
-        p.fillRect(catch, QColor(0, 0, 0, 1))  # ловим клики только над областью диалога
+        p.fillRect(self.rect(), QColor(0, 0, 0, 34))  # ловим все клики над игрой и чуть затемняем её
 
         px = self._px()
         line_w = max(1.5, px / 11)
+        explained: set[int] = set()
+        if self._explain_open and self._explain and self._explain.phase == "ready":
+            for row in self._explain.rows:
+                explained.update(row.indices)
         for v in self._views:
             r = self._word_rect(v)
             if v.index in self._sel:
@@ -209,6 +266,13 @@ class WordLayer(QWidget):
                 p.setPen(Qt.PenStyle.NoPen)
                 p.setBrush(QColor(255, 255, 255, 34))
                 p.drawRoundedRect(r.adjusted(-3, -2, 3, 2), 4, 4)
+            if v.index in explained:
+                pen = QPen(NAME, line_w * 1.6)
+                pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+                p.setPen(pen)
+                y = r.bottom() + line_w * 1.6
+                p.drawLine(QPointF(r.left() - 2, y), QPointF(r.right() + 2, y))
+                continue
             if not v.clickable or v.stop:
                 continue
             y = r.bottom() + line_w * 1.6
@@ -225,10 +289,143 @@ class WordLayer(QWidget):
 
         self._button_rect = None
         self._card_rect = None
-        if self._card and self._sel:
+        self._explain_rect = None
+        self._explain_saves = []
+        self._explain_btn = None
+        if self._explain_open and self._explain is not None:
+            self._paint_explain(p, self._explain, region, bounds, px)
+        elif self._card and self._sel:
             sel = union([denormalize(self._views[i].rect, bounds) for i in self._sel if i < len(self._views)])
             self._paint_card(p, self._card, sel, bounds, px)
+        if not self._explain_open:
+            self._paint_explain_button(p, region, bounds, px)
         p.end()
+
+    def _paint_explain_button(self, p: QPainter, region: Rect, bounds: Rect, px: float) -> None:
+        """Кнопка «Разбор реплики» у правого верхнего угла окна диалога."""
+        f = QFont(FONT_FAMILY)
+        f.setPixelSize(max(12, round(px * 0.82)))
+        f.setWeight(QFont.Weight.DemiBold)
+        label = f"Разбор реплики · {self.explain_key}" if self.explain_key else "Разбор реплики"
+        fm = QFontMetricsF(f)
+        w, h = fm.horizontalAdvance(label) + px * 1.6, px * 1.75
+        x = min(region.right - w, bounds.w - w - 6)
+        top, bottom = region.y, region.bottom
+        if self._strip is not None:  # над строкой перевода, чтобы ничего не закрывать
+            top, bottom = min(top, self._strip.y), max(bottom, self._strip.bottom)
+        y = top - h - px * 0.4
+        if y < 4:
+            y = bottom + px * 0.4
+        if y + h > bounds.h - 4:
+            y = 4.0
+        rect = QRectF(max(4.0, x), y, w, h)
+        self._explain_btn = rect
+        bg = QColor(STRIP_BG)
+        bg.setAlphaF(0.92)
+        p.setPen(QPen(QColor(NAME), 1.2))
+        p.setBrush(bg)
+        p.drawRoundedRect(rect, h / 2, h / 2)
+        p.setFont(f)
+        p.setPen(QColor("#D9D4FF"))
+        p.drawText(rect, int(Qt.AlignmentFlag.AlignCenter), label)
+
+    def _paint_explain(self, p: QPainter, st: ExplainState, region: Rect, bounds: Rect, px: float) -> None:
+        pad = px * 0.95
+        card_w = min(max(px * 26, 340.0), bounds.w * 0.55, bounds.w - 16)
+        inner = card_w - 2 * pad
+        btn = px * 1.5  # кнопка «+» у пункта
+
+        def font(size: float, weight: QFont.Weight = QFont.Weight.Normal) -> QFont:
+            f = QFont(FONT_FAMILY)
+            f.setPixelSize(max(1, round(size)))
+            f.setWeight(weight)
+            return f
+
+        f_title = font(px * 1.1, QFont.Weight.DemiBold)
+        f_phrase = font(px * 0.98, QFont.Weight.DemiBold)
+        f_main = font(px * 0.92)
+        f_note = font(px * 0.78)
+        flags = int(Qt.TextFlag.TextWordWrap)
+
+        def height(f: QFont, text: str, width: float = inner) -> float:
+            return QFontMetricsF(f).boundingRect(QRectF(0, 0, width, 10000), flags, text).height()
+
+        # (вид, шрифт, текст, цвет, номер пункта или -1)
+        blocks: list[tuple] = [("text", f_title, "Разбор реплики", TEXT, -1)]
+        if st.phase == "loading":
+            blocks += [("skeleton", 0.85), ("skeleton", 0.6), ("skeleton", 0.75), ("skeleton", 0.5)]
+        elif st.phase == "error":
+            blocks.append(("text", f_main, st.note or "Не получилось разобрать реплику.", TEXT_MUTED, -1))
+        else:
+            if not st.rows:
+                blocks.append(("text", f_main, "Здесь всё просто: трудных мест нет.", TEXT_MUTED, -1))
+            for i, row in enumerate(st.rows):
+                blocks.append(("phrase", f_phrase, row.phrase, QColor("#D9D4FF"), i))
+                blocks.append(("text", f_main, row.meaning, TEXT, -1))
+                if row.note:
+                    blocks.append(("text", f_note, row.note, TEXT_MUTED, -1))
+                blocks.append(("gap",))
+            if st.summary:
+                blocks.append(("text", f_note, st.summary, TEXT_MUTED, -1))
+        blocks.append(("text", f_note, "«+» сохранит в слова · клик по слову: его значение · Esc закрыть", TEXT_MUTED, -1))
+
+        gap = px * 0.3
+        heights: list[float] = []
+        for b in blocks:
+            if b[0] == "text":
+                heights.append(height(b[1], b[2]))
+            elif b[0] == "phrase":
+                heights.append(max(btn, height(b[1], b[2], inner - btn - px * 0.5)))
+            elif b[0] == "skeleton":
+                heights.append(px * 0.8)
+            else:
+                heights.append(px * 0.15)
+        card_h = sum(heights) + gap * (len(blocks) - 1) + 2 * pad
+        card_h = min(card_h, bounds.h - 16)
+        avoid = union([region] + ([self._strip] if self._strip else []))
+        box = place_card(region, card_w, card_h, bounds, gap=max(8.0, px * 0.6), avoid=avoid)
+        rect = QRectF(box.x, box.y, box.w, box.h)
+        self._explain_rect = rect
+        bg = QColor(STRIP_BG)
+        bg.setAlphaF(0.96)
+        p.setPen(QPen(QColor(255, 255, 255, 28), 1))
+        p.setBrush(bg)
+        p.drawRoundedRect(rect, 12, 12)
+        p.save()
+        p.setClipRect(rect)
+        x, y = rect.x() + pad, rect.y() + pad
+        saves: list[QRectF] = []
+        for b, h in zip(blocks, heights, strict=True):
+            if b[0] == "text":
+                p.setFont(b[1])
+                p.setPen(b[3])
+                p.drawText(QRectF(x, y, inner, h + 1), flags, b[2])
+            elif b[0] == "phrase":
+                row = self._explain.rows[b[4]] if self._explain else None
+                p.setFont(b[1])
+                p.setPen(b[3])
+                p.drawText(QRectF(x, y, inner - btn - px * 0.5, h + 1), flags, b[2])
+                r = QRectF(x + inner - btn, y, btn, btn)
+                saves.append(r)
+                saved = bool(row and row.saved)
+                fill = QColor(ACCENT)
+                fill.setAlphaF(0.25 if saved else 0.95)
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(fill)
+                p.drawEllipse(r)
+                p.setPen(QColor("#06261F") if not saved else TEXT)
+                f_btn = QFont(FONT_FAMILY)
+                f_btn.setPixelSize(max(1, round(btn * 0.62)))
+                f_btn.setWeight(QFont.Weight.Bold)
+                p.setFont(f_btn)
+                p.drawText(r, int(Qt.AlignmentFlag.AlignCenter), "✓" if saved else "+")
+            elif b[0] == "skeleton":
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QColor(255, 255, 255, 30))
+                p.drawRoundedRect(QRectF(x, y + h * 0.15, inner * b[1], h * 0.7), h * 0.3, h * 0.3)
+            y += h + gap
+        p.restore()
+        self._explain_saves = saves
 
     def _paint_card(self, p: QPainter, card: CardState, sel: Rect, bounds: Rect, px: float) -> None:
         pad = px * 0.95

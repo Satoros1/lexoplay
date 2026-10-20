@@ -205,10 +205,10 @@ def test_auto_ocr_mode_picks_the_cleanest_reading(monkeypatch):
     assert out.utterance.text == "You're not leaving this room."
     assert out.quality is not None and out.quality.ok
     assert out.preview is not None and out.preview.mode == "RGB"
-    # способ уже известен и читает хорошо: другие не пробуем
+    # F2 читает всеми способами; проверка смены реплики только уже выбранным
     ocr.modes.clear()
-    out2 = run(p.run(lambda: frame("x"), Target("HM", REGION, ocr_mode="pixel")))
-    assert ocr.modes == ["pixel"] and out2.kind == "repeat"
+    reading = run(p.recognize(frame("x"), Target("HM", REGION, ocr_mode="pixel"), explore=False))
+    assert ocr.modes == ["pixel"] and reading.mode == "pixel"
 
 
 def test_disk_cache_serves_repeat_without_request(tmp_path):
@@ -251,3 +251,58 @@ def test_context_comes_from_game_history_in_a_new_session(tmp_path):
     ctx = tr.requests[0].context
     assert [c.source for c in ctx] == ["Who goes there?", "It's me, Mira."]  # от старых к новым, только эта игра
     store.close()
+
+
+def test_fusion_adds_words_highlighted_in_another_color():
+    from lexoplay.ocrfuse import fuse
+
+    def words(*items):
+        return tuple(Word(t, Rect(x, y, w, 0.04)) for t, x, y, w in items)
+
+    # голубой текст прочитан, жёлтые слова «Ultimate Biker Gang Leader» потерялись
+    base = OcrResult(
+        (
+            Line(words(("Oh,", 0.06, 0.70, 0.04), ("and", 0.11, 0.70, 0.05), ("they", 0.17, 0.70, 0.06),
+                       ("mentioned", 0.24, 0.70, 0.14), ("the", 0.39, 0.70, 0.05))),
+            Line(words(("too.", 0.20, 0.78, 0.06))),
+        )
+    )
+    other = OcrResult(
+        (
+            Line(words(("Ultimate", 0.46, 0.70, 0.12), ("Biker", 0.59, 0.70, 0.08), ("Gang", 0.68, 0.70, 0.07))),
+            Line(words(("Leader", 0.06, 0.78, 0.12), ("t0o", 0.20, 0.78, 0.06))),
+            Line(words(("|#", 0.5, 0.2, 0.02),)),  # мусор фона не добавляем
+        )
+    )
+    fused, added = fuse(base, [other])
+    assert added == 4
+    assert fused.raw_text == "Oh, and they mentioned the Ultimate Biker Gang\nLeader too."
+    same, none_added = fuse(base, [base])
+    assert none_added == 0 and same is base
+
+
+def test_waits_for_text_over_animated_scene():
+    """Сцена за текстом шевелится (кадры не совпадают никогда): ждём, пока перестанет расти текст."""
+    import random
+
+    rnd = random.Random(1)
+
+    def animated():
+        img = Image.new("RGB", (800, 600), (rnd.randint(0, 255), rnd.randint(0, 255), rnd.randint(0, 255)))
+        ImageDraw.Draw(img).rectangle((0, 400, 800, 600), fill=(rnd.randint(0, 255), 30, 30))
+        return img
+
+    texts = iter(
+        ["Oh, and they", "Oh, and they mentioned the", "Oh, and they mentioned the Ultimate Biker Gang Leader too."]
+        + ["Oh, and they mentioned the Ultimate Biker Gang Leader too."] * 50
+    )
+
+    class TypingOcr:
+        async def recognize(self, prepared):
+            return result(next(texts))
+
+    tr = FakeTranslator()
+    p = Pipeline(TypingOcr(), tr, LineMemory(), sleep=no_sleep, run_sync=direct)
+    out = run(p.run(animated, Target("DR", REGION)))
+    assert out.kind == "translated"
+    assert tr.requests[0].text == "Oh, and they mentioned the Ultimate Biker Gang Leader too."

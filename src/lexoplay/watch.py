@@ -20,6 +20,10 @@
 Без автоперевода и «new», и «gone» просто прячут перевод. С автопереводом «new»
 сразу переводит следующую реплику, а после «gone» наблюдатель ждёт (waiting), когда
 в окне диалога снова появится текст.
+
+Первые секунды после показа перевода (settle) проверяем и без действий игрока, но
+только одно: не допечаталась ли реплика («grown»). Тогда перевод обновится сам: так
+бывает, когда F2 нажали, пока текст ещё печатался поверх анимированной сцены.
 """
 
 from __future__ import annotations
@@ -39,8 +43,14 @@ MIN_LETTERS = 3  # меньше букв в ожидании: шум рамки 
 
 
 def grown(old: str, new: str) -> bool:
-    """Реплика допечаталась: новый текст заметно длиннее, а начало то же."""
-    return len(new) > len(old) * 1.25 + 8
+    """Реплика допечаталась: новый текст заметно длиннее, и добавились настоящие слова, а не мусор OCR."""
+    if len(new) <= len(old) * 1.25 + 8:
+        return False
+    from lexoplay.ocrscore import token_score
+
+    seen = set(old.split())
+    extra = [w for w in new.split() if w not in seen]
+    return sum(1 for w in extra if len(w) >= 2 and token_score(w)[1] >= 0.7) >= 2
 
 
 def _words(norm: str) -> set[str]:
@@ -67,9 +77,11 @@ class LineWatcher:
         gated: bool = False,
         armed_for: float = ARMED_FOR,
         waiting: bool = False,
+        settle_for: float = 0.0,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.norm = normalize_text(text)
+        self._settle_until = clock() + settle_for
         self.waiting = waiting  # перевода на экране нет: ждём, когда появится новая реплика
         self._gated = gated
         self._armed_for = armed_for
@@ -90,8 +102,13 @@ class LineWatcher:
         self._armed_until = self._clock() + self._armed_for
 
     @property
-    def armed(self) -> bool:
+    def by_input(self) -> bool:
+        """Проверка разбужена действием игрока (или наблюдатель без Raw Input)."""
         return not self._gated or self._clock() <= self._armed_until
+
+    @property
+    def armed(self) -> bool:
+        return self.by_input or self._clock() < self._settle_until
 
     def needs_ocr(self, thumb: Image.Image) -> bool:
         """Игрок действовал и пиксели окна диалога сдвинулись: стоит перечитать текст."""
@@ -111,6 +128,12 @@ class LineWatcher:
         """Новый текст окна диалога → None (та же реплика), "new" или "gone"."""
         now = normalize_text(text)
         letters = sum(1 for c in now if c.isalpha())
+        if not self.by_input:
+            # игрок ничего не нажимал: реагируем только на допечатавшуюся реплику
+            if now and likeness(self.norm, now) >= SAME and grown(self.norm, now):
+                self.last_score = likeness(self.norm, now)
+                return "grown"
+            return None
         if self.waiting:
             if letters < MIN_LETTERS:
                 self.last_score = None
@@ -132,7 +155,7 @@ class LineWatcher:
         if score >= SAME:
             self._strikes = 0
             if grown(self.norm, now):
-                return "new"
+                return "grown"
             if thumb is not None:
                 self.baseline = thumb  # шевелится фон, а не текст: дальше сравниваем с этим кадром
             return None

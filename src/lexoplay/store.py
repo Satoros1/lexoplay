@@ -9,6 +9,7 @@ lines: переведённые реплики по играм. Это и кеш
 words: слова, сохранённые через F3. Без привязки к Lexo живут только здесь, после
 привязки сами уходят в карточки.
 glossary: свои переводы имён и терминов для игры, их видит модель.
+stats: по дням и играм: сколько реплик переведено, слов сохранено, минут в игре.
 """
 
 from __future__ import annotations
@@ -78,6 +79,14 @@ CREATE TABLE IF NOT EXISTS glossary (
     translation TEXT NOT NULL,
     PRIMARY KEY (exe, term)
 );
+CREATE TABLE IF NOT EXISTS stats (
+    day TEXT NOT NULL,
+    exe TEXT NOT NULL,
+    lines INTEGER NOT NULL DEFAULT 0,
+    words INTEGER NOT NULL DEFAULT 0,
+    seconds INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (day, exe)
+);
 """
 
 
@@ -107,6 +116,8 @@ class Game:
     deck_title: str | None = None
     # как готовить картинку для OCR (preprocess.MODES); None = ещё не подобрано
     ocr_mode: str | None = None
+    # своё место плашки перевода (x, y, ширина в долях игры); None = как в настройках «Вид»
+    strip_pos: Rect | None = None
 
     @property
     def deck_label(self) -> str:
@@ -173,6 +184,7 @@ class Store:
             ("deck_id", "INTEGER"),
             ("deck_title", "TEXT"),
             ("ocr_mode", "TEXT"),
+            ("strip_json", "TEXT"),
         ):
             if col not in cols:  # база из 0.1–0.2
                 self._db.execute(f"ALTER TABLE games ADD COLUMN {col} {ddl}")
@@ -180,14 +192,14 @@ class Store:
 
     _COLS = (
         "exe, title, region_json, name_region_json, capture, binarize, last_played_at, "
-        "deck_mode, deck_id, deck_title, ocr_mode"
+        "deck_mode, deck_id, deck_title, ocr_mode, strip_json"
     )
 
     @staticmethod
     def _game(row) -> Game:  # type: ignore[no-untyped-def]
         return Game(
             row[0], row[1], _rect_from(row[2]), _rect_from(row[3]), row[4], bool(row[5]), row[6],
-            row[7] or "game", row[8], row[9], row[10],
+            row[7] or "game", row[8], row[9], row[10], _rect_from(row[11]),
         )
 
     def get_game(self, exe: str) -> Game | None:
@@ -199,12 +211,12 @@ class Store:
         game = game.with_(exe=game.exe.lower())
         with self._lock:
             self._db.execute(
-                f"INSERT INTO games ({self._COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                f"INSERT INTO games ({self._COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(exe) DO UPDATE SET title=excluded.title, region_json=excluded.region_json, "
                 "name_region_json=excluded.name_region_json, capture=excluded.capture, "
                 "binarize=excluded.binarize, last_played_at=excluded.last_played_at, "
                 "deck_mode=excluded.deck_mode, deck_id=excluded.deck_id, deck_title=excluded.deck_title, "
-                "ocr_mode=excluded.ocr_mode",
+                "ocr_mode=excluded.ocr_mode, strip_json=excluded.strip_json",
                 (
                     game.exe,
                     game.title,
@@ -217,6 +229,7 @@ class Store:
                     game.deck_id,
                     game.deck_title,
                     game.ocr_mode,
+                    _rect_to(game.strip_pos),
                 ),
             )
             self._db.commit()
@@ -505,6 +518,49 @@ class Store:
         with self._lock:
             self._db.execute("DELETE FROM glossary WHERE exe = ? AND term = ?", (exe.lower(), term))
             self._db.commit()
+
+    # ------------------------------------------------------------------ stats
+    def stats_add(self, day: str, exe: str, *, lines: int = 0, words: int = 0, seconds: int = 0) -> None:
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO stats (day, exe, lines, words, seconds) VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(day, exe) DO UPDATE SET lines = lines + excluded.lines, "
+                "words = words + excluded.words, seconds = seconds + excluded.seconds",
+                (day, exe.lower(), lines, words, seconds),
+            )
+            self._db.commit()
+
+    def stats_days(self, since: str) -> dict[str, tuple[int, int, int]]:
+        """{день: (реплик, слов, секунд)} начиная с since, по всем играм."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT day, SUM(lines), SUM(words), SUM(seconds) FROM stats WHERE day >= ? GROUP BY day", (since,)
+            ).fetchall()
+        return {r[0]: (int(r[1]), int(r[2]), int(r[3])) for r in rows}
+
+    def stats_active_days(self, limit: int = 400) -> list[str]:
+        """Дни, когда что-то читал или сохранял, от новых к старым."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT day FROM stats GROUP BY day HAVING SUM(lines) + SUM(words) > 0 ORDER BY day DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [r[0] for r in rows]
+
+    def stats_by_game(self, since: str) -> list[tuple[str, int, int, int]]:
+        """[(exe, реплик, слов, секунд)] с since, больше всего реплик сверху."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT exe, SUM(lines), SUM(words), SUM(seconds) FROM stats WHERE day >= ? GROUP BY exe "
+                "ORDER BY SUM(lines) DESC, SUM(seconds) DESC",
+                (since,),
+            ).fetchall()
+        return [(r[0], int(r[1]), int(r[2]), int(r[3])) for r in rows]
+
+    def stats_totals(self) -> tuple[int, int, int]:
+        with self._lock:
+            row = self._db.execute("SELECT COALESCE(SUM(lines),0), COALESCE(SUM(words),0), COALESCE(SUM(seconds),0) FROM stats").fetchone()
+        return int(row[0]), int(row[1]), int(row[2])
 
     def close(self) -> None:
         with self._lock:
