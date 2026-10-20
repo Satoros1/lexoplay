@@ -36,9 +36,13 @@ class Day:
     words: int = 0
     tokens_in: int = 0
     tokens_out: int = 0
+    usd: float = 0.0  # посчитано по цене той модели, что отвечала (Haiku и Sonnet стоят по-разному)
+    priced: bool = False  # хоть один ответ с известной ценой
 
     def cost(self, model: str) -> float | None:
-        price = price_for(model)
+        if self.priced:
+            return self.usd
+        price = price_for(model)  # счётчик из 0.4: цены по отдельным моделям не записывались
         if price is None:
             return None
         return self.tokens_in / 1e6 * price[0] + self.tokens_out / 1e6 * price[1]
@@ -73,20 +77,33 @@ class OwnUsage:
             int(raw.get("words", 0)),
             int(raw.get("in", 0)),
             int(raw.get("out", 0)),
+            float(raw.get("usd", 0.0)),
+            bool(raw.get("priced", False)),
         )
 
     def _save(self, d: Day) -> None:
         self._store.set_meta(
             self.KEY,
             json.dumps(
-                {"day": d.day, "lines": d.lines, "cached": d.cached, "words": d.words, "in": d.tokens_in, "out": d.tokens_out}
+                {
+                    "day": d.day,
+                    "lines": d.lines,
+                    "cached": d.cached,
+                    "words": d.words,
+                    "in": d.tokens_in,
+                    "out": d.tokens_out,
+                    "usd": round(d.usd, 6),
+                    "priced": d.priced,
+                }
             ),
         )
 
-    def add(self, kind: str, tokens: tuple[int, int] | None = None) -> Day:
+    def add(self, kind: str, tokens: tuple[int, int] | None = None, model: str | None = None) -> Day:
         with self._lock:
             d = self._load()
             t_in, t_out = tokens or (0, 0)
+            price = price_for(model) if model else None
+            usd = t_in / 1e6 * price[0] + t_out / 1e6 * price[1] if price else 0.0
             d = Day(
                 d.day,
                 d.lines + (kind == "line"),
@@ -94,6 +111,8 @@ class OwnUsage:
                 d.words + (kind == "word"),
                 d.tokens_in + t_in,
                 d.tokens_out + t_out,
+                d.usd + usd,
+                d.priced or price is not None,
             )
             self._save(d)
             return d

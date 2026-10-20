@@ -178,6 +178,9 @@ class Store:
         self._lock = threading.Lock()
         self._db = sqlite3.connect(str(path), check_same_thread=False)
         self._db.executescript(_SCHEMA)
+        line_cols = {r[1] for r in self._db.execute("PRAGMA table_info(lines)").fetchall()}
+        if "ver" not in line_cols:  # 0.4–0.5: версия перевода, старые строки = 0
+            self._db.execute("ALTER TABLE lines ADD COLUMN ver INTEGER NOT NULL DEFAULT 0")
         cols = {r[1] for r in self._db.execute("PRAGMA table_info(games)").fetchall()}
         for col, ddl in (
             ("deck_mode", "TEXT NOT NULL DEFAULT 'game'"),
@@ -365,32 +368,45 @@ class Store:
     # ------------------------------------------------------------------ lines: кеш и история
     _LINE_COLS = "id, exe, norm, speaker, source, translation, lang, created_at, seen_at, hits"
 
-    def line_find(self, exe: str, lang: str, norm: str) -> StoredLine | None:
+    def line_find(self, exe: str, lang: str, norm: str, min_ver: int = 0) -> StoredLine | None:
         with self._lock:
             row = self._db.execute(
-                f"SELECT {self._LINE_COLS} FROM lines WHERE exe = ? AND lang = ? AND norm = ? ORDER BY id DESC LIMIT 1",
-                (exe.lower(), lang, norm),
+                f"SELECT {self._LINE_COLS} FROM lines WHERE exe = ? AND lang = ? AND norm = ? AND ver >= ? "
+                "ORDER BY id DESC LIMIT 1",
+                (exe.lower(), lang, norm, min_ver),
             ).fetchone()
         return StoredLine(*row) if row else None
 
-    def line_recent(self, exe: str, lang: str, limit: int = 400) -> list[StoredLine]:
+    def line_recent(self, exe: str, lang: str, limit: int = 400, min_ver: int = 0) -> list[StoredLine]:
         with self._lock:
             rows = self._db.execute(
-                f"SELECT {self._LINE_COLS} FROM lines WHERE exe = ? AND lang = ? ORDER BY seen_at DESC LIMIT ?",
-                (exe.lower(), lang, limit),
+                f"SELECT {self._LINE_COLS} FROM lines WHERE exe = ? AND lang = ? AND ver >= ? "
+                "ORDER BY seen_at DESC LIMIT ?",
+                (exe.lower(), lang, min_ver, limit),
             ).fetchall()
         return [StoredLine(*r) for r in rows]
 
-    def line_add(self, exe: str, lang: str, norm: str, speaker: str | None, source: str, translation: str) -> int:
+    def line_add(
+        self, exe: str, lang: str, norm: str, speaker: str | None, source: str, translation: str, ver: int = 0
+    ) -> int:
         now = time.time()
         with self._lock:
             cur = self._db.execute(
-                "INSERT INTO lines (exe, norm, speaker, source, translation, lang, created_at, seen_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (exe.lower(), norm, speaker, source, translation, lang, now, now),
+                "INSERT INTO lines (exe, norm, speaker, source, translation, lang, created_at, seen_at, ver) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (exe.lower(), norm, speaker, source, translation, lang, now, now, ver),
             )
             self._db.commit()
             return int(cur.lastrowid or 0)
+
+    def line_retranslated(self, exe: str, lang: str, norm: str, translation: str, ver: int) -> None:
+        """«Перевести иначе»: новый перевод вместо всех прошлых этой реплики."""
+        with self._lock:
+            self._db.execute(
+                "UPDATE lines SET translation = ?, ver = ?, seen_at = ? WHERE exe = ? AND lang = ? AND norm = ?",
+                (translation, ver, time.time(), exe.lower(), lang, norm),
+            )
+            self._db.commit()
 
     def line_seen(self, line_id: int) -> None:
         with self._lock:

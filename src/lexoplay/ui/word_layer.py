@@ -46,6 +46,7 @@ class WordLayer(QWidget):
     selected = Signal(list)  # индексы выбранных слов
     add_clicked = Signal()
     explain_clicked = Signal()  # кнопка «Разбор реплики»
+    retranslate_clicked = Signal()  # кнопка «Перевести иначе»
     explain_save = Signal(int)  # «+» у пункта разбора
     finished = Signal(str)  # причина: esc, idle, focus, hotkey, closed, outside
 
@@ -78,6 +79,9 @@ class WordLayer(QWidget):
         self._explain: ExplainState | None = None
         self._explain_open = False
         self._explain_btn: QRectF | None = None
+        self._retranslate_btn: QRectF | None = None
+        self.can_retranslate = False  # у реплики есть перевод: можно попросить другой
+        self.retranslating = False
         self._explain_rect: QRectF | None = None
         self._explain_saves: list[QRectF] = []
         self.font_scale = 1.0
@@ -200,6 +204,9 @@ class WordLayer(QWidget):
         if self._explain_btn and self._explain_btn.contains(pos):
             self.explain_clicked.emit()
             return
+        if self._retranslate_btn and self._retranslate_btn.contains(pos):
+            self.retranslate_clicked.emit()
+            return
         if self._explain_open and self._explain_rect is not None:
             for i, r in enumerate(self._explain_saves):
                 if r.contains(pos):
@@ -292,6 +299,7 @@ class WordLayer(QWidget):
         self._explain_rect = None
         self._explain_saves = []
         self._explain_btn = None
+        self._retranslate_btn = None
         if self._explain_open and self._explain is not None:
             self._paint_explain(p, self._explain, region, bounds, px)
         elif self._card and self._sel:
@@ -302,14 +310,18 @@ class WordLayer(QWidget):
         p.end()
 
     def _paint_explain_button(self, p: QPainter, region: Rect, bounds: Rect, px: float) -> None:
-        """Кнопка «Разбор реплики» у правого верхнего угла окна диалога."""
+        """Кнопки над строкой перевода справа: «Перевести иначе» и «Разбор реплики»."""
         f = QFont(FONT_FAMILY)
         f.setPixelSize(max(12, round(px * 0.82)))
         f.setWeight(QFont.Weight.DemiBold)
-        label = f"Разбор реплики · {self.explain_key}" if self.explain_key else "Разбор реплики"
         fm = QFontMetricsF(f)
-        w, h = fm.horizontalAdvance(label) + px * 1.6, px * 1.75
-        x = min(region.right - w, bounds.w - w - 6)
+        h = px * 1.75
+        explain = f"Разбор реплики · {self.explain_key}" if self.explain_key else "Разбор реплики"
+        buttons = [("explain", explain)]
+        if self.can_retranslate:
+            buttons.insert(0, ("retranslate", "Перевожу заново…" if self.retranslating else "Перевести иначе"))
+        widths = [fm.horizontalAdvance(text) + px * 1.6 for _key, text in buttons]
+        total = sum(widths) + px * 0.5 * (len(buttons) - 1)
         top, bottom = region.y, region.bottom
         if self._strip is not None:  # над строкой перевода, чтобы ничего не закрывать
             top, bottom = min(top, self._strip.y), max(bottom, self._strip.bottom)
@@ -318,16 +330,25 @@ class WordLayer(QWidget):
             y = bottom + px * 0.4
         if y + h > bounds.h - 4:
             y = 4.0
-        rect = QRectF(max(4.0, x), y, w, h)
-        self._explain_btn = rect
-        bg = QColor(STRIP_BG)
-        bg.setAlphaF(0.92)
-        p.setPen(QPen(QColor(NAME), 1.2))
-        p.setBrush(bg)
-        p.drawRoundedRect(rect, h / 2, h / 2)
-        p.setFont(f)
-        p.setPen(QColor("#D9D4FF"))
-        p.drawText(rect, int(Qt.AlignmentFlag.AlignCenter), label)
+        x = max(4.0, min(region.right - total, bounds.w - total - 6))
+        self._explain_btn = None
+        self._retranslate_btn = None
+        for (key, text), w in zip(buttons, widths, strict=True):
+            rect = QRectF(x, y, w, h)
+            busy = key == "retranslate" and self.retranslating
+            if key == "explain":
+                self._explain_btn = rect
+            elif not busy:
+                self._retranslate_btn = rect
+            bg = QColor(STRIP_BG)
+            bg.setAlphaF(0.92)
+            p.setPen(QPen(QColor(NAME) if key == "explain" else QColor(ACCENT), 1.2))
+            p.setBrush(bg)
+            p.drawRoundedRect(rect, h / 2, h / 2)
+            p.setFont(f)
+            p.setPen(QColor("#D9D4FF") if key == "explain" else QColor("#BDEBDD") if not busy else TEXT_MUTED)
+            p.drawText(rect, int(Qt.AlignmentFlag.AlignCenter), text)
+            x += w + px * 0.5
 
     def _paint_explain(self, p: QPainter, st: ExplainState, region: Rect, bounds: Rect, px: float) -> None:
         pad = px * 0.95

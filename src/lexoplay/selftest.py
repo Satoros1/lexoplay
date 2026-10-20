@@ -225,6 +225,12 @@ def _ocr_auto(out_dir: Path) -> Callable[[], tuple[str, object]]:
             ),
             "vn_color": (vn_color_frame(), Rect(40 / 1280, 440 / 720, 1220 / 1280, 230 / 720)),
         }
+        # фото настоящих реплик из игр (есть в репозитории, в exe их нет)
+        from PIL import Image as _Image
+
+        samples = Path(__file__).resolve().parents[2] / "tests" / "data"
+        for photo in sorted(samples.glob("photo_*.jpg")) if samples.is_dir() else []:
+            cases[photo.stem] = (_Image.open(photo).convert("RGB"), Rect(0, 0, 1, 1))
 
         async def go():  # type: ignore[no-untyped-def]
             try:

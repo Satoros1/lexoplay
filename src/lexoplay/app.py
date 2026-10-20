@@ -65,7 +65,15 @@ from lexoplay.preprocess import MODE_NAMES, is_black, thumbnail
 from lexoplay.session import GameSession, Sessions
 from lexoplay.store import Game, SavedWord, StoredLine, Store, Task
 from lexoplay.textproc import Utterance, to_utterance
-from lexoplay.translate import AnthropicTranslator, LexoTranslator, TranslationError, Translator, check_key
+from lexoplay.translate import (
+    AnthropicTranslator,
+    ContextLine,
+    LexoTranslator,
+    TranslateRequest,
+    TranslationError,
+    Translator,
+    check_key,
+)
 from lexoplay.ui.main_window import AccountStatus, MainWindow, UpdateState
 from lexoplay.usage import OwnUsage
 from lexoplay.ui.overlay import Overlay
@@ -234,6 +242,10 @@ class App(QObject):
         self.word_layer.selected.connect(self._on_word_selected)
         self.word_layer.add_clicked.connect(self._on_word_add)
         self.word_layer.explain_clicked.connect(self._request_explain)
+        self.word_layer.retranslate_clicked.connect(self._retranslate)
+        self._better: AnthropicTranslator | None = None
+        self._better_model = ""
+        self._retranslate_token: object | None = None
         self.word_layer.explain_save.connect(self._on_explain_save)
         self.word_layer.finished.connect(self._on_words_finished)
         self._explain_cache: dict[tuple[str, str], Explanation] = {}
@@ -811,6 +823,7 @@ class App(QObject):
 
     def _rebuild_translator(self) -> None:
         self.own_lookup = None
+        self._better = None  # ключ или модель могли смениться
         if self.client.linked:
             self.translator = LexoTranslator(
                 self.client, on_usage=lambda u: self.bridge.call.emit(lambda: self._set_usage(u))
@@ -1547,7 +1560,7 @@ class App(QObject):
                 self.sessions.line_translated(game.exe)
                 self._stat(game.exe, lines=1)
             if own and out.kind == "translated":
-                self.own_usage.add("line", out.usage)
+                self.own_usage.add("line", out.usage, self.settings.model)
             elif own and out.cached:
                 self.own_usage.add("cached")
             if out.ocr is not None:
@@ -1788,10 +1801,100 @@ class App(QObject):
         else:
             self.word_layer.deck_label = "Сохранится во вкладку «Слова» в LexoPlay"
         self.word_layer.explain_key = self.settings.hotkeys.explain
+        self.word_layer.can_retranslate = self.translator is not None
+        self.word_layer.retranslating = False
         self.word_layer.open(self.display, game.region, views, strip=self.overlay.strip_rect())
         self.hotkeys.set_group("words", not self._hotkeys_paused)
         if self.watcher is None:
             self._watch_line(line.sentence, line.thumb)
+
+    # ------------------------------------------------------------------ «Перевести иначе»
+    def _better_translator(self) -> Translator | None:
+        """Своим ключом: модель посильнее (Sonnet) для одной реплики. С Lexo модель выбирает сервер."""
+        if self.client.linked:
+            return self.translator
+        key = get_api_key()
+        if not key:
+            return None
+        model = self.settings.better_model or self.settings.model
+        if self._better is None or self._better_model != model:
+            self._better = AnthropicTranslator(key, model)
+            self._better_model = model
+        return self._better
+
+    def _retranslate(self) -> None:
+        """Перевод реплики не понравился: перевести заново, показав модели прошлый вариант."""
+        ctx = self.word_ctx
+        if ctx is None or self.word_layer.retranslating:
+            return
+        game = self.store.get_game(ctx.exe)
+        translator = self._better_translator()
+        if game is None or game.region is None or translator is None:
+            return
+        line = ctx.line
+        record = line.record
+        text = line.utterance.text if line.utterance else (record.source if record else line.sentence)
+        speaker = line.utterance.speaker if line.utterance else (record.speaker if record else None)
+        pipeline = self._pipeline(ctx.exe)
+        target = self._target(game, ctx.session_id)
+        earlier = [r for r in (pipeline.context_for(target, text) if pipeline else []) if r.norm != normalize_text(text)]
+        region = game.region
+        token = object()
+        self._retranslate_token = token
+
+        def partial(t: str) -> None:
+            self.bridge.call.emit(lambda: self._retranslate_partial(token, region, t))
+
+        req = TranslateRequest(
+            text=text,
+            speaker=speaker,
+            game=game.title,
+            target_lang=self.settings.target_lang,
+            source_lang=self.settings.source_lang,
+            context=tuple(ContextLine(r.speaker, r.source, r.translation) for r in earlier),
+            glossary=target.glossary,
+            line_id=str(uuid.uuid4()),
+            session_id=ctx.session_id,
+            game_exe=ctx.exe,
+            previous=record.translation if record else None,
+            on_partial=partial,
+        )
+        self.word_layer.retranslating = True
+        self.word_layer.update()
+        model = self._better_model if isinstance(translator, AnthropicTranslator) else ""
+
+        def done(res: Any, err: BaseException | None) -> None:
+            if self._retranslate_token is not token:
+                return
+            self._retranslate_token = None
+            self.word_layer.retranslating = False
+            self.word_layer.update()
+            if err is not None:
+                if not isinstance(err, TranslationError):
+                    log.error("перевести иначе: упало", exc_info=err)
+                self.overlay.toast(str(err) if isinstance(err, TranslationError) else "Не получилось перевести заново", 4000)
+                if record is not None:
+                    self.overlay.show_text(region, record.translation, original=text)
+                return
+            rec = LineRecord(req.line_id, speaker, res.source, res.translation, normalize_text(text))
+            if pipeline is not None:
+                pipeline.memory.replace(rec)
+            self.cache.retranslated(ctx.exe, self.settings.target_lang, rec)
+            line.record = rec
+            self._explain_cache.pop((ctx.exe, normalize_text(line.sentence)), None)
+            ctx.explain = None
+            if model:
+                self.own_usage.add("line", res.usage, model)
+            self.overlay.show_text(region, res.translation, original=text)
+            self.word_layer.set_explain(None, show=False)
+            self.overlay.toast("Переведено заново" + (f" ({model})" if model else ""), 2500)
+            log.info("перевели иначе: %r -> %r", record.translation if record else None, res.translation)
+
+        self.run_bg(translator.translate(req), done)
+
+    def _retranslate_partial(self, token: object, region: Rect, text: str) -> None:
+        if token is self._retranslate_token and text:
+            self.overlay.show_text(region, text)
 
     # ------------------------------------------------------------------ разбор реплики (F7)
     def _request_explain(self) -> None:
@@ -1869,7 +1972,7 @@ class App(QObject):
             target_lang=self.settings.target_lang,
             source_lang=self.settings.source_lang,
         )
-        self.own_usage.add("explain", lookup.last_usage)
+        self.own_usage.add("explain", lookup.last_usage, self.settings.model)
         return result
 
     def _explain_state(self, ctx: WordCtx, exp: Explanation) -> ExplainState:
@@ -1974,7 +2077,7 @@ class App(QObject):
             source_lang=self.settings.source_lang,
         )
         known = self.vocab.known(sense.lemma) or self.vocab.known(selection)
-        self.own_usage.add("word", lookup.last_usage)
+        self.own_usage.add("word", lookup.last_usage, self.settings.model)
         return Sense(sense.lemma, sense.pos, sense.ipa, list(sense.senses), sense.marked_translation, in_deck=known)
 
     def _on_word_selected(self, indices: list) -> None:

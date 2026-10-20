@@ -241,9 +241,12 @@ def test_context_comes_from_game_history_in_a_new_session(tmp_path):
 
     store = Store(tmp_path / "db.sqlite")
     cache = LineCache(store)
-    store.line_add("mid.exe", "ru", "who goes there", "Old Man", "Who goes there?", "Кто идёт?")
-    store.line_add("mid.exe", "ru", "it s me mira", "Mira", "It's me, Mira.", "Это я, Мира.")
-    store.line_add("other.exe", "ru", "unrelated", None, "Unrelated.", "Не относится.")
+    from lexoplay.translate import TRANSLATION_VERSION as V
+
+    store.line_add("mid.exe", "ru", "old style", "Old Man", "Old style.", "Старый перевод.", 0)  # старая версия: не берём
+    store.line_add("mid.exe", "ru", "who goes there", "Old Man", "Who goes there?", "Кто идёт?", V)
+    store.line_add("mid.exe", "ru", "it s me mira", "Mira", "It's me, Mira.", "Это я, Мира.", V)
+    store.line_add("other.exe", "ru", "unrelated", None, "Unrelated.", "Не относится.", V)
     tr = FakeTranslator()
     p = Pipeline(FakeOcr(result("Old Man", "Back again?")), tr, LineMemory(), sleep=no_sleep, run_sync=direct, cache=cache)
     out = run(p.run(lambda: frame("x"), Target("Midnight", REGION, game_exe="mid.exe")))
@@ -330,3 +333,18 @@ def test_wobbly_pixel_text_does_not_stall_translation():
     out = run(p.run(animated, Target("HM", REGION)))
     assert out.kind == "translated"
     assert calls["n"] <= 2 + 4  # два чтения на «перестал расти» и четыре способа для перевода
+
+
+def test_old_version_translations_are_not_reused(tmp_path):
+    from lexoplay.history import LineCache
+    from lexoplay.store import Store
+
+    store = Store(tmp_path / "db.sqlite")
+    store.line_add("dr.exe", "ru", "my view became warped twisted", "Makoto", "My view became warped, twisted.",
+                   "Мой... исказился, перекособочился,", 0)
+    tr = FakeTranslator()
+    p = Pipeline(FakeOcr(result("My view became warped, twisted.")), tr, LineMemory(), sleep=no_sleep, run_sync=direct,
+                 cache=LineCache(store))
+    out = run(p.run(lambda: frame("x"), Target("DR", REGION, game_exe="dr.exe")))
+    assert out.kind == "translated" and len(tr.requests) == 1  # старый неудачный перевод переведён заново
+    store.close()

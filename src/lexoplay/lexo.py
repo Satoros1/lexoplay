@@ -257,6 +257,7 @@ class LexoClient:
         speaker: str | None,
         context: list[dict[str, Any]],
         glossary: dict[str, str] | None = None,
+        previous: str | None = None,
     ) -> tuple[str, str, bool, Usage | None]:
         body: dict[str, Any] = {
             "session_id": session_id,
@@ -268,6 +269,8 @@ class LexoClient:
         }
         if glossary:
             body["glossary"] = {k[:64]: v[:128] for k, v in list(glossary.items())[:50]}
+        if previous:
+            body["previous"] = previous[:2000]  # «Перевести иначе»: сервер не возьмёт перевод из кеша
         data = await self._request("POST", "/desktop/translate", json=body)
         return data["source"], data["translation"], bool(data.get("cached")), Usage.from_json(data.get("usage"))
 

@@ -12,24 +12,28 @@ import logging
 
 from lexoplay.dedupe import LineRecord, normalize_text, similarity
 from lexoplay.store import Store
+from lexoplay.translate import TRANSLATION_VERSION, fix_punctuation
 
 log = logging.getLogger(__name__)
 
 
 class LineCache:
-    def __init__(self, store: Store, *, threshold: float = 0.92, recent: int = 300) -> None:
+    """ver: переводы старых версий промпта не берём ни в кеш, ни в контекст: они переводились хуже."""
+
+    def __init__(self, store: Store, *, threshold: float = 0.92, recent: int = 300, ver: int = TRANSLATION_VERSION) -> None:
         self._store = store
         self._threshold = threshold
         self._recent = recent
+        self.ver = ver
 
     def find(self, exe: str, lang: str, text: str) -> LineRecord | None:
         norm = normalize_text(text)
         if not exe or len(norm) < 2:
             return None
-        hit = self._store.line_find(exe, lang, norm)
+        hit = self._store.line_find(exe, lang, norm, self.ver)
         if hit is None:
             best, best_score = None, 0.0
-            for row in self._store.line_recent(exe, lang, self._recent):
+            for row in self._store.line_recent(exe, lang, self._recent, self.ver):
                 # заведомо разные по длине не сравниваем: SequenceMatcher не бесплатный
                 if abs(len(row.norm) - len(norm)) > max(len(norm), len(row.norm)) * 0.2:
                     continue
@@ -45,7 +49,7 @@ class LineCache:
             line_id=f"local-{hit.id}",
             speaker=hit.speaker,
             source=hit.source,
-            translation=hit.translation,
+            translation=fix_punctuation(hit.source, hit.translation),
             norm=hit.norm,
         )
 
@@ -53,7 +57,7 @@ class LineCache:
         """Последние реплики игры, от старых к новым: контекст для перевода в начале новой сессии."""
         if not exe or limit <= 0:
             return []
-        rows = self._store.line_recent(exe, lang, limit)
+        rows = self._store.line_recent(exe, lang, limit, self.ver)
         return [
             LineRecord(f"local-{r.id}", r.speaker, r.source, r.translation, r.norm) for r in reversed(rows)
         ]
@@ -62,6 +66,18 @@ class LineCache:
         if not exe or not rec.norm or not rec.translation:
             return
         try:
-            self._store.line_add(exe, lang, rec.norm, rec.speaker, rec.source, rec.translation)
+            self._store.line_add(exe, lang, rec.norm, rec.speaker, rec.source, rec.translation, self.ver)
         except Exception:
             log.exception("реплика не записалась в кеш")
+
+    def retranslated(self, exe: str, lang: str, rec: LineRecord) -> None:
+        """Перевели заново: прошлые переводы этой реплики заменить новым (или записать, если их не было)."""
+        if not exe or not rec.norm:
+            return
+        try:
+            if self._store.line_find(exe, lang, rec.norm) is None:
+                self.add(exe, lang, rec)
+            else:
+                self._store.line_retranslated(exe, lang, rec.norm, rec.translation, self.ver)
+        except Exception:
+            log.exception("новый перевод не записался в кеш")

@@ -36,20 +36,46 @@ LANGS = {
     "pl": "Polish",
 }
 
+# Версия промпта и обработки перевода. Меняется, когда перевод заметно меняется: кеш
+# реплик со старой версией не используется, они переведутся заново уже по-новому.
+TRANSLATION_VERSION = 3
+
 SYSTEM_PROMPT = """You are the localizer of the video game "{game}". The player reads its dialogue in {target}: you translate it line by line while they play.
 
-How to translate a line:
-- Translate it as the game says it, in the same grammatical person and voice. "I" stays "I", "you" stays "you", "we" stays "we". Never retell or describe the line (no "he says that...", "she asks..."), never talk to the player, never add the speaker's name.
-- A line with a speaker is that character's own words: direct speech, first person when the original is first person. A line without a speaker is narration, a thought, a sign or a menu: translate it as it is.
-- Make it sound like natural {target} dialogue written for this game, not a word-for-word gloss. Keep each character's voice: slang, rudeness, jokes, hesitation, politeness.
-- Stay consistent with the earlier translations: the same form of address between the same characters (ты/вы and the like), the same genders for characters and for the player, the same names and terms. The glossary wins over everything.
-- The text was read from the screen by OCR: silently fix recognition errors (l/I, 0/O, rn/m, missing spaces, stray symbols). ALL CAPS is just the game's font: use normal capitalization.
+Write the translation a professional {target} game localizer would ship:
+- Natural, idiomatic {target} that a native speaker would really say in this situation. Rephrase freely; never translate word for word, never use calques, rare, bookish or made-up words.
+- Translate the whole meaning: never drop a word and never put "..." in place of a word you are unsure about.
+- Keep the perspective: a line in which the speaker talks about themselves stays in the first person and is never retold ("he says that...", "she asks..."). Never talk to the player, never add the speaker's name.
+- A line with a speaker is that character's own words. A line without a speaker is narration, the hero's thoughts, a sign or a menu: translate it as such.
+- Keep each character's voice: slang, rudeness, jokes, hesitation, politeness. Stay consistent with the earlier translations: the same form of address between the same characters (ты/вы and the like), the same genders, the same names and terms. The glossary wins over everything. Transliterate names by the usual {target} rules.
+- The text comes from OCR and can be garbled: l/I, 0/O, rn/m, split or merged words ("vi ew", "becamewarped"), stray symbols like | or #. Work out the words the game really shows from the letters and the context, then translate them. ALL CAPS is just the game's font: use normal capitalization.
 - If the speaker label looks like a piece of the sentence rather than a name, treat it as part of the line.
-- If a line is cut off, translate what is there without inventing the rest.
-- Keep the punctuation of the original: the same ? ! and three dots (...) inside and at the end, and a period where the original has one. If the original ends with a comma or breaks off because the sentence continues in the next text box, end the translation with "..." and never with a comma.
-
+- Punctuation: keep ? ! and three dots (...) as in the original, and a period where it has one. If the original ends with a comma or breaks off because the sentence continues in the next text box, end with "..." and never with a comma.
+{examples}
 Reply with the translation of the line after "Translate this line" and nothing else: no quotes, no notes, no original text, no speaker name.
 Never use the em dash character; use a comma, a colon or a new sentence instead."""
+
+# Образцы хорошего перевода: маленькой модели они дают больше, чем любые правила.
+EXAMPLES = {
+    "ru": [
+        ("My view became warped, twisted.", "Всё перед глазами поплыло и исказилось."),
+        ("Huh? You got a problem with me, punk?", "Чего? Есть ко мне претензии, сопляк?"),
+        ("Don't beat around the bush. Just tell me.", "Не ходи вокруг да около. Просто скажи."),
+        ("And then, out of nowhere,", "И тут, откуда ни возьмись..."),
+        ("Ugh... my head is killing me.", "Ох... голова просто раскалывается."),
+        ("l can't be|ieve this is happening...", "Не могу поверить, что это происходит..."),
+        ("I'm sorry to have kept you waiting.", "Простите, что заставил вас ждать."),
+    ],
+}
+
+
+def examples_block(target_lang: str) -> str:
+    pairs = EXAMPLES.get(target_lang)
+    if not pairs:
+        return ""
+    lines = "\n".join(f"{en} → {tr}" for en, tr in pairs)
+    return f"\nExamples of the style we want (original → translation):\n{lines}\n"
+
 
 MAX_TOKENS = 1024
 
@@ -88,6 +114,7 @@ class TranslateRequest:
     line_id: str = ""
     session_id: str = ""
     game_exe: str = ""
+    previous: str | None = None  # «Перевести иначе»: прошлый перевод, который не понравился
     # кусок перевода по мере того, как модель его пишет (из фонового потока)
     on_partial: Partial | None = field(default=None, compare=False, repr=False)
 
@@ -108,7 +135,11 @@ def lang_name(code: str) -> str:
 
 
 def build_system(req: TranslateRequest) -> str:
-    return SYSTEM_PROMPT.format(target=lang_name(req.target_lang), game=req.game or "unknown")
+    return SYSTEM_PROMPT.format(
+        target=lang_name(req.target_lang),
+        game=(req.game or "unknown").replace('"', "'"),
+        examples=examples_block(req.target_lang),
+    )
 
 
 def _attr(value: str) -> str:
@@ -136,6 +167,12 @@ def build_user(req: TranslateRequest) -> str:
             parts.append(_line(c.speaker, c.source))
             parts.append(f"<translation>{c.translation}</translation>")
         parts.append("</earlier_lines>")
+    if req.previous:
+        parts.append(f"<rejected_translation>{req.previous}</rejected_translation>")
+        parts.append(
+            "The player found this translation of the line inaccurate or unnatural. "
+            "Translate the line again from scratch and make it clearly better."
+        )
     parts.append("Translate this line:")
     parts.append(_line(req.speaker, req.text))
     return "\n".join(parts)
@@ -146,7 +183,7 @@ def no_dash(text: str) -> str:
 
     Тире в конце (речь оборвалась) становится многоточием, а не запятой."""
     t = text.strip()
-    t = re.sub(r"\s*[—–]\s*([\"'»”’)\]]*)$", r"…\1", t)
+    t = re.sub(r"\s*[—–]\s*([\"'»”’)\]]*)$", r"...\1", t)
     return t.replace(" — ", ", ").replace("—", ", ").strip()
 
 
@@ -189,14 +226,14 @@ def fix_punctuation(source: str, translation: str) -> str:
     closers = "".join(c for c in trail if c in _CLOSERS)
     marks_after = bool(closers) and bool(marks) and trail.rstrip()[-1] in _MARKS  # «Лидер».
     src = line_ending(source)
-    cont = "…" if src in ("…", ",", "—", "") else src
+    cont = "..." if src in ("…", ",", "—", "") else src
     if marks and marks[-1] in ",;:—–-":
         fixed = marks.rstrip(",;:—–- ") or ""
         fixed = fixed if fixed and fixed[-1] in ".!?…" else cont
     elif not marks:
-        fixed = {"": "", ",": "…", "—": "…"}.get(src, src)
+        fixed = {"": "", ",": "...", "—": "...", "…": "..."}.get(src, src)
     elif marks in (".",) and src == "…":
-        fixed = "…"
+        fixed = "..."
     else:
         return t
     if not fixed:
@@ -276,7 +313,8 @@ class AnthropicTranslator:
         params: dict = {
             "model": self._model,
             "max_tokens": MAX_TOKENS,
-            "system": build_system(req),
+            # постоянная часть промпта: Claude кеширует её, повторные запросы дешевле и быстрее
+            "system": [{"type": "text", "text": build_system(req), "cache_control": {"type": "ephemeral"}}],
             "messages": [{"role": "user", "content": build_user(req)}],
         }
         if self._thinking_off:
@@ -428,6 +466,7 @@ class LexoTranslator:
                 speaker=req.speaker,
                 context=[{"speaker": c.speaker, "source": c.source, "translation": c.translation} for c in req.context],
                 glossary=req.glossary or None,
+                previous=req.previous,
             )
         except LexoOffline as exc:
             msg = "Не успел перевести, попробуй ещё раз." if str(exc) == "timeout" else "Нет связи с Lexo."

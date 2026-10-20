@@ -70,6 +70,7 @@ class Settings:
     server_url: str = "https://api.lexovium.study"
     deck: str = "game"  # game: колода с названием игры | current: текущая колода в Lexo
     model: str = "claude-haiku-5-5"
+    better_model: str = "claude-sonnet-5-5"  # «Перевести иначе»: одна реплика моделью посильнее
     target_lang: str = "ru"
     source_lang: str = "en"
     magpie_mode: str = "auto"  # auto | always | never

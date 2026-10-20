@@ -60,6 +60,13 @@ class LineMemory:
     def add(self, rec: LineRecord) -> None:
         self._items.append(rec)
 
+    def replace(self, rec: LineRecord) -> None:
+        """Реплику перевели заново: старый перевод из памяти убрать, новый положить последним."""
+        kept = [r for r in self._items if r.norm != rec.norm]
+        self._items.clear()
+        self._items.extend(kept)
+        self._items.append(rec)
+
     def context(self, limit: int = 8) -> list[LineRecord]:
         """Последние реплики от старых к новым — контекст для модели."""
         items = list(self._items)
