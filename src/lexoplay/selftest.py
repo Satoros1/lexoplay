@@ -120,6 +120,137 @@ def _ocr(out_dir: Path) -> Callable[[], tuple[str, object]]:
     return run
 
 
+def pixel_frame(lines: list[str], seed: int = 3):  # type: ignore[no-untyped-def]
+    """Кадр «как Hotline Miami»: пиксельные цветные буквы с обводкой на тёмном фоне, чуть пляшут."""
+    import random
+
+    from PIL import Image, ImageDraw, ImageFont
+
+    rnd = random.Random(seed)
+    font_path = Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts" / "arial.ttf"
+    font = ImageFont.truetype(str(font_path), 11) if font_path.exists() else ImageFont.load_default()
+    small = Image.new("RGB", (300, 40), (18, 6, 34))
+    d = ImageDraw.Draw(small)
+    d.fontmode = "1"  # без сглаживания: настоящий пиксельный шрифт
+    colors = [(255, 60, 170), (60, 200, 255), (255, 220, 60), (120, 90, 255), (255, 90, 60)]
+    y = 4
+    for line in lines:
+        x = 6
+        for i, ch in enumerate(line):
+            dy = rnd.choice((-1, 0, 0, 1))
+            for ox, oy in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                d.text((x + ox, y + dy + oy), ch, fill=(0, 0, 0), font=font)
+            d.text((x, y + dy), ch, fill=colors[(i // 3) % len(colors)], font=font)
+            x += d.textlength(ch, font=font) + 1
+        y += 17
+    frame = Image.new("RGB", (1280, 720), (40, 10, 60))
+    frame.paste(small.resize((1200, 160), Image.Resampling.NEAREST), (40, 520))
+    return frame
+
+
+def _ocr_auto(out_dir: Path) -> Callable[[], tuple[str, object]]:
+    """Автовыбор распознавания на настоящем Windows OCR: обычная новелла и пиксельный шрифт."""
+
+    def run() -> tuple[str, object]:
+        from lexoplay.bg import BackgroundLoop
+        from lexoplay.dedupe import LineMemory
+        from lexoplay.geometry import Rect
+        from lexoplay.ocrscore import quality
+        from lexoplay.pipeline import Pipeline, Target
+        from lexoplay.preprocess import MODES, prepare
+        from lexoplay.translate import TranslateResult
+        from lexoplay.win.ocr import OcrUnavailable, WinOcr
+
+        class Tr:
+            async def translate(self, req):  # type: ignore[no-untyped-def]
+                return TranslateResult(req.text, "-")
+
+        bg = BackgroundLoop("selftest-ocr-auto")
+        ocr = WinOcr("en-US")
+        cases = {
+            "novel": (_test_frame(), Rect(0.05, 0.75, 0.9, 0.22)),
+            "pixel": (
+                pixel_frame(["YOU'RE NOT LEAVING THIS ROOM ALIVE.", "Who are you people anyway?"]),
+                Rect(40 / 1280, 520 / 720, 1200 / 1280, 160 / 720),
+            ),
+        }
+
+        async def go():  # type: ignore[no-untyped-def]
+            try:
+                ocr.check()
+            except OcrUnavailable as exc:
+                return {"error": str(exc)}
+            p = Pipeline(ocr, Tr(), LineMemory())
+            report: dict[str, object] = {}
+            for name, (frame, region) in cases.items():
+                frame.save(out_dir / f"ocr-auto-{name}.png")
+                each = {}
+                for mode in MODES:
+                    prep = prepare(frame, region, mode=mode)
+                    prep.image.save(out_dir / f"ocr-auto-{name}-{mode}.png")
+                    res = await ocr.recognize(prep)
+                    each[mode] = {"quality": str(quality(res)), "text": res.raw_text}
+                reading = await p.recognize(frame, Target("t", region))
+                report[name] = {
+                    "chosen": reading.mode,
+                    "quality": str(reading.quality),
+                    "ratio": round(reading.quality.ratio, 3),
+                    "text": reading.result.raw_text,
+                    "modes": each,
+                }
+            return report
+
+        try:
+            report = bg.run(go(), timeout=90)
+        finally:
+            bg.stop()
+        if "error" in report:
+            return "warn", report
+        novel, pixel = report["novel"], report["pixel"]
+        if novel["ratio"] < 0.8 or "reluctant" not in str(novel["text"]).lower():  # type: ignore[index]
+            return "fail", report
+        return ("ok" if pixel["ratio"] >= 0.75 else "warn"), report  # type: ignore[index]
+
+    return run
+
+
+def _update_swap(out_dir: Path) -> tuple[str, object]:
+    """Подмена exe при обновлении: копия exe подменяет себя «новой версией» и перезапускается."""
+    import shutil
+    import subprocess
+    import tempfile
+
+    from lexoplay.updater import clean_env
+
+    if not getattr(sys, "frozen", False):
+        return "skip", "только в собранном exe"
+    tmp = Path(tempfile.mkdtemp(prefix="lexoplay-update-"))
+    exe = tmp / "LexoPlay.exe"
+    shutil.copy2(sys.executable, exe)
+    shutil.copy2(sys.executable, tmp / "LexoPlay.exe.new")
+    marker = tmp / "probe.txt"
+    proc = subprocess.run(  # noqa: S603
+        [str(exe), "--update-swap-test", str(marker)], env=clean_env(), timeout=60, capture_output=True
+    )
+    deadline = time.time() + 60
+    while time.time() < deadline and not marker.exists():
+        time.sleep(0.3)
+    time.sleep(1.0)
+    info = {
+        "swap_exit": proc.returncode,
+        "probe": marker.read_text(encoding="utf-8") if marker.exists() else None,
+        "files": sorted(p.name for p in tmp.iterdir()),
+    }
+    ok = (
+        proc.returncode == 0
+        and marker.exists()
+        and exe.exists()
+        and not (tmp / "LexoPlay.exe.new").exists()
+        and not any(n.endswith(".old") for n in info["files"])  # type: ignore[union-attr]
+    )
+    return ("ok" if ok else "fail"), info
+
+
 def _lexo_https() -> tuple[str, object]:
     """Настоящий HTTPS до сервера Lexo: в exe должны быть httpx и сертификаты certifi."""
     import httpx
@@ -314,6 +445,122 @@ def _app_flow(out_dir: Path) -> Callable[[], tuple[str, object]]:
     return run
 
 
+def _own_key_flow(out_dir: Path) -> Callable[[], tuple[str, object]]:
+    """Без Lexo, своим ключом: F3 → значение → «+ в мои слова» → слово в «Слова»; после привязки уходит в Lexo."""
+
+    def run() -> tuple[str, object]:
+        import tempfile
+
+        import httpx
+        from PySide6.QtWidgets import QApplication
+
+        app_q = QApplication.instance() or QApplication(sys.argv[:1])
+        tmp = tempfile.mkdtemp(prefix="lexoplay-selftest-own-")
+        os.environ["LEXOPLAY_HOME"] = tmp
+        os.environ["ANTHROPIC_API_KEY"] = "sk-selftest"
+
+        from lexoplay.app import App, CurrentLine
+        from lexoplay.bg import BackgroundLoop
+        from lexoplay.config import Settings
+        from lexoplay.geometry import Rect
+        from lexoplay.lexo import LexoClient, Sense
+        from lexoplay.ocr_model import Line, OcrResult, Word
+        from lexoplay.store import Game, Store
+        from lexoplay.textproc import Utterance
+
+        calls: list[tuple[str, object]] = []
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            body = json.loads(req.content) if req.content else None
+            calls.append((req.url.path, body))
+            if req.url.path == "/desktop/cards":
+                return httpx.Response(200, json={"card_id": 1, "text": "eerie", "translation": "жуткий", "status": "created", "deck": "x"})
+            if req.url.path.endswith("/end"):
+                return httpx.Response(200, json={"words_added": 1})
+            if req.url.path == "/desktop/me":
+                user = {"username": "selftest", "native_lang": "ru", "learning_lang": "en", "premium": False}
+                return httpx.Response(200, json={"user": user, "usage": {"used": 0, "limit": 50}, "device_name": "CI"})
+            if req.url.path == "/desktop/vocab":
+                return httpx.Response(200, json={"items": [], "server_time": "2026-10-19T00:00:00Z"})
+            return httpx.Response(404, json={"detail": "not found"})
+
+        class FakeLookup:
+            last_usage = (120, 30)
+
+            async def lookup(self, **kw):  # type: ignore[no-untyped-def]
+                calls.append(("anthropic-lookup", kw))
+                return Sense("eerie", "adj", "ˈɪəri", ["жуткий", "зловещий"])
+
+        def pump(cond: Callable[[], bool], seconds: float = 5.0) -> bool:
+            end = time.time() + seconds
+            while time.time() < end:
+                app_q.processEvents()
+                if cond():
+                    return True
+                time.sleep(0.02)
+            return cond()
+
+        store = Store(Path(tmp) / "local.db")
+        game = store.save_game(Game("selftest.exe", "Selftest", region=Rect(0.05, 0.75, 0.9, 0.2)))
+        bg = BackgroundLoop("selftest-own")
+        app = App(app_q, Settings(), store, bg)
+        app.client = LexoClient("https://lexo.test", None, transport=httpx.MockTransport(handler))
+        app._rebuild_translator()
+        info: dict[str, object] = {"translator": type(app.translator).__name__}
+        app.own_lookup = FakeLookup()  # type: ignore[assignment]
+        try:
+            app.start()
+            app.display = Rect(80, 80, 1000, 700)
+            session = app.sessions.touch(game.exe, game.title)
+            words, x = [], 0.08
+            for w in "This place feels eerie after dark.".split():
+                words.append(Word(w, Rect(x, 0.85, 0.012 * len(w), 0.035)))
+                x += 0.012 * len(w) + 0.012
+            line = CurrentLine(game.exe, OcrResult((Line(tuple(words)),)), Utterance(None, "This place feels eerie after dark."), None, time.time())
+            app._open_words(game, session, line)
+            app._on_word_selected([3])
+            info["card_ready"] = pump(lambda: bool(app.word_ctx and app.word_ctx.card and app.word_ctx.card.phase == "ready"))
+            info["button"] = app.word_ctx.card.button if app.word_ctx and app.word_ctx.card else None
+            app.word_layer.grab().save(str(out_dir / "word-layer-own-key.png"))
+            app._on_word_add()
+            saved = store.words_list()
+            info["saved_local"] = [(w.word, w.translation, w.lexo) for w in saved]
+            info["outbox_before_link"] = app.outbox.counts()
+            info["usage_words"] = app.own_usage.today().words
+            app.word_layer.finish("esc")
+            info["server_calls_before_link"] = [c[0] for c in calls if c[0].startswith("/")]
+            # привязали ПК: слова сами уходят в Lexo
+            app.client.token = "tok"
+            app._push_local_words()
+            info["sent_after_link"] = pump(lambda: any(c[0] == "/desktop/cards" for c in calls) and app.outbox.counts() == (0, 0))
+            info["marked"] = [w.lexo for w in store.words_list()]
+            app.show_window("words")
+            for _ in range(10):
+                app_q.processEvents()
+            if app.window is not None:
+                app.window.grab().save(str(out_dir / "window-words-real-app.png"))
+                app.window.hide()
+        finally:
+            app.shutdown()
+        card = next((c[1] for c in calls if c[0] == "/desktop/cards"), None) or {}
+        info["card_payload"] = card
+        ok = (
+            info["card_ready"]
+            and info["button"] == "+ в мои слова"
+            and info["saved_local"] == [("eerie", "жуткий, зловещий", False)]
+            and info["outbox_before_link"] == (0, 0)
+            and info["usage_words"] == 1
+            and not info["server_calls_before_link"]
+            and info["sent_after_link"]
+            and info["marked"] == [True]
+            and card.get("lemma") == "eerie"
+            and card.get("sentence") == "This place feels eerie after dark."
+        )
+        return ("ok" if ok else "fail"), info
+
+    return run
+
+
 def _qt_checks(out_dir: Path) -> None:
     from PySide6.QtCore import Qt
     from PySide6.QtGui import QColor, QPalette
@@ -376,17 +623,30 @@ def _qt_checks(out_dir: Path) -> None:
         from lexoplay.ui import theme
         from lexoplay.ui.main_window import AccountStatus, MainWindow
 
+        from types import SimpleNamespace
+
+        from lexoplay.store import SavedWord
+        from lexoplay.ui.main_window import UpdateState
+
         family = theme.load_fonts()
         tmp = Path(tempfile.mkdtemp(prefix="lexoplay-ui-"))
         store = Store(tmp / "local.db")
         store.save_game(Game("dr1_us.exe", "Danganronpa: Trigger Happy Havoc", region=Rect(0.05, 0.7, 0.9, 0.25)))
         store.save_game(Game("midnight.exe", "Midnight Station", deck_mode="deck", deck_id=5, deck_title="Слова из игр"))
+        store.line_add("dr1_us.exe", "ru", "a", "Makoto", "I wonder what kind of school this is...", "Интересно, что это за школа...")
+        store.line_add("dr1_us.exe", "ru", "b", "Monokuma", "Puhuhu! Welcome to despair!", "Пухуху! Добро пожаловать в отчаяние!")
+        store.word_add(
+            SavedWord("dr1_us.exe", "Danganronpa", "despair", "despair", "отчаяние, безысходность", "dɪˈspɛr", "noun",
+                      "Puhuhu! Welcome to despair!", "Пухуху! Добро пожаловать в отчаяние!", created_at=time.time())
+        )
+        shot = pixel_frame(["WELCOME TO HOPE'S PEAK ACADEMY!"]).crop((40, 520, 1240, 680))
 
         class Ctl:
             settings = Settings()
 
             def __init__(self) -> None:
                 self.store = store
+                self.update = UpdateState("available", SimpleNamespace(version="0.4.1"))
 
             def account_status(self):  # type: ignore[no-untyped-def]
                 return AccountStatus(True, "@ruslan", used=12, limit=50, queue=1)
@@ -400,14 +660,40 @@ def _qt_checks(out_dir: Path) -> None:
             def api_key(self):  # type: ignore[no-untyped-def]
                 return ""
 
+            def usage_summary(self):  # type: ignore[no-untyped-def]
+                return "Сегодня реплик: 42, слов: 3. Это примерно меньше цента (18 400 токенов)."
+
+            def history(self, exe=None, query="", limit=100, offset=0):  # type: ignore[no-untyped-def]
+                return store.lines_list(exe, query, limit, offset)
+
+            def saved_words(self):  # type: ignore[no-untyped-def]
+                return store.words_list()
+
+            def speakers(self, exe):  # type: ignore[no-untyped-def]
+                return store.line_speakers(exe)
+
+            def glossary(self, exe):  # type: ignore[no-untyped-def]
+                return store.glossary(exe)
+
+            def get_last_read(self, exe):  # type: ignore[no-untyped-def]
+                if exe != "dr1_us.exe":
+                    return None
+                return SimpleNamespace(image=shot, text="WELCOME TO HOPE'S PEAK ACADEMY!", mode_name="пиксельный шрифт")
+
+            def autostart_supported(self):  # type: ignore[no-untyped-def]
+                return True
+
+            def autostart_enabled(self):  # type: ignore[no-untyped-def]
+                return False
+
             def __getattr__(self, _name):  # type: ignore[no-untyped-def]
                 return lambda *a, **k: None
 
         w = MainWindow(Ctl())
-        w.resize(980, 680)
+        w.resize(1000, 700)
         w.show()
         saved = []
-        for key in ("games", "lexo", "keys", "view", "more"):
+        for key in ("games", "history", "words", "lexo", "keys", "view", "more"):
             w.show_page(key)
             for _ in range(5):
                 app.processEvents()
@@ -600,6 +886,7 @@ def _qt_checks(out_dir: Path) -> None:
 
     _check("display_rect", magpie_math)
     _check("app_word_flow", _app_flow(out_dir))
+    _check("app_own_key_flow", _own_key_flow(out_dir))
 
 
 def run(report: str) -> int:
@@ -630,6 +917,15 @@ def run(report: str) -> int:
             "lexoplay.ui.word_layer",
             "lexoplay.report",
             "lexoplay.games",
+            "lexoplay.updater",
+            "lexoplay.autostart",
+            "lexoplay.lookup",
+            "lexoplay.export",
+            "lexoplay.history",
+            "lexoplay.usage",
+            "lexoplay.ocrscore",
+            "lexoplay.wordlist_en",
+            "lexoplay.ui.pages",
         ]
         if sys.platform == "win32":
             mods += ["lexoplay.win.input", "lexoplay.app", "lexoplay.win.winapi", "lexoplay.win.capture", "lexoplay.win.hooks", "lexoplay.win.ocr"]
@@ -655,6 +951,21 @@ def run(report: str) -> int:
 
         _check("keyring", keyring_roundtrip)
         _check("ocr", _ocr(out_dir))
+        _check("ocr_auto_modes", _ocr_auto(out_dir))
+        _check("update_swap", lambda: _update_swap(out_dir))
+
+        def autostart_registry() -> tuple[str, object]:
+            from lexoplay import autostart
+
+            if not autostart.supported():
+                return "skip", "только в собранном exe"
+            before = autostart.enabled()
+            autostart.set_enabled(True)
+            on = autostart.enabled() and autostart._read() == autostart.command()  # noqa: SLF001
+            autostart.set_enabled(before)
+            return ("ok" if on and autostart.enabled() == before else "fail"), {"command": autostart.command()}
+
+        _check("autostart", autostart_registry)
     else:
         RESULTS.append({"check": "ocr", "status": "skip", "detail": "не Windows"})
     _qt_checks(out_dir)

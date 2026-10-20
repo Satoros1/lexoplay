@@ -119,6 +119,8 @@ class FakeCtl:
     """Контроллер для окна LexoPlay без Windows и сервера."""
 
     def __init__(self, store, settings) -> None:
+        from lexoplay.ui.main_window import UpdateState
+
         self.store, self.settings = store, settings
         self.linked = False
         self.codes = []
@@ -126,6 +128,11 @@ class FakeCtl:
         self.paused = []
         self.picked = []
         self.key = ""
+        self.update = UpdateState()
+        self.installs = 0
+        self.checks = 0
+        self.autostart = False
+        self.last_reads = {}
 
     def account_status(self):
         from lexoplay.ui.main_window import AccountStatus
@@ -197,6 +204,63 @@ class FakeCtl:
 
     def window_hidden(self):
         pass
+
+    def usage_summary(self):
+        return "Сегодня реплик: 3. Это примерно меньше цента."
+
+    def check_key(self, key, done):
+        done(None if key.startswith("sk-ant-") else "Ключ Anthropic не подходит.")
+
+    def history(self, exe=None, query="", limit=100, offset=0):
+        return self.store.lines_list(exe, query, limit, offset)
+
+    def delete_line(self, line_id):
+        self.store.line_delete(line_id)
+
+    def clear_history(self, exe=None):
+        self.store.lines_clear(exe)
+
+    def saved_words(self):
+        return self.store.words_list()
+
+    def delete_word(self, word_id):
+        self.store.word_delete(word_id)
+
+    def export_words(self, path, fmt):
+        from lexoplay.export import export_words
+
+        return export_words(self.store.words_list(), path, fmt)
+
+    def glossary(self, exe):
+        return self.store.glossary(exe)
+
+    def set_glossary(self, exe, term, tr):
+        self.store.glossary_set(exe, term, tr)
+
+    def delete_glossary(self, exe, term):
+        self.store.glossary_delete(exe, term)
+
+    def speakers(self, exe):
+        return self.store.line_speakers(exe)
+
+    def get_last_read(self, exe):
+        return self.last_reads.get(exe)
+
+    def autostart_supported(self):
+        return True
+
+    def autostart_enabled(self):
+        return self.autostart
+
+    def set_autostart(self, on):
+        self.autostart = on
+        return True
+
+    def check_updates(self, *, manual=True):
+        self.checks += 1
+
+    def install_update(self):
+        self.installs += 1
 
 
 @pytest.fixture
@@ -312,3 +376,99 @@ def test_picker_draws_freeze_frame(qapp):
     QTest.mouseRelease(picker, Qt.MouseButton.LeftButton, pos=QPoint(760, 580))
     QTest.keyClick(picker, Qt.Key.Key_Return)
     assert got["region"].w > 0.8
+
+
+def test_history_page_lists_searches_and_deletes(window, qapp):
+    from PySide6.QtWidgets import QLabel
+
+    w, ctl = window
+    ctl.store.line_add("dr1_us.exe", "ru", "hello there", "Makoto", "Hello there!", "Привет!")
+    ctl.store.line_add("dr1_us.exe", "ru", "the class trial begins", None, "The class trial begins.", "Классный суд начинается.")
+    w.show_page("history")
+    texts = [lbl.text() for lbl in w.history.box.findChildren(QLabel)]
+    assert "Привет!" in texts and "Классный суд начинается." in texts
+    assert any("Makoto" in t for t in texts)
+    w.history.search.setText("trial")
+    w.history._reset()  # noqa: SLF001  без ожидания таймера поиска
+    texts = [lbl.text() for lbl in w.history.box.findChildren(QLabel)]
+    assert "Классный суд начинается." in texts and "Привет!" not in texts
+    line = ctl.store.lines_list("dr1_us.exe", "trial")[0]
+    w.history._delete(line.id)  # noqa: SLF001
+    assert ctl.store.lines_count() == 1
+
+
+def test_words_page_and_export(window, qapp, tmp_path):
+    from PySide6.QtWidgets import QLabel
+
+    from lexoplay.store import SavedWord
+
+    w, ctl = window
+    ctl.store.word_add(
+        SavedWord(
+            "dr1_us.exe", "Danganronpa", "despair", "despair", "отчаяние", "dɪˈspɛr", "noun",
+            "Welcome to despair!", "Добро пожаловать в отчаяние!", created_at=1_790_000_000,
+        )
+    )
+    w.show_page("words")
+    texts = [lbl.text() for lbl in w.words.box.findChildren(QLabel)]
+    assert "despair" in texts and "отчаяние" in texts and "только здесь" in texts
+    assert "не привязан" in w.words.note.text()
+    out = tmp_path / "w.txt"
+    assert ctl.export_words(str(out), "anki") == 1
+    body = out.read_text(encoding="utf-8")
+    assert body.startswith("#separator:tab") and "<b>despair</b>" in body and "LexoPlay::Danganronpa" in body
+    csv_out = tmp_path / "w.csv"
+    ctl.export_words(str(csv_out), "csv")
+    assert "отчаяние" in csv_out.read_text(encoding="utf-8-sig")
+
+
+def test_more_page_key_check_autostart_update(window, qapp):
+    from types import SimpleNamespace
+
+    w, ctl = window
+    w.show_page("more")
+    page = w.more
+    page.key.setText("bad")
+    page._check_key()  # noqa: SLF001
+    assert "не подходит" in page.key_status.text()
+    page.key.setText("sk-ant-123")
+    page._check_key()  # noqa: SLF001
+    assert "работает" in page.key_status.text()
+    assert "реплик: 3" in page.usage.text()
+    page.autostart.setChecked(True)
+    assert ctl.autostart
+    assert not w.update_bar.isVisibleTo(w)
+    ctl.update.phase = "available"
+    ctl.update.release = SimpleNamespace(version="9.9.9")
+    w.refresh_update()
+    assert w.update_bar.isVisibleTo(w) and "9.9.9" in w.update_bar.text.text()
+    assert page.update_btn.text() == "Обновить"
+    w.update_bar.btn.click()
+    assert ctl.installs == 1
+
+
+def test_game_card_shows_last_reading_and_glossary(window, qapp):
+    from PIL import Image
+    from PySide6.QtWidgets import QLabel
+
+    from lexoplay.ui.pages import GlossaryDialog
+
+    w, ctl = window
+
+    class Read:
+        image = Image.new("RGB", (400, 80), "navy")
+        text = "Welcome to Hope's Peak Academy!"
+        mode_name = "пиксельный шрифт"
+
+    ctl.last_reads["dr1_us.exe"] = Read()
+    w.show_page("games")
+    texts = [lbl.text() for lbl in w.games.findChildren(QLabel)]
+    assert any("Hope's Peak" in t for t in texts) and any("пиксельный шрифт" in t for t in texts)
+    ctl.store.line_add("dr1_us.exe", "ru", "x", "Monokuma", "Upupu", "Пупупу")
+    dlg = GlossaryDialog(ctl, ctl.store.get_game("dr1_us.exe"))
+    assert any(b.text() == "Monokuma" for b in dlg.findChildren(type(w.more.check_btn)))
+    dlg.term.setText("Monokuma")
+    dlg.tr.setText("Монокума")
+    dlg._add()  # noqa: SLF001
+    assert ctl.store.glossary("dr1_us.exe") == {"Monokuma": "Монокума"}
+    dlg.deleteLater()

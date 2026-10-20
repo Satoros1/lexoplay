@@ -256,19 +256,19 @@ class LexoClient:
         text: str,
         speaker: str | None,
         context: list[dict[str, Any]],
+        glossary: dict[str, str] | None = None,
     ) -> tuple[str, str, bool, Usage | None]:
-        data = await self._request(
-            "POST",
-            "/desktop/translate",
-            json={
-                "session_id": session_id,
-                "line_id": line_id,
-                "game": game.to_json(),
-                "speaker": (speaker or None) and speaker[:64],
-                "text": text[:2000],
-                "context": context[-8:],
-            },
-        )
+        body: dict[str, Any] = {
+            "session_id": session_id,
+            "line_id": line_id,
+            "game": game.to_json(),
+            "speaker": (speaker or None) and speaker[:64],
+            "text": text[:2000],
+            "context": context[-12:],
+        }
+        if glossary:
+            body["glossary"] = {k[:64]: v[:128] for k, v in list(glossary.items())[:50]}
+        data = await self._request("POST", "/desktop/translate", json=body)
         return data["source"], data["translation"], bool(data.get("cached")), Usage.from_json(data.get("usage"))
 
     async def lookup(

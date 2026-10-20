@@ -79,7 +79,7 @@ def test_translate_request_shape_and_usage():
     assert seen["auth"] == "Bearer tok"
     body = seen["body"]
     assert body["game"] == {"title": "Midnight Station", "exe": "ms.exe"}
-    assert len(body["context"]) == 8 and body["context"][-1]["source"] == "11"  # последние 8
+    assert len(body["context"]) == 12 and body["context"][-1]["source"] == "11"  # последние 12
 
 
 def test_limit_reached_is_not_retryable_but_overload_is():

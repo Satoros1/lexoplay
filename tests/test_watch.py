@@ -104,3 +104,31 @@ def test_noisy_pixel_font_ocr_is_the_same_line():
     # OCR пиксельного шрифта: часть букв съехала, но слова те же
     assert not w.line_changed("SUSPECTS CLAIN T0 HAVE BEEM THREATENED IMTO")
     assert not w.line_changed("..SUSPECTS CLAIM TO HAUE BEEN THREATENED")
+
+
+def test_verdicts_new_gone_and_grown():
+    from PIL import Image
+
+    from lexoplay.watch import LineWatcher
+
+    base = Image.new("L", (40, 10), 0)
+    w = LineWatcher("Welcome to the class trial.", base)
+    assert w.check("Welcome to the class tria1.") is None
+    assert w.check("Totally different words appear now") == "new"
+    w2 = LineWatcher("Welcome to the", base)
+    assert w2.check("Welcome to the class trial, everyone. Let us begin the debate now.") == "new"  # допечаталась
+    w3 = LineWatcher("Welcome to the class trial.", base)
+    assert w3.check("") is None and w3.check("") == "gone"
+
+
+def test_waiting_watcher_waits_for_new_text():
+    from PIL import Image
+
+    from lexoplay.watch import LineWatcher
+
+    base = Image.new("L", (40, 10), 0)
+    w = LineWatcher("Welcome to the class trial.", base, waiting=True)
+    assert w.check("") is None and w.check("") is None  # окно диалога пустое: ждём
+    assert w.check("|l") is None  # шум рамки
+    assert w.check("Welcome to the class trial.") is None  # та же реплика снова
+    assert w.check("Who could the killer be?") == "new"

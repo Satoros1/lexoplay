@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from PIL import Image, ImageChops, ImageOps, ImageStat
+from PIL import Image, ImageChops, ImageFilter, ImageOps, ImageStat
 
 from lexoplay.geometry import Rect, denormalize
 
@@ -48,20 +48,85 @@ def background_is_dark(img: Image.Image) -> bool:
     return ImageStat.Stat(gray).median[0] < 110
 
 
-def prepare(frame: Image.Image, region: Rect, *, binarize: bool = False) -> Prepared:
+# Способы подготовки картинки. LexoPlay пробует их сам и запоминает лучший для игры:
+# normal  обычный текст: мягкое увеличение, яркость как видит глаз;
+# pixel   пиксельный шрифт: увеличение «по пикселям», сглаживание и чёрно-белая картинка;
+# color   цветные буквы на тёмном фоне: яркость по самому яркому каналу (синий и красный
+#         текст в обычной яркости почти чёрный и сливается с фоном).
+MODES = ("normal", "pixel", "color")
+MODE_NAMES = {"normal": "обычный", "pixel": "пиксельный шрифт", "color": "цветной текст"}
+
+
+def value_gray(img: Image.Image) -> Image.Image:
+    """Серый по самому яркому каналу (V из HSV): цветной текст остаётся ярким."""
+    r, g, b = img.convert("RGB").split()
+    return ImageChops.lighter(ImageChops.lighter(r, g), b)
+
+
+def otsu_level(gray: Image.Image) -> int:
+    """Порог Оцу: делит гистограмму на «текст» и «фон» с наибольшей разницей между ними."""
+    hist = gray.histogram()[:256]
+    total = sum(hist)
+    if not total:
+        return 128
+    sum_all = sum(i * h for i, h in enumerate(hist))
+    sum_b = 0.0
+    w_b = 0
+    best, level = -1.0, 128
+    for t in range(256):
+        w_b += hist[t]
+        if w_b == 0:
+            continue
+        w_f = total - w_b
+        if w_f == 0:
+            break
+        sum_b += t * hist[t]
+        m_b = sum_b / w_b
+        m_f = (sum_all - sum_b) / w_f
+        between = w_b * w_f * (m_b - m_f) ** 2
+        if between > best:
+            best, level = between, t
+    return level
+
+
+def _pixel_scale(frame_h: int) -> int:
+    """Целый множитель: при целом увеличении «по пикселям» буквы не плывут."""
+    return max(2, min(4, round(upscale_factor(frame_h) + 0.5)))
+
+
+def prepare(frame: Image.Image, region: Rect, *, mode: str = "normal", binarize: bool = False) -> Prepared:
+    if binarize and mode == "normal":
+        mode = "pixel"  # профили игр из 0.1–0.3
     crop_img, crop = crop_norm(frame, region)
+    if mode == "pixel":
+        k = _pixel_scale(frame.height)
+        big = crop_img.resize((crop_img.width * k, crop_img.height * k), Image.Resampling.NEAREST)
+        gray = value_gray(big)
+        if background_is_dark(gray):
+            gray = ImageOps.invert(gray)
+        # ступеньки пикселей сглаживаем: OCR учили на гладких шрифтах
+        gray = gray.filter(ImageFilter.GaussianBlur(k * 0.35))
+        level = otsu_level(gray)
+        gray = gray.point(lambda p: 255 if p > level else 0)
+        return Prepared(gray, float(k), crop, frame.width, frame.height)
     scale = upscale_factor(frame.height)
     if scale > 1.01:
         crop_img = crop_img.resize(
             (round(crop_img.width * scale), round(crop_img.height * scale)), Image.Resampling.LANCZOS
         )
-    gray = crop_img.convert("L")
+    gray = value_gray(crop_img) if mode == "color" else crop_img.convert("L")
     if background_is_dark(gray):
         gray = ImageOps.invert(gray)  # тёмный текст на светлом читается стабильнее
     gray = ImageOps.autocontrast(gray, cutoff=1)
-    if binarize:
-        gray = gray.point(lambda p: 255 if p > 140 else 0)
     return Prepared(gray, scale, crop, frame.width, frame.height)
+
+
+def preview(frame: Image.Image, region: Rect, max_w: int = 520) -> Image.Image:
+    """Цветная обрезка окна диалога для окна LexoPlay: что именно читалось."""
+    crop_img, _ = crop_norm(frame, region)
+    scale = min(1.0, max_w / max(1, crop_img.width))
+    size = (max(1, round(crop_img.width * scale)), max(1, round(crop_img.height * scale)))
+    return crop_img.convert("RGB").resize(size, Image.Resampling.LANCZOS)
 
 
 def thumbnail(frame: Image.Image, region: Rect, max_w: int = 320) -> Image.Image:

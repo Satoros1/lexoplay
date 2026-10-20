@@ -1,6 +1,11 @@
 """Поток F2: кадр -> OCR -> реплика -> перевод. Без Qt и без Windows: всё внедряется.
 
 Так его можно гонять в тестах на Linux с поддельным захватом, OCR и переводчиком.
+
+Способ подготовки картинки для OCR подбирается сам: сначала тот, что подошёл игре
+раньше; если прочитано плохо (много мусора вместо слов), пробуем остальные и берём
+лучший. Перевод ищется сначала в памяти сессии, потом в кеше на диске, и только потом
+идёт запрос к модели.
 """
 
 from __future__ import annotations
@@ -18,7 +23,8 @@ from PIL import Image
 from lexoplay.dedupe import LineMemory, LineRecord, normalize_text
 from lexoplay.geometry import Rect
 from lexoplay.ocr_model import OcrResult
-from lexoplay.preprocess import Prepared, changed, prepare, thumbnail
+from lexoplay.ocrscore import Quality, quality
+from lexoplay.preprocess import MODES, Prepared, changed, prepare, preview, thumbnail
 from lexoplay.textproc import Utterance, has_text, to_utterance
 from lexoplay.translate import ContextLine, TranslateRequest, TranslationError, Translator
 
@@ -37,6 +43,23 @@ Grab = Callable[[], Image.Image]
 DebugSink = Callable[[str, object], None]
 
 
+class Cache(Protocol):
+    def find(self, exe: str, lang: str, text: str) -> LineRecord | None: ...
+    def add(self, exe: str, lang: str, rec: LineRecord) -> None: ...
+    def recent(self, exe: str, lang: str, limit: int) -> list[LineRecord]: ...
+
+
+@dataclass(slots=True)
+class Reading:
+    """Что прочитано в окне диалога и каким способом."""
+
+    result: OcrResult
+    name_text: str | None
+    mode: str
+    quality: Quality
+    tried: dict[str, str] = field(default_factory=dict)  # способ -> оценка, для лога
+
+
 @dataclass(slots=True)
 class F2Outcome:
     kind: Literal["translated", "repeat", "no_text", "error"]
@@ -47,6 +70,11 @@ class F2Outcome:
     timings: dict[str, float] = field(default_factory=dict)
     code: str | None = None  # для error: limit_reached, device_revoked, offline…
     utterance: Utterance | None = None
+    cached: bool = False  # перевод из кеша на диске, без запроса
+    ocr_mode: str | None = None  # каким способом прочитано
+    quality: Quality | None = None
+    preview: Image.Image | None = None  # цветная обрезка окна диалога для окна LexoPlay
+    usage: tuple[int, int] | None = None  # токены своего ключа: (вход, выход)
 
 
 @dataclass(slots=True)
@@ -59,6 +87,9 @@ class ScanOutcome:
     record: LineRecord | None = None
     thumb: Image.Image | None = None
     message: str | None = None
+    ocr_mode: str | None = None
+    quality: Quality | None = None
+    preview: Image.Image | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,9 +97,10 @@ class Target:
     game_title: str
     region: Rect
     name_region: Rect | None = None
-    binarize: bool = False
+    ocr_mode: str | None = None  # None: подобрать
     game_exe: str = ""
     session_id: str = ""
+    glossary: dict[str, str] = field(default_factory=dict, hash=False)
 
 
 class Pipeline:
@@ -87,6 +119,7 @@ class Pipeline:
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         run_sync: Callable[[Grab], Awaitable[Image.Image]] | None = None,
         debug: DebugSink | None = None,
+        cache: Cache | None = None,
     ) -> None:
         self._ocr = ocr
         self.translator = translator
@@ -100,6 +133,7 @@ class Pipeline:
         self._sleep = sleep
         self._run_sync = run_sync or (lambda fn: asyncio.to_thread(fn))
         self._debug = debug
+        self.cache = cache
         self._warm_task: asyncio.Future | None = None
 
     async def _grab(self, grab: Grab) -> Image.Image:
@@ -110,11 +144,11 @@ class Pipeline:
         except Exception as exc:  # GDI/WinRT бросают что угодно
             raise CaptureError(str(exc)) from exc
 
-    async def stable_frame(self, grab: Grab, region: Rect) -> Image.Image:
+    async def stable_frame(self, grab: Grab, region: Rect, max_wait: float | None = None) -> Image.Image:
         """Ждём, пока текст допечатается: два кадра подряд с одинаковой областью."""
         frame = await self._grab(grab)
         prev = thumbnail(frame, region)
-        steps = max(1, int(self._max_wait / self._stable_wait))
+        steps = max(1, int((max_wait or self._max_wait) / self._stable_wait))
         for _ in range(steps):
             await self._sleep(self._stable_wait)
             nxt = await self._grab(grab)
@@ -125,25 +159,70 @@ class Pipeline:
             prev = cur
         return frame
 
-    async def recognize(self, frame: Image.Image, target: Target) -> tuple[OcrResult, str | None]:
-        prepared = prepare(frame, target.region, binarize=target.binarize)
+    async def _read(self, frame: Image.Image, region: Rect, mode: str) -> OcrResult:
+        prepared = prepare(frame, region, mode=mode)
         if self._debug:
-            self._debug("prepared", prepared.image)
-        result = await self._ocr.recognize(prepared)
-        name_text: str | None = None
-        if target.name_region is not None:
-            name_res = await self._ocr.recognize(prepare(frame, target.name_region, binarize=target.binarize))
-            name_text = name_res.raw_text
-        return result, name_text
+            self._debug(f"prepared_{mode}", prepared.image)
+        return await self._ocr.recognize(prepared)
 
-    async def run(self, grab: Grab, target: Target, on_partial: Callable[[str], None] | None = None) -> F2Outcome:
+    async def recognize(self, frame: Image.Image, target: Target, *, explore: bool = True) -> Reading:
+        """Распознать окно диалога. explore=False: только уже выбранным способом (проверки смены реплики)."""
+        first = target.ocr_mode if target.ocr_mode in MODES else MODES[0]
+        result = await self._read(frame, target.region, first)
+        q = quality(result, self.source_lang)
+        best = Reading(result, None, first, q, {first: str(q)})
+        if explore and not q.ok:
+            # прочитано плохо: мусор вместо слов. Пробуем другие способы, лучший запомнит приложение
+            for mode in MODES:
+                if mode == first:
+                    continue
+                res = await self._read(frame, target.region, mode)
+                mq = quality(res, self.source_lang)
+                best.tried[mode] = str(mq)
+                if mq.rank > best.quality.rank + 0.5:
+                    best.result, best.mode, best.quality = res, mode, mq
+                if mq.ok:
+                    break
+            if len(best.tried) > 1:
+                log.info("OCR: способы %s, выбран %s", best.tried, best.mode)
+        if target.name_region is not None:
+            name_res = await self._read(frame, target.name_region, best.mode)
+            best.name_text = name_res.raw_text
+        return best
+
+    def context_for(self, target: Target, text: str) -> list[LineRecord]:
+        """Прошлые реплики для перевода: из этой сессии, а в её начале ещё и из истории игры.
+
+        Без них модель не знает, кто с кем говорит: путает пол, «ты/вы», имена. После
+        перезапуска игры память сессии пустая, поэтому добираем последние реплики с диска."""
+        ctx = self.memory.context(self._context_size)
+        if len(ctx) >= self._context_size or self.cache is None or not target.game_exe:
+            return ctx
+        try:
+            older = self.cache.recent(target.game_exe, self.target_lang, self._context_size)
+        except Exception:
+            log.exception("история игры недоступна")
+            return ctx
+        skip = {r.norm for r in ctx} | {normalize_text(text)}
+        extra = [r for r in older if r.norm not in skip]
+        return (extra + ctx)[-self._context_size :]
+
+    async def run(
+        self,
+        grab: Grab,
+        target: Target,
+        on_partial: Callable[[str], None] | None = None,
+        *,
+        settle: float | None = None,
+    ) -> F2Outcome:
+        """settle: сколько ждать, пока текст допечатается (автоперевод ждёт дольше)."""
         t0 = time.perf_counter()
         # соединение с сервером перевода открываем сразу, пока идут захват и OCR
         warm = getattr(self.translator, "warm", None)
         self._warm_task = asyncio.ensure_future(warm()) if warm is not None else None
         timings: dict[str, float] = {}
         try:
-            frame = await self.stable_frame(grab, target.region)
+            frame = await self.stable_frame(grab, target.region, settle)
         except CaptureError as exc:
             return F2Outcome("error", message=f"Не получилось захватить окно игры ({exc}).")
         timings["capture"] = time.perf_counter() - t0
@@ -151,18 +230,40 @@ class Pipeline:
             self._debug("frame", frame)
 
         t1 = time.perf_counter()
-        result, name_text = await self.recognize(frame, target)
+        reading = await self.recognize(frame, target)
+        result = reading.result
         timings["ocr"] = time.perf_counter() - t1
         thumb = thumbnail(frame, target.region)
-        utt = to_utterance(result, name_text)
+        utt = to_utterance(result, reading.name_text)
+        seen = {
+            "ocr": result,
+            "thumb": thumb,
+            "timings": timings,
+            "utterance": utt,
+            "ocr_mode": reading.mode,
+            "quality": reading.quality,
+            "preview": preview(frame, target.region),
+        }
         if self._debug:
-            self._debug("ocr", {"raw": result.raw_text, "speaker": utt.speaker, "text": utt.text})
+            self._debug(
+                "ocr",
+                {"raw": result.raw_text, "speaker": utt.speaker, "text": utt.text, "mode": reading.mode, "tried": reading.tried},
+            )
         if not has_text(utt.text):
-            return F2Outcome("no_text", ocr=result, thumb=thumb, timings=timings, utterance=utt)
+            return F2Outcome("no_text", **seen)
 
         known = self.memory.find(utt.text)
         if known is not None:
-            return F2Outcome("repeat", record=known, ocr=result, thumb=thumb, timings=timings, utterance=utt)
+            return F2Outcome("repeat", record=known, **seen)
+        if self.cache is not None and target.game_exe:
+            try:
+                stored = self.cache.find(target.game_exe, self.target_lang, utt.text)
+            except Exception:
+                log.exception("кеш переводов недоступен")
+                stored = None
+            if stored is not None:
+                self.memory.add(stored)  # и в контекст следующих реплик
+                return F2Outcome("repeat", record=stored, cached=True, **seen)
 
         line_id = str(uuid.uuid4())
 
@@ -172,12 +273,11 @@ class Pipeline:
             game=target.game_title,
             target_lang=self.target_lang,
             source_lang=self.source_lang,
-            context=tuple(
-                ContextLine(r.speaker, r.source, r.translation) for r in self.memory.context(self._context_size)
-            ),
+            context=tuple(ContextLine(r.speaker, r.source, r.translation) for r in self.context_for(target, utt.text)),
             line_id=line_id,
             session_id=target.session_id,
             game_exe=target.game_exe,
+            glossary=dict(target.glossary),
             on_partial=on_partial,
         )
         t2 = time.perf_counter()
@@ -188,26 +288,10 @@ class Pipeline:
         try:
             res = await self.translator.translate(req)
         except TranslationError as exc:
-            return F2Outcome(
-                "error",
-                message=str(exc),
-                ocr=result,
-                thumb=thumb,
-                timings=timings,
-                code=getattr(exc, "code", "error"),
-                utterance=utt,
-            )
+            return F2Outcome("error", message=str(exc), code=getattr(exc, "code", "error"), **seen)
         except Exception:  # чужая ошибка не должна показываться игроку трейсбеком
             log.exception("переводчик упал")
-            return F2Outcome(
-                "error",
-                message="Перевод не получился, подробности в логе.",
-                ocr=result,
-                thumb=thumb,
-                timings=timings,
-                code="error",
-                utterance=utt,
-            )
+            return F2Outcome("error", message="Перевод не получился, подробности в логе.", code="error", **seen)
         timings["translate"] = time.perf_counter() - t2
         rec = LineRecord(
             line_id=line_id,
@@ -217,8 +301,10 @@ class Pipeline:
             norm=normalize_text(utt.text),
         )
         self.memory.add(rec)
+        if self.cache is not None and target.game_exe:
+            self.cache.add(target.game_exe, self.target_lang, rec)
         timings["total"] = time.perf_counter() - t0
-        return F2Outcome("translated", record=rec, ocr=result, thumb=thumb, timings=timings, utterance=utt)
+        return F2Outcome("translated", record=rec, usage=getattr(res, "usage", None), **seen)
 
     async def scan(self, grab: Grab, target: Target) -> ScanOutcome:
         """Для F3: дождаться стабильного кадра и распознать, без запроса перевода."""
@@ -228,9 +314,14 @@ class Pipeline:
             return ScanOutcome(False, message=f"Не получилось захватить окно игры ({exc}).")
         if self._debug:
             self._debug("frame", frame)
-        result, name_text = await self.recognize(frame, target)
-        utt = to_utterance(result, name_text)
+        reading = await self.recognize(frame, target)
+        result = reading.result
+        utt = to_utterance(result, reading.name_text)
         thumb = thumbnail(frame, target.region)
+        extra = {"ocr_mode": reading.mode, "quality": reading.quality, "preview": preview(frame, target.region)}
         if not has_text(utt.text) or not result.words:
-            return ScanOutcome(False, ocr=result, utterance=utt, thumb=thumb)
-        return ScanOutcome(True, ocr=result, utterance=utt, record=self.memory.find(utt.text), thumb=thumb)
+            return ScanOutcome(False, ocr=result, utterance=utt, thumb=thumb, **extra)
+        record = self.memory.find(utt.text)
+        if record is None and self.cache is not None and target.game_exe:
+            record = self.cache.find(target.game_exe, self.target_lang, utt.text)
+        return ScanOutcome(True, ocr=result, utterance=utt, record=record, thumb=thumb, **extra)

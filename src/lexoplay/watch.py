@@ -12,9 +12,14 @@
   от кадра к кадру, но большая часть слов совпадает.
 
 * текст тот же (OCR чуть плавает, похожесть ≥ 0.8) → перевод остаётся;
-* совсем другой текст (игрок пропустил реплику, началась следующая) → прячем сразу;
-* текста нет (окно диалога закрылось) или он похож наполовину → прячем, если так
+* совсем другой текст (игрок пропустил реплику, началась следующая) → «new» сразу;
+* тот же, но заметно длиннее (реплика допечаталась после клика) → тоже «new»;
+* текста нет (окно диалога закрылось) или он похож наполовину → «gone»/«new», если так
   два раза подряд: одна вспышка или переход экрана не уберёт перевод зря.
+
+Без автоперевода и «new», и «gone» просто прячут перевод. С автопереводом «new»
+сразу переводит следующую реплику, а после «gone» наблюдатель ждёт (waiting), когда
+в окне диалога снова появится текст.
 """
 
 from __future__ import annotations
@@ -30,6 +35,12 @@ from lexoplay.preprocess import changed
 SAME = 0.8  # не ниже: та же реплика, OCR чуть плавает
 DIFFERENT = 0.5  # ниже: точно другая реплика
 ARMED_FOR = 3.0  # сколько секунд после действия игрока ждём смены реплики
+MIN_LETTERS = 3  # меньше букв в ожидании: шум рамки окна диалога, а не реплика
+
+
+def grown(old: str, new: str) -> bool:
+    """Реплика допечаталась: новый текст заметно длиннее, а начало то же."""
+    return len(new) > len(old) * 1.25 + 8
 
 
 def _words(norm: str) -> set[str]:
@@ -55,9 +66,11 @@ class LineWatcher:
         ocr_every: float = 0.45,
         gated: bool = False,
         armed_for: float = ARMED_FOR,
+        waiting: bool = False,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.norm = normalize_text(text)
+        self.waiting = waiting  # перевода на экране нет: ждём, когда появится новая реплика
         self._gated = gated
         self._armed_for = armed_for
         self._armed_until = float("-inf")
@@ -94,20 +107,40 @@ class LineWatcher:
         self.checks += 1
         return True
 
-    def line_changed(self, text: str, thumb: Image.Image | None = None) -> bool:
-        """Новый текст окна диалога → True, если перевод пора убрать."""
+    def check(self, text: str, thumb: Image.Image | None = None) -> str | None:
+        """Новый текст окна диалога → None (та же реплика), "new" или "gone"."""
         now = normalize_text(text)
+        letters = sum(1 for c in now if c.isalpha())
+        if self.waiting:
+            if letters < MIN_LETTERS:
+                self.last_score = None
+                if thumb is not None:
+                    self.baseline = thumb
+                return None
+            score = likeness(self.norm, now) if self.norm else 0.0
+            self.last_score = score
+            if score >= DIFFERENT:
+                if thumb is not None:
+                    self.baseline = thumb
+                return None  # тот же шум или та же реплика, что уже переводили
+            return "new"
         if not now:
             self._strikes += 1
-            return self._strikes >= 2
+            return "gone" if self._strikes >= 2 else None
         score = likeness(self.norm, now)
         self.last_score = score
         if score >= SAME:
             self._strikes = 0
+            if grown(self.norm, now):
+                return "new"
             if thumb is not None:
                 self.baseline = thumb  # шевелится фон, а не текст: дальше сравниваем с этим кадром
-            return False
+            return None
         if score < DIFFERENT:
-            return True
+            return "new"
         self._strikes += 1
-        return self._strikes >= 2
+        return "new" if self._strikes >= 2 else None
+
+    def line_changed(self, text: str, thumb: Image.Image | None = None) -> bool:
+        """Новый текст окна диалога → True, если перевод пора убрать."""
+        return self.check(text, thumb) is not None

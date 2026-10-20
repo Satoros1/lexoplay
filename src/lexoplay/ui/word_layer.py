@@ -265,7 +265,7 @@ class WordLayer(QWidget):
         if card.button:
             blocks.append(("button",))
             if self.deck_label and card.phase != "saved":
-                blocks.append(("text", f_note, f"Колода {self.deck_label}", TEXT_MUTED))
+                blocks.append(("text", f_note, self.deck_label, TEXT_MUTED))
         blocks.append(("text", f_note, "Shift+клик: фраза · Esc: выйти", TEXT_MUTED))
 
         gap = px * 0.35

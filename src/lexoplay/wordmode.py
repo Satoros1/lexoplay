@@ -110,6 +110,7 @@ class CardState:
     senses: list[str] = field(default_factory=list)
     in_deck: bool = False
     note: str = ""
+    local: bool = False  # без Lexo: слово сохраняется в список в LexoPlay
 
     @property
     def subtitle(self) -> str:
@@ -121,6 +122,8 @@ class CardState:
         """Подпись кнопки или None, если кнопки нет."""
         if self.phase == "saved":
             return None
+        if self.local:
+            return "+ в мои слова"
         if self.phase == "ready" and self.in_deck:
             return "+ пример из игры"
         return "+ в Lexo"

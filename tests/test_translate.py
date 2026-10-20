@@ -40,9 +40,14 @@ def test_prompt_contains_context_and_speaker():
     system = build_system(req)
     assert "Russian" in system and "Midnight Station" in system and "ALL CAPS" in system
     assert "JSON" not in system  # ответ просто текстом: разбирать нечего
+    assert "same grammatical person" in system and "Never retell" in system
     user = build_user(req)
-    assert "Mira: You're late. => Ты опоздал." in user
-    assert user.strip().endswith("Translate:\nOld Man: Back again?")
+    assert '<line speaker="Mira">You\'re late.</line>\n<translation>Ты опоздал.</translation>' in user
+    assert user.strip().endswith('Translate this line:\n<line speaker="Old Man">Back again?</line>')
+    glossed = build_user(TranslateRequest(text="Hi", speaker=None, game="g", glossary={"Monokuma": "Монокума"}))
+    assert "<glossary>\nMonokuma => Монокума\n</glossary>" in glossed and glossed.endswith("<line>Hi</line>")
+    assert clean_translation("<translation>Привет.</translation>") == "Привет."
+    assert clean_translation("<transl", partial=True) == ""
 
 
 # ---------------------------------------------------------------- настоящий SDK на поддельном сервере

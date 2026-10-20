@@ -42,10 +42,12 @@ class Overlay(QWidget):
         self._display = Rect(0, 0, 1280, 720)
         self._region: Rect | None = None
         self._text: str | None = None
+        self._original: str | None = None  # английский оригинал над переводом (по желанию)
         self._busy = False
         self._toast: str | None = None
         self.font_scale = 1.0
         self.opacity = 0.84
+        self.show_original = False
         self._toast_timer = QTimer(self)
         self._toast_timer.setSingleShot(True)
         self._toast_timer.timeout.connect(self._clear_toast)
@@ -64,22 +66,27 @@ class Overlay(QWidget):
             self._placer(self, rect)
 
     def show_busy(self, region: Rect) -> None:
-        self._region, self._text, self._busy = region, None, True
+        self._region, self._text, self._busy, self._original = region, None, True, None
         self._refresh()
 
-    def show_text(self, region: Rect, text: str) -> None:
+    def show_text(self, region: Rect, text: str, original: str | None = None) -> None:
         self._region, self._text, self._busy = region, text, False
+        self._original = original if original and original.strip() else None
         self._refresh()
 
     def hide_strip(self) -> None:
-        self._text, self._busy = None, False
+        self._text, self._busy, self._original = None, False, None
         self._refresh()
+
+    @property
+    def text(self) -> str | None:
+        return self._text
 
     def strip_rect(self) -> Rect | None:
         """Где сейчас строка перевода, в координатах окна (оно совпадает с display_rect)."""
         if not self.strip_visible:
             return None
-        box, _font, _text = self._strip_geometry(self._text if self._text is not None else "…")
+        box = self._strip_geometry(self._text if self._text is not None else "…")[0]
         return Rect(box.x(), box.y(), box.width(), box.height())
 
     def toast(self, text: str, ms: int = 2400) -> None:
@@ -103,7 +110,11 @@ class Overlay(QWidget):
             self.hide()
 
     # --- отрисовка ---
-    def _strip_geometry(self, text: str) -> tuple[QRectF, QFont, QRectF]:
+    def _original_shown(self) -> str | None:
+        return self._original if self.show_original and self._text is not None else None
+
+    def _strip_geometry(self, text: str) -> tuple[QRectF, QFont, QRectF, QFont, QRectF | None]:
+        """(плашка, шрифт перевода, где перевод, шрифт оригинала, где оригинал или None)."""
         w, h = float(self.width()), float(self.height())
         bounds = Rect(0, 0, w, h)
         region = denormalize(self._region or Rect(0.05, 0.75, 0.9, 0.2), bounds)
@@ -114,25 +125,38 @@ class Overlay(QWidget):
         px = font_px_for(h, 19.0, self.font_scale)
         font = QFont(FONT_FAMILY)
         font.setWeight(QFont.Weight.Medium)
+        small = QFont(FONT_FAMILY)
+        original = self._original_shown()
 
-        def measure(size: float) -> tuple[QRectF, QFontMetricsF]:
-            font.setPixelSize(max(1, round(size)))
-            fm = QFontMetricsF(font)
-            pad_x = size * 0.9
-            text_w = max(40.0, region.w - 2 * pad_x)
-            br = fm.boundingRect(QRectF(0, 0, text_w, 100000), Qt.TextFlag.TextWordWrap, text)
-            return br, fm
+        def measure(size: float, f: QFont, value: str) -> tuple[QRectF, QFontMetricsF]:
+            f.setPixelSize(max(1, round(size)))
+            fm = QFontMetricsF(f)
+            text_w = max(40.0, region.w - 2 * size * 0.9)
+            return fm.boundingRect(QRectF(0, 0, text_w, 100000), Qt.TextFlag.TextWordWrap, value), fm
 
-        br, fm = measure(px)
+        br, fm = measure(px, font, text)
         if br.height() > fm.lineSpacing() * 3.2:  # больше трёх строк: мельче, но не меньше 14
             px = max(14.0, px * 0.8)
-            br, fm = measure(px)
+            br, fm = measure(px, font, text)
         pad_x, pad_y = px * 0.9, px * 0.6
-        strip_h = br.height() + 2 * pad_y
+        orig_h = 0.0
+        orig_br = None
+        if original:
+            small.setPixelSize(max(1, round(max(12.0, px * 0.78))))  # оригинал мельче перевода
+            orig_br = QFontMetricsF(small).boundingRect(
+                QRectF(0, 0, max(40.0, region.w - 2 * pad_x), 100000), Qt.TextFlag.TextWordWrap, original
+            )
+            orig_h = orig_br.height() + px * 0.35
+        strip_h = br.height() + orig_h + 2 * pad_y
         strip = place_strip(region, strip_h, bounds, gap=max(6.0, px * 0.4))
         box = QRectF(strip.x, strip.y, strip.w, strip.h)
-        text_rect = QRectF(strip.x + pad_x, strip.y + pad_y, strip.w - 2 * pad_x, br.height())
-        return box, font, text_rect
+        orig_rect = None
+        top = strip.y + pad_y
+        if orig_br is not None:
+            orig_rect = QRectF(strip.x + pad_x, top, strip.w - 2 * pad_x, orig_br.height())
+            top += orig_h
+        text_rect = QRectF(strip.x + pad_x, top, strip.w - 2 * pad_x, br.height())
+        return box, font, text_rect, small, orig_rect
 
     def paintEvent(self, _event: QPaintEvent) -> None:  # noqa: N802
         p = QPainter(self)
@@ -140,13 +164,18 @@ class Overlay(QWidget):
         p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
         if self.strip_visible:
             text = self._text if self._text is not None else "…"
-            box, font, text_rect = self._strip_geometry(text)
+            box, font, text_rect, small, orig_rect = self._strip_geometry(text)
             bg = QColor(STRIP_BG)
             bg.setAlphaF(max(0.3, min(1.0, self.opacity)))
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(bg)
             radius = min(12.0, box.height() / 2)
             p.drawRoundedRect(box, radius, radius)
+            original = self._original_shown()
+            if orig_rect is not None and original:
+                p.setFont(small)
+                p.setPen(TEXT_MUTED)
+                p.drawText(orig_rect, int(Qt.TextFlag.TextWordWrap | Qt.AlignmentFlag.AlignLeft), original)
             p.setFont(font)
             p.setPen(TEXT if self._text is not None else TEXT_MUTED)
             p.drawText(text_rect, int(Qt.TextFlag.TextWordWrap | Qt.AlignmentFlag.AlignLeft), text)

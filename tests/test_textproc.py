@@ -54,3 +54,16 @@ def test_name_region_wins():
 def test_has_text():
     assert not has_text("| .")
     assert has_text("Hi")
+
+
+def test_sentence_start_is_not_a_speaker():
+    from lexoplay.geometry import Rect
+    from lexoplay.ocr_model import Line, OcrResult, Word
+
+    def r(*lines):
+        return OcrResult(tuple(Line(tuple(Word(w, Rect(0, 0, 0.1, 0.1)) for w in t.split())) for t in lines))
+
+    assert to_utterance(r("HEY YOU", "GET OUT OF MY HOUSE")).speaker is None
+    assert to_utterance(r("I know", "what you did.")).text == "I know what you did."
+    assert to_utterance(r("MIRA", "GET OUT OF MY HOUSE")).speaker == "MIRA"
+    assert to_utterance(r("Old Man", "Back again?")).speaker == "Old Man"

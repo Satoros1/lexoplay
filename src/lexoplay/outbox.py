@@ -5,6 +5,7 @@
 перегружен → повтор через 2, 4, 8… секунд, но не реже раза в 5 минут. Отказ по
 существу (4xx, кроме 429) → задача «не отправлена», видна в трее, а не крутится вечно.
 Привязка снята (401) или клиент устарел (426) → очередь на паузе до новой привязки.
+ПК ещё не привязан (can_send() = False) → задачи просто ждут, без ошибок и уведомлений.
 POST /desktop/cards идемпотентен по idempotency_key, так что повтор не создаст дубль.
 """
 
@@ -40,8 +41,10 @@ class Outbox:
         on_change: Callable[[], None] | None = None,
         on_paused: Callable[[LexoError], None] | None = None,
         on_sent: Callable[[Task, Any], None] | None = None,
+        can_send: Callable[[], bool] | None = None,
         clock: Callable[[], float] = time.time,
     ) -> None:
+        self._can_send = can_send or (lambda: True)
         self._store = store
         self._send = send
         self._on_change = on_change or (lambda: None)
@@ -92,6 +95,8 @@ class Outbox:
         задачи подождут вместе с ней, а не будут по очереди биться в ту же стену.
         """
         sent = 0
+        if not self._can_send():
+            return 0
         while not self.paused and self._clock() >= self._hold_until:
             due = self._store.outbox_due(self._clock())
             if not due:

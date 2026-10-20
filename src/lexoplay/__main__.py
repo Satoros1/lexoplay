@@ -2,6 +2,9 @@
 
 --debug         сохранять кадры и OCR в %APPDATA%\\LexoPlay\\debug
 --selftest      самопроверка (её гоняет CI на Windows), отчёт в --report
+--autostart     запуск вместе с Windows: сразу в трей, без окна
+--wait-pid N    после обновления: дождаться, пока старый LexoPlay (процесс N) выйдет
+--updated       показать «LexoPlay обновлён»
 
 Второй запуск не плодит копию и не ругается: он просит уже работающий LexoPlay
 показать своё окно и сразу выходит.
@@ -56,7 +59,36 @@ def main() -> None:
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--selftest", action="store_true")
     parser.add_argument("--report", default="selftest-report.json")
+    parser.add_argument("--autostart", action="store_true")
+    parser.add_argument("--wait-pid", type=int, default=0)
+    parser.add_argument("--updated", action="store_true")
+    # для самопроверки обновления в CI: подменить себя и перезапуститься / отметиться и выйти
+    parser.add_argument("--update-swap-test", default="")
+    parser.add_argument("--update-probe", default="")
     args = parser.parse_args()
+
+    if args.wait_pid:
+        from lexoplay.updater import cleanup_old, wait_pid
+
+        wait_pid(args.wait_pid)
+        cleanup_old()
+
+    if args.update_probe:
+        from pathlib import Path
+
+        from lexoplay import __version__
+
+        Path(args.update_probe).write_text(f"{__version__} {os.getpid()} {sys.executable}", encoding="utf-8")
+        sys.exit(0)
+
+    if args.update_swap_test:
+        from pathlib import Path
+
+        from lexoplay.updater import install
+
+        new = Path(sys.executable).with_name("LexoPlay.exe.new")
+        install(new, ["--update-probe", args.update_swap_test])
+        sys.exit(0)
 
     if args.selftest:
         from lexoplay.selftest import run
@@ -83,6 +115,13 @@ def main() -> None:
         settings.debug = True
     setup_logging(settings.debug)
     settings.save()  # новые поля и перенесённые клавиши сразу на диск
+    if getattr(sys, "frozen", False):
+        from lexoplay.updater import cleanup_old
+
+        try:
+            cleanup_old()  # хвосты прошлого обновления
+        except OSError:
+            logging.getLogger(__name__).info("старый exe после обновления пока не удалить")
 
     from PySide6.QtGui import QFont
 
@@ -96,7 +135,7 @@ def main() -> None:
     qapp.setWindowIcon(app_icon())
     bg = BackgroundLoop()
     store = Store(data_dir() / "local.db")
-    app = App(qapp, settings, store, bg)
+    app = App(qapp, settings, store, bg, quiet=args.autostart, updated=args.updated)
     server = _listen(lambda: app.show_window())
     app.start()
     code = qapp.exec()

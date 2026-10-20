@@ -163,3 +163,91 @@ def test_unexpected_translator_crash_is_a_readable_error():
     p, grab, _ = make(result("Hello there."), Broken())
     out = run(p.run(grab, Target("G", REGION)))
     assert out.kind == "error" and "temperature" not in out.message
+
+
+class ModeOcr:
+    """OCR, который читает по-разному в зависимости от подготовки картинки."""
+
+    def __init__(self, by_mode: dict[str, OcrResult]) -> None:
+        self.by_mode = by_mode
+        self.modes: list[str] = []
+
+    async def recognize(self, prepared):
+        # способ подготовки угадываем по картинке: pixel чёрно-белый, color/normal серые
+        mode = getattr(prepared, "_mode", None)
+        self.modes.append(mode)
+        return self.by_mode[mode]
+
+
+def test_auto_ocr_mode_picks_the_cleanest_reading(monkeypatch):
+    import lexoplay.pipeline as pl
+
+    real_prepare = pl.prepare
+
+    class _Tagged:
+        def __init__(self, prep, mode):
+            self.prep, self._mode = prep, mode
+
+    def tagged(frame_, region, *, mode="normal", binarize=False):
+        return _Tagged(real_prepare(frame_, region, mode=mode), mode)
+
+    monkeypatch.setattr(pl, "prepare", tagged)
+    ocr = ModeOcr(
+        {
+            "normal": result("Y0u'r3 n0t |eaving th1s r00m"),
+            "pixel": result("You're not leaving this room."),
+            "color": result("You're n0t leav1ng"),
+        }
+    )
+    p = Pipeline(ocr, FakeTranslator(), LineMemory(), sleep=no_sleep, run_sync=direct)
+    out = run(p.run(lambda: frame("x"), Target("HM", REGION)))
+    assert out.kind == "translated" and out.ocr_mode == "pixel"
+    assert out.utterance.text == "You're not leaving this room."
+    assert out.quality is not None and out.quality.ok
+    assert out.preview is not None and out.preview.mode == "RGB"
+    # способ уже известен и читает хорошо: другие не пробуем
+    ocr.modes.clear()
+    out2 = run(p.run(lambda: frame("x"), Target("HM", REGION, ocr_mode="pixel")))
+    assert ocr.modes == ["pixel"] and out2.kind == "repeat"
+
+
+def test_disk_cache_serves_repeat_without_request(tmp_path):
+    from lexoplay.history import LineCache
+    from lexoplay.store import Store
+
+    store = Store(tmp_path / "db.sqlite")
+    cache = LineCache(store)
+    tr = FakeTranslator()
+    p1 = Pipeline(FakeOcr(result("I was reluctant to come here.")), tr, LineMemory(), sleep=no_sleep, run_sync=direct, cache=cache)
+    t = Target("Midnight", REGION, game_exe="mid.exe", glossary={"Mira": "Мира"})
+    out = run(p1.run(lambda: frame("x"), t))
+    assert out.kind == "translated" and tr.requests[0].glossary == {"Mira": "Мира"}
+    # новая сессия (память пустая), OCR чуть иначе: перевод из кеша, без запроса
+    p2 = Pipeline(FakeOcr(result("I was reluctant to come here,")), tr, LineMemory(), sleep=no_sleep, run_sync=direct, cache=cache)
+    out2 = run(p2.run(lambda: frame("x"), t))
+    assert out2.kind == "repeat" and out2.cached and len(tr.requests) == 1
+    assert out2.record.translation.startswith("RU:")
+    assert store.lines_list("mid.exe")[0].hits == 1
+    # другая игра: свой кеш
+    p3 = Pipeline(FakeOcr(result("I was reluctant to come here,")), tr, LineMemory(), sleep=no_sleep, run_sync=direct, cache=cache)
+    out3 = run(p3.run(lambda: frame("x"), Target("Other", REGION, game_exe="other.exe")))
+    assert out3.kind == "translated" and len(tr.requests) == 2
+    store.close()
+
+
+def test_context_comes_from_game_history_in_a_new_session(tmp_path):
+    from lexoplay.history import LineCache
+    from lexoplay.store import Store
+
+    store = Store(tmp_path / "db.sqlite")
+    cache = LineCache(store)
+    store.line_add("mid.exe", "ru", "who goes there", "Old Man", "Who goes there?", "Кто идёт?")
+    store.line_add("mid.exe", "ru", "it s me mira", "Mira", "It's me, Mira.", "Это я, Мира.")
+    store.line_add("other.exe", "ru", "unrelated", None, "Unrelated.", "Не относится.")
+    tr = FakeTranslator()
+    p = Pipeline(FakeOcr(result("Old Man", "Back again?")), tr, LineMemory(), sleep=no_sleep, run_sync=direct, cache=cache)
+    out = run(p.run(lambda: frame("x"), Target("Midnight", REGION, game_exe="mid.exe")))
+    assert out.kind == "translated"
+    ctx = tr.requests[0].context
+    assert [c.source for c in ctx] == ["Who goes there?", "It's me, Mira."]  # от старых к новым, только эта игра
+    store.close()

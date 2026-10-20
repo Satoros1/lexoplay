@@ -117,6 +117,11 @@ QPushButton#primary {{ background: {GREEN}; color: white; border: 1px solid {GRE
 QPushButton#primary:hover {{ background: {GREEN_HOVER}; }}
 QPushButton#primary:disabled {{ background: #9CC7B9; border-color: #9CC7B9; color: white; }}
 QPushButton#danger {{ color: {DANGER}; }}
+QPushButton#chipButton {{ border: none; border-radius: 11px; padding: 3px 10px; min-height: 16px; font-size: 9pt;
+                         background: #ECEAE4; color: {INK}; }}
+QPushButton#chipButton:hover {{ background: {GREEN_SOFT}; }}
+QFrame#updateBar {{ background: {GREEN_SOFT}; border: none; border-bottom: 1px solid #BFE0D4; }}
+QLabel#preview {{ background: #1E2433; border-radius: 6px; padding: 2px; }}
 QPushButton#link {{ border: none; color: {GREEN}; padding: 2px 0; font-weight: 700; text-align: left; }}
 QPushButton#link:hover {{ background: transparent; text-decoration: underline; }}
 QPushButton#nav {{ text-align: left; border: none; border-radius: 8px; padding: 10px 12px; font-size: 10.5pt;
@@ -192,6 +197,13 @@ _ICONS = {
     "external": '<path d="M15 3h6v6M10 14 21 3M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>',
     "link": '<path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.8 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7'
     'l1.7-1.7"/>',
+    "history": '<path d="M3 12a9 9 0 1 0 9-9 9.8 9.8 0 0 0-6.7 2.7L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/>',
+    "words": '<path d="M12 7v14"/><path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13'
+    'a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/>',
+    "copy": '<rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>',
+    "trash": '<path d="M3 6h18M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/>',
+    "download": '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/>',
+    "search": '<circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>',
 }
 
 

@@ -1,4 +1,4 @@
-"""Главное окно LexoPlay: Игры, Lexo, Клавиши, Вид, Ещё.
+"""Главное окно LexoPlay: Игры, История, Слова, Lexo, Клавиши, Вид, Ещё.
 
 Настройки применяются сразу, без кнопки «Сохранить». Закрытие окна прячет его в трей:
 LexoPlay продолжает работать, пока его не закроют через меню трея.
@@ -7,13 +7,12 @@ LexoPlay продолжает работать, пока его не закро�
 
 from __future__ import annotations
 
-import hashlib
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Protocol
 
 from PySide6.QtCore import QRectF, QSize, Qt, QTimer, QUrl, Signal
-from PySide6.QtGui import QAction, QCloseEvent, QColor, QDesktopServices, QFont, QFontMetricsF, QPainter
+from PySide6.QtGui import QAction, QCloseEvent, QColor, QDesktopServices, QFont, QFontMetricsF, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
@@ -28,7 +27,6 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QRadioButton,
-    QScrollArea,
     QSizePolicy,
     QSlider,
     QStackedWidget,
@@ -43,12 +41,24 @@ from lexoplay.games import WindowInfo
 from lexoplay.geometry import font_px_for
 from lexoplay.hotkeys import HotkeyError, parse, risk
 from lexoplay.lexo import Deck
-from lexoplay.store import Game, Store
+from lexoplay.store import Game, SavedWord, Store, StoredLine
 from lexoplay.ui import theme
 from lexoplay.ui.hotkey_edit import HotkeyEdit
+from lexoplay.ui.pages import GlossaryDialog, HistoryPage, WordsPage
 from lexoplay.ui.theme import app_icon, draw_logo, icon
 
 RELEASES_URL = "https://github.com/Satoros1/lexoplay/releases/latest"
+
+
+@dataclass
+class UpdateState:
+    """Проверка и установка новой версии. phase: idle | checking | latest | available | downloading | installing | error."""
+
+    phase: str = "idle"
+    release: object | None = None  # updater.Release
+    progress: int = 0
+    error: str | None = None
+    checked_at: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,6 +72,7 @@ class AccountStatus:
     queue: int = 0
     failed: int = 0
     note: str = ""  # «На сервере Lexo ещё нет LexoPlay…»
+    own_key: bool = False  # без Lexo, но со своим ключом Anthropic
 
 
 @dataclass
@@ -75,6 +86,7 @@ class DeckState:
 class Controller(Protocol):
     settings: Settings
     store: Store
+    update: UpdateState
 
     def account_status(self) -> AccountStatus: ...
     def link(self, code: str, done: Callable[[str | None], None]) -> None: ...
@@ -95,105 +107,27 @@ class Controller(Protocol):
     def make_report(self) -> str | None: ...
     def open_logs(self) -> None: ...
     def window_hidden(self) -> None: ...
+    def usage_summary(self) -> str: ...
+    def check_key(self, key: str, done: Callable[[str | None], None]) -> None: ...
+    def history(self, exe: str | None = None, query: str = "", limit: int = 100, offset: int = 0) -> list[StoredLine]: ...
+    def delete_line(self, line_id: int) -> None: ...
+    def clear_history(self, exe: str | None = None) -> None: ...
+    def saved_words(self) -> list[SavedWord]: ...
+    def delete_word(self, word_id: int) -> None: ...
+    def export_words(self, path: str, fmt: str) -> int: ...
+    def glossary(self, exe: str) -> dict[str, str]: ...
+    def set_glossary(self, exe: str, term: str, translation: str) -> None: ...
+    def delete_glossary(self, exe: str, term: str) -> None: ...
+    def speakers(self, exe: str) -> list[str]: ...
+    def get_last_read(self, exe: str): ...  # type: ignore[no-untyped-def]
+    def autostart_supported(self) -> bool: ...
+    def autostart_enabled(self) -> bool: ...
+    def set_autostart(self, on: bool) -> bool: ...
+    def check_updates(self, *, manual: bool = True) -> None: ...
+    def install_update(self) -> None: ...
 
 
-# ------------------------------------------------------------------ мелкие детали
-def label(text: str, name: str | None = None, *, wrap: bool = False) -> QLabel:
-    lbl = QLabel(text)
-    if name:
-        lbl.setObjectName(name)
-    lbl.setWordWrap(wrap)
-    return lbl
-
-
-def card(name: str = "card") -> tuple[QFrame, QVBoxLayout]:
-    frame = QFrame()
-    frame.setObjectName(name)
-    lay = QVBoxLayout(frame)
-    lay.setContentsMargins(18, 16, 18, 16)
-    lay.setSpacing(10)
-    return frame, lay
-
-
-def button(text: str, kind: str | None = None, icon_name: str | None = None) -> QPushButton:
-    b = QPushButton(text)
-    if kind:
-        b.setObjectName(kind)
-    if icon_name:
-        b.setIcon(icon(icon_name, "#FFFFFF" if kind == "primary" else theme.INK, 16))
-        b.setIconSize(QSize(16, 16))
-    b.setCursor(Qt.CursorShape.PointingHandCursor)
-    return b
-
-
-def keycap(text: str) -> QLabel:
-    return label(text or "нет", "keycap")
-
-
-def clear(layout) -> None:  # type: ignore[no-untyped-def]
-    """Убрать всё из раскладки сразу: deleteLater сработает позже, а виджет до этого висел бы поверх."""
-    while layout.count():
-        item = layout.takeAt(0)
-        w = item.widget()
-        if w is not None:
-            w.hide()
-            w.setParent(None)
-            w.deleteLater()
-        elif item.layout() is not None:
-            clear(item.layout())
-
-
-def tile_color(seed: str) -> QColor:
-    palette = ["#59506F", "#3D5A80", "#8A5A44", "#2F6F62", "#7A4E7E", "#4B6584", "#806A2F"]
-    h = int(hashlib.md5(seed.encode()).hexdigest(), 16)
-    return QColor(palette[h % len(palette)])
-
-
-class Tile(QWidget):
-    """Квадратик игры с первой буквой названия."""
-
-    def __init__(self, title: str, seed: str, size: int = 44) -> None:
-        super().__init__()
-        self._title, self._seed = title, seed
-        self.setFixedSize(size, size)
-
-    def paintEvent(self, _e) -> None:  # type: ignore[no-untyped-def]  # noqa: N802
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(tile_color(self._seed))
-        p.drawRoundedRect(QRectF(self.rect()), 10, 10)
-        f = theme.ui_font(14, QFont.Weight.Bold)
-        p.setFont(f)
-        p.setPen(QColor("#FFFFFF"))
-        letter = next((c for c in self._title if c.isalnum()), "?").upper()
-        p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, letter)
-        p.end()
-
-
-def page_shell(title: str, subtitle: str) -> tuple[QScrollArea, QVBoxLayout, QHBoxLayout]:
-    """Страница с прокруткой: заголовок, подзаголовок, место под кнопки справа и тело."""
-    inner = QWidget()
-    inner.setObjectName("page")
-    lay = QVBoxLayout(inner)
-    lay.setContentsMargins(32, 28, 32, 28)
-    lay.setSpacing(16)
-    head = QHBoxLayout()
-    col = QVBoxLayout()
-    col.setSpacing(2)
-    col.addWidget(label(title, "h1"))
-    col.addWidget(label(subtitle, "muted", wrap=True))
-    head.addLayout(col, 1)
-    actions = QHBoxLayout()
-    actions.setSpacing(8)
-    head.addLayout(actions)
-    lay.addLayout(head)
-    scroll = QScrollArea()
-    scroll.setWidgetResizable(True)
-    scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-    scroll.setFrameShape(QFrame.Shape.NoFrame)
-    scroll.setWidget(inner)
-    return scroll, lay, actions
+from lexoplay.ui.widgets import Tile, button, card, clear, keycap, label, page_shell, tile_color  # noqa: E402,F401
 
 
 # ------------------------------------------------------------------ Игры
@@ -272,7 +206,7 @@ class GamesPage(QWidget):
         grid.setVerticalSpacing(10)
         rows = [
             (hk.translate, "перевести реплику, ещё раз спрятать"),
-            (hk.words, "подчеркнуть слова: клик по слову, «+ в Lexo» или Enter. Shift+клик выбирает фразу"),
+            (hk.words, "подчеркнуть слова: клик по слову, потом «+» или Enter сохраняет его. Shift+клик выбирает фразу"),
             (hk.hide, "спрятать перевод"),
             (hk.reselect, "выделить окно диалога заново, если перевод встал не туда"),
         ]
@@ -300,12 +234,11 @@ class GamesPage(QWidget):
         col.setSpacing(3)
         top = QHBoxLayout()
         top.setSpacing(8)
-        name = label(g.title, "title")
+        name = label(g.title, "title", wrap=True)  # длинное название переносится, а не растягивает окно
         name.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        top.addWidget(name)
+        top.addWidget(name, 1)
         if active:
-            top.addWidget(label("сейчас в игре", "chip"))
-        top.addStretch(1)
+            top.addWidget(label("сейчас в игре", "chip"), 0, Qt.AlignmentFlag.AlignTop)
         col.addLayout(top)
         if g.region is not None:
             state = label(f"{g.exe} · окно диалога выделено", "muted")
@@ -313,6 +246,9 @@ class GamesPage(QWidget):
             state = label(f"{g.exe} · окно диалога ещё не выделено: открой игру и нажми {self.ctl.settings.hotkeys.translate}", "warn")
         state.setWordWrap(True)
         col.addWidget(state)
+        read = self.ctl.get_last_read(g.exe) if g.region is not None else None
+        if read is not None:
+            col.addLayout(self._last_read(read))
         if linked:
             deck_row = QHBoxLayout()
             deck_row.setSpacing(8)
@@ -332,14 +268,53 @@ class GamesPage(QWidget):
         menu = QMenu(more)
         rename = QAction("Переименовать…", menu)
         rename.triggered.connect(lambda: self._rename(g))
+        gloss = QAction("Имена и термины…", menu)
+        gloss.triggered.connect(lambda: self._glossary(g))
         forget = QAction("Убрать из списка", menu)
         forget.triggered.connect(lambda: self._forget(g))
         menu.addAction(rename)
+        menu.addAction(gloss)
+        if g.ocr_mode:
+            reocr = QAction("Подобрать распознавание заново", menu)
+            reocr.triggered.connect(lambda: self._reset_ocr(g))
+            menu.addAction(reocr)
         menu.addSeparator()
         menu.addAction(forget)
         more.setMenu(menu)
         row.addWidget(more, 0, Qt.AlignmentFlag.AlignTop)
         return frame
+
+    def _last_read(self, read) -> QHBoxLayout:  # type: ignore[no-untyped-def]
+        """Что LexoPlay последний раз прочитал в окне диалога: сразу видно, туда ли выделено."""
+        row = QHBoxLayout()
+        row.setSpacing(10)
+        img = read.image.convert("RGB")
+        qimg = QImage(img.tobytes("raw", "RGB"), img.width, img.height, img.width * 3, QImage.Format.Format_RGB888).copy()
+        pix = QPixmap.fromImage(qimg).scaled(
+            150, 46, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
+        )
+        shot = QLabel()
+        shot.setObjectName("preview")
+        shot.setPixmap(pix)
+        shot.setToolTip("Последний кадр окна диалога")
+        row.addWidget(shot, 0, Qt.AlignmentFlag.AlignTop)
+        text = read.text.strip() or "текста не нашлось"
+        if len(text) > 140:
+            text = text[:140].rstrip() + "…"
+        col = QVBoxLayout()
+        col.setSpacing(1)
+        col.addWidget(label(f"Прочитано: {text}", "muted", wrap=True))
+        col.addWidget(label(f"Распознавание: {read.mode_name}, подобрано само", "version", wrap=True))
+        row.addLayout(col, 1)
+        return row
+
+    def _glossary(self, g: Game) -> None:
+        GlossaryDialog(self.ctl, g, self.window()).exec()
+
+    def _reset_ocr(self, g: Game) -> None:
+        fresh = self.ctl.store.get_game(g.exe) or g
+        self.ctl.save_game(fresh.with_(ocr_mode=None, binarize=False))
+        self.refresh()
 
     def _deck_combo(self, g: Game) -> QComboBox:
         combo = QComboBox()
@@ -795,16 +770,31 @@ class StripPreview(QWidget):
         sf.setWeight(QFont.Weight.Medium)
         fm = QFontMetricsF(sf)
         text = "Знаешь, мне совсем не хотелось сюда сегодня приходить."
-        th = fm.boundingRect(QRectF(0, 0, dlg.width() - 2 * px * 0.9, 1000), int(Qt.TextFlag.TextWordWrap), text).height()
-        strip = QRectF(dlg.x(), dlg.y() - 8 - (th + px * 1.2), dlg.width(), th + px * 1.2)
+        inner_w = dlg.width() - 2 * px * 0.9
+        th = fm.boundingRect(QRectF(0, 0, inner_w, 1000), int(Qt.TextFlag.TextWordWrap), text).height()
+        original = "I was reluctant to come here tonight, you know."
+        of = QFont("Segoe UI")
+        of.setPixelSize(round(max(12.0, px * 0.78)))
+        oh = 0.0
+        if self.settings.show_original:
+            oh = QFontMetricsF(of).boundingRect(QRectF(0, 0, inner_w, 1000), int(Qt.TextFlag.TextWordWrap), original).height()
+            oh += px * 0.35
+        strip_h = th + oh + px * 1.2
+        strip = QRectF(dlg.x(), dlg.y() - 8 - strip_h, dlg.width(), strip_h)
         bg = QColor(theme.STRIP_BG)
         bg.setAlphaF(max(0.3, min(1.0, self.settings.strip_opacity)))
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(bg)
         p.drawRoundedRect(strip, min(10.0, strip.height() / 2), min(10.0, strip.height() / 2))
+        top = strip.y() + px * 0.6
+        if oh:
+            p.setFont(of)
+            p.setPen(QColor("#9A988F"))
+            p.drawText(QRectF(strip.x() + px * 0.9, top, inner_w, oh), int(Qt.TextFlag.TextWordWrap), original)
+            top += oh
         p.setFont(sf)
         p.setPen(QColor("#FFFFFF"))
-        p.drawText(strip.adjusted(px * 0.9, px * 0.6, -px * 0.9, 0), int(Qt.TextFlag.TextWordWrap), text)
+        p.drawText(QRectF(strip.x() + px * 0.9, top, inner_w, th + 2), int(Qt.TextFlag.TextWordWrap), text)
         p.end()
 
 
@@ -840,7 +830,29 @@ class ViewPage(QWidget):
         grid.addWidget(self.opacity_val, 1, 2)
         grid.setColumnStretch(1, 1)
         bl.addLayout(grid)
+        self.original = QCheckBox("Показывать английский оригинал мелко над переводом")
+        self.original.setChecked(s.show_original)
+        self.original.toggled.connect(self._original)
+        bl.addWidget(self.original)
         lay.addWidget(box)
+
+        lay.addWidget(label("АВТОПЕРЕВОД", "section"))
+        auto_box, al = card()
+        self.auto = QCheckBox("Переводить следующую реплику автоматически")
+        self.auto.setChecked(s.auto_translate)
+        self.auto.toggled.connect(self._auto)
+        al.addWidget(self.auto)
+        hk = s.hotkeys
+        al.addWidget(
+            label(
+                f"Нажми {hk.translate} один раз: дальше, когда пропускаешь реплику, LexoPlay сам переведёт следующую. "
+                f"{hk.hide} останавливает до следующего {hk.translate}. Каждая новая реплика это запрос к модели, "
+                "повторы берутся из истории бесплатно. Включается и в меню значка в трее.",
+                "muted",
+                wrap=True,
+            )
+        )
+        lay.addWidget(auto_box)
         self.size.valueChanged.connect(self._sliders)
         self.opacity.valueChanged.connect(self._sliders)
         self._save_timer = QTimer(self)
@@ -893,6 +905,21 @@ class ViewPage(QWidget):
         self.preview.update()
         self._save_timer.start()
 
+    def _original(self, on: bool) -> None:
+        self.ctl.settings.show_original = on
+        self.preview.update()
+        self.ctl.settings_changed()
+
+    def _auto(self, on: bool) -> None:
+        if self.ctl.settings.auto_translate != on:
+            self.ctl.settings.auto_translate = on
+            self.ctl.settings_changed()
+
+    def refresh(self) -> None:
+        self.auto.blockSignals(True)
+        self.auto.setChecked(self.ctl.settings.auto_translate)
+        self.auto.blockSignals(False)
+
     def _mode(self, code: str) -> None:
         self.ctl.settings.magpie_mode = code
         for f in self.mode_frames:
@@ -908,17 +935,17 @@ class MorePage(QWidget):
         super().__init__()
         self.ctl = ctl
         s = ctl.settings
-        scroll, lay, _actions = page_shell("Ещё", "Свой ключ, сервер и помощь, если что-то не работает.")
+        scroll, lay, _actions = page_shell("Ещё", "Свой ключ, запуск, обновления и помощь, если что-то не работает.")
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(scroll)
 
-        lay.addWidget(label("БЕЗ LEXO", "section"))
+        lay.addWidget(label("СВОЙ КЛЮЧ ANTHROPIC", "section"))
         box, bl = card()
         bl.addWidget(
             label(
-                "Можно переводить своим ключом Anthropic, не привязывая ПК. Слова тогда в карточки не сохраняются. "
-                "Если ПК привязан к Lexo, ключ не используется.",
+                "Без привязки к Lexo программа переводит реплики и слова твоим ключом Anthropic. Слова копятся во вкладке "
+                "«Слова» и сами уйдут в Lexo, когда привяжешь ПК. Если ПК привязан, ключ не используется.",
                 "muted",
                 wrap=True,
             )
@@ -933,15 +960,72 @@ class MorePage(QWidget):
         show = QPushButton("Показать")
         show.setCheckable(True)
         show.toggled.connect(lambda on: self.key.setEchoMode(QLineEdit.EchoMode.Normal if on else QLineEdit.EchoMode.Password))
-        self.model = QLineEdit(s.model)
-        self.model.editingFinished.connect(self._model)
-        form.addWidget(label("Ключ Anthropic"), 0, 0)
+        self.check_btn = button("Проверить")
+        self.check_btn.clicked.connect(self._check_key)
+        self.model = QComboBox()
+        self.model.setEditable(True)
+        for m in ("claude-haiku-5-5", "claude-sonnet-5-5"):
+            self.model.addItem(m)
+        if self.model.findText(s.model) < 0:
+            self.model.addItem(s.model)
+        self.model.setCurrentText(s.model)
+        self.model.activated.connect(lambda _i: self._model())
+        self.model.lineEdit().editingFinished.connect(self._model)
+        form.addWidget(label("Ключ"), 0, 0)
         form.addWidget(self.key, 0, 1)
         form.addWidget(show, 0, 2)
+        form.addWidget(self.check_btn, 0, 3)
         form.addWidget(label("Модель"), 1, 0)
-        form.addWidget(self.model, 1, 1, 1, 2)
+        form.addWidget(self.model, 1, 1, 1, 3)
         bl.addLayout(form)
+        bl.addWidget(
+            label(
+                "claude-haiku-5-5: быстро и дёшево, вечер игры стоит центы. claude-sonnet-5-5: переводит тоньше "
+                "и лучше держит характер персонажей, но примерно в 20 раз дороже и чуть медленнее.",
+                "version",
+                wrap=True,
+            )
+        )
+        self.key_status = label("", "muted", wrap=True)
+        self.key_status.hide()
+        bl.addWidget(self.key_status)
+        self.usage = label("", "muted", wrap=True)
+        bl.addWidget(self.usage)
         lay.addWidget(box)
+
+        lay.addWidget(label("ЗАПУСК И ОБНОВЛЕНИЯ", "section"))
+        box4, b4 = card()
+        self.autostart = QCheckBox("Запускать LexoPlay вместе с Windows (сразу в трей, без окна)")
+        supported = ctl.autostart_supported()
+        self.autostart.setEnabled(supported)
+        self.autostart.setChecked(supported and ctl.autostart_enabled())
+        if not supported:
+            self.autostart.setToolTip("Работает в LexoPlay.exe")
+        self.autostart.toggled.connect(self._autostart)
+        b4.addWidget(self.autostart)
+        self.auto_updates = QCheckBox("Проверять новые версии (раз в несколько часов)")
+        self.auto_updates.setChecked(s.check_updates)
+        self.auto_updates.toggled.connect(self._auto_updates)
+        b4.addWidget(self.auto_updates)
+        upd = QHBoxLayout()
+        upd.setSpacing(10)
+        self.version = label("", "title")
+        upd.addWidget(self.version)
+        self.update_note = label("", "muted")
+        upd.addWidget(self.update_note, 1)
+        self.update_btn = button("Проверить")
+        self.update_btn.clicked.connect(self._update_clicked)
+        upd.addWidget(self.update_btn)
+        b4.addLayout(upd)
+        self.update_bar = QProgressBar()
+        self.update_bar.setTextVisible(False)
+        self.update_bar.setRange(0, 100)
+        self.update_bar.hide()
+        b4.addWidget(self.update_bar)
+        notes = button("Что нового в версиях", "link")
+        notes.clicked.connect(lambda: QDesktopServices.openUrl(QUrl("https://github.com/Satoros1/lexoplay/releases")))
+        b4.addWidget(notes, 0, Qt.AlignmentFlag.AlignLeft)
+        lay.addWidget(box4)
 
         lay.addWidget(label("СЕРВЕР", "section"))
         box2, b2 = card()
@@ -972,19 +1056,91 @@ class MorePage(QWidget):
         self.report_note.hide()
         b3.addWidget(self.report_note)
         lay.addWidget(box3)
-
-        ver = QHBoxLayout()
-        ver.addWidget(label(f"LexoPlay {__version__}", "version"))
-        upd = button("Скачать новую версию", "link")
-        upd.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(RELEASES_URL)))
-        ver.addWidget(upd)
-        ver.addStretch(1)
-        lay.addLayout(ver)
         lay.addStretch(1)
+        self.refresh()
+
+    def refresh(self) -> None:
+        linked = self.ctl.account_status().linked
+        self.usage.setText("Сейчас перевод идёт через Lexo." if linked else self.ctl.usage_summary())
+        self.refresh_update()
+
+    def refresh_update(self) -> None:
+        u = self.ctl.update
+        rel = u.release
+        self.version.setText(f"LexoPlay {__version__}")
+        self.update_bar.setVisible(u.phase == "downloading")
+        self.update_bar.setValue(u.progress)
+        self.update_btn.setEnabled(u.phase not in ("checking", "downloading", "installing"))
+        note, btn = "", "Проверить"
+        if u.phase == "checking":
+            note = "проверяю…"
+        elif u.phase == "latest":
+            note = "последняя версия"
+        elif u.phase == "available" and rel is not None:
+            note, btn = f"вышла версия {rel.version}", "Обновить"  # type: ignore[attr-defined]
+        elif u.phase == "downloading":
+            note, btn = f"скачиваю обновление… {u.progress}%", "Обновить"
+        elif u.phase == "installing":
+            note = "устанавливаю, LexoPlay сейчас перезапустится"
+        elif u.phase == "error":
+            note, btn = u.error or "обновление не получилось", "Ещё раз" if rel is not None else "Проверить"
+        self.update_note.setText(note)
+        self.update_note.setObjectName("error" if u.phase == "error" else ("ok" if u.phase == "available" else "muted"))
+        self.update_note.style().unpolish(self.update_note)
+        self.update_note.style().polish(self.update_note)
+        self.update_note.setWordWrap(u.phase == "error")
+        self.update_btn.setText(btn)
+        self.update_btn.setObjectName("primary" if btn in ("Обновить", "Ещё раз") else "")
+        self.update_btn.style().unpolish(self.update_btn)
+        self.update_btn.style().polish(self.update_btn)
+
+    def _update_clicked(self) -> None:
+        if self.ctl.update.release is not None:
+            self.ctl.install_update()
+        else:
+            self.ctl.check_updates(manual=True)
+
+    def _check_key(self) -> None:
+        key = self.key.text().strip()
+        if not key:
+            self._key_status("Сначала вставь ключ.", error=True)
+            return
+        self.ctl.set_api_key(key)
+        self.check_btn.setEnabled(False)
+        self._key_status("Проверяю…")
+
+        def done(err: str | None) -> None:
+            self.check_btn.setEnabled(True)
+            if err:
+                self._key_status(err, error=True)
+            else:
+                self._key_status(f"Ключ работает, модель {self.ctl.settings.model} отвечает.", ok=True)
+
+        self.ctl.check_key(key, done)
+
+    def _key_status(self, text: str, *, error: bool = False, ok: bool = False) -> None:
+        self.key_status.setText(text)
+        self.key_status.setObjectName("error" if error else ("ok" if ok else "muted"))
+        self.key_status.style().unpolish(self.key_status)
+        self.key_status.style().polish(self.key_status)
+        self.key_status.show()
+
+    def _autostart(self, on: bool) -> None:
+        if not self.ctl.set_autostart(on):
+            self.autostart.blockSignals(True)
+            self.autostart.setChecked(not on)
+            self.autostart.blockSignals(False)
+
+    def _auto_updates(self, on: bool) -> None:
+        self.ctl.settings.check_updates = on
+        self.ctl.settings_changed()
 
     def _model(self) -> None:
-        self.ctl.settings.model = self.model.text().strip() or self.ctl.settings.model
-        self.ctl.settings_changed()
+        model = self.model.currentText().strip()
+        if model and model != self.ctl.settings.model:
+            self.ctl.settings.model = model
+            self.ctl.settings_changed()
+            self.usage.setText(self.ctl.usage_summary())
 
     def _server(self) -> None:
         self.ctl.settings.server_url = self.server.text().strip().rstrip("/") or self.ctl.settings.server_url
@@ -1005,8 +1161,60 @@ class MorePage(QWidget):
 
 
 # ------------------------------------------------------------------ окно
+class UpdateBar(QFrame):
+    """Полоска сверху на любой вкладке: вышла новая версия, обновить одним нажатием."""
+
+    def __init__(self, ctl: Controller) -> None:
+        super().__init__()
+        self.ctl = ctl
+        self.setObjectName("updateBar")
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(32, 8, 24, 8)
+        lay.setSpacing(12)
+        self.text = label("", "title", wrap=True)
+        lay.addWidget(self.text, 1)
+        self.bar = QProgressBar()
+        self.bar.setTextVisible(False)
+        self.bar.setRange(0, 100)
+        self.bar.setFixedWidth(160)
+        lay.addWidget(self.bar)
+        self.btn = button("Обновить", "primary")
+        self.btn.clicked.connect(self.ctl.install_update)
+        lay.addWidget(self.btn)
+        self.refresh()
+
+    def refresh(self) -> None:
+        u = self.ctl.update
+        rel = u.release
+        show = rel is not None and u.phase in ("available", "downloading", "installing", "error")
+        self.setVisible(show)
+        if not show:
+            return
+        version = getattr(rel, "version", "")
+        self.bar.setVisible(u.phase == "downloading")
+        self.bar.setValue(u.progress)
+        self.btn.setVisible(u.phase in ("available", "error"))
+        self.btn.setText("Ещё раз" if u.phase == "error" else "Обновить")
+        if u.phase == "downloading":
+            self.text.setText(f"Скачиваю LexoPlay {version}…")
+        elif u.phase == "installing":
+            self.text.setText("Устанавливаю, LexoPlay сейчас перезапустится")
+        elif u.phase == "error":
+            self.text.setText(u.error or "Обновление не получилось")
+        else:
+            self.text.setText(f"Вышла новая версия LexoPlay {version}. Обновится одним нажатием, настройки останутся.")
+
+
 class MainWindow(QWidget):
-    PAGES = (("games", "Игры", "games"), ("lexo", "Lexo", "lexo"), ("keys", "Клавиши", "keys"), ("view", "Вид", "view"), ("more", "Ещё", "more"))
+    PAGES = (
+        ("games", "Игры", "games"),
+        ("history", "История", "history"),
+        ("words", "Слова", "words"),
+        ("lexo", "Lexo", "lexo"),
+        ("keys", "Клавиши", "keys"),
+        ("view", "Вид", "view"),
+        ("more", "Ещё", "more"),
+    )
 
     def __init__(self, ctl: Controller) -> None:
         super().__init__()
@@ -1014,8 +1222,8 @@ class MainWindow(QWidget):
         self.setObjectName("root")
         self.setWindowTitle("LexoPlay")
         self.setWindowIcon(app_icon())
-        self.resize(980, 680)
-        self.setMinimumSize(820, 560)
+        self.resize(1000, 700)
+        self.setMinimumSize(840, 580)
         self.setStyleSheet(theme.stylesheet())
         self.decks = DeckState()
 
@@ -1042,11 +1250,21 @@ class MainWindow(QWidget):
         self.stack = QStackedWidget()
         self.pages: dict[str, QWidget] = {}
         self.games = GamesPage(ctl, self.decks)
+        self.history = HistoryPage(ctl)
+        self.words = WordsPage(ctl, lambda: self.ctl.account_status().linked, lambda: self.ctl.settings.hotkeys.words)
         self.lexo = LexoPage(ctl, self.decks)
         self.keys = KeysPage(ctl)
         self.view = ViewPage(ctl)
         self.more = MorePage(ctl)
-        for key, page in (("games", self.games), ("lexo", self.lexo), ("keys", self.keys), ("view", self.view), ("more", self.more)):
+        for key, page in (
+            ("games", self.games),
+            ("history", self.history),
+            ("words", self.words),
+            ("lexo", self.lexo),
+            ("keys", self.keys),
+            ("view", self.view),
+            ("more", self.more),
+        ):
             self.pages[key] = page
             self.stack.addWidget(page)
         self.games.go_lexo.connect(lambda: self.show_page("lexo"))
@@ -1070,7 +1288,14 @@ class MainWindow(QWidget):
         sl.addWidget(self.account_chip)
         sl.addWidget(label(f"Версия {__version__}", "version"))
         root.addWidget(side)
-        root.addWidget(self.stack, 1)
+
+        main = QVBoxLayout()
+        main.setContentsMargins(0, 0, 0, 0)
+        main.setSpacing(0)
+        self.update_bar = UpdateBar(ctl)
+        main.addWidget(self.update_bar)
+        main.addWidget(self.stack, 1)
+        root.addLayout(main, 1)
 
         self.show_page("games")
         self.refresh_account()
@@ -1081,16 +1306,23 @@ class MainWindow(QWidget):
         self.nav_buttons[key].setChecked(True)
         if key == "games":
             self.games.refresh()
+        elif key == "history":
+            self.history.refresh()
+        elif key == "words":
+            self.words.refresh()
         elif key == "lexo":
             self.lexo.refresh()
             if not self.decks.loaded:
                 self.lexo.reload_decks()
+        elif key == "more":
+            self.more.refresh()
 
     def open(self, page: str | None = None) -> None:
         if page:
             self.show_page(page)
         else:
-            self.games.refresh()
+            current = next((k for k, w in self.pages.items() if w is self.stack.currentWidget()), "games")
+            self.show_page(current)
         if self.isMinimized():
             self.showNormal()
         self.show()
@@ -1104,6 +1336,13 @@ class MainWindow(QWidget):
         if self.isVisible() and self.stack.currentWidget() is self.games:
             self.games.refresh()
 
+    def refresh_update(self) -> None:
+        self.update_bar.refresh()
+        self.more.refresh_update()
+
+    def refresh_settings(self) -> None:
+        self.view.refresh()
+
     def refresh_account(self) -> None:
         st = self.ctl.account_status()
         if st.linked:
@@ -1112,6 +1351,8 @@ class MainWindow(QWidget):
                 text += "\nнет связи"
             elif st.used is not None and st.limit:
                 text += f"\nсегодня {st.used} из {st.limit}"
+        elif st.own_key:
+            text = "Lexo не привязан\nперевод своим ключом"
         else:
             text = "Lexo не привязан"
         self.account_chip.setText(text)
@@ -1121,6 +1362,10 @@ class MainWindow(QWidget):
                 self.lexo.refresh()
             elif current is self.games:
                 self.games.refresh()
+            elif current is self.words:
+                self.words.refresh()
+            elif current is self.more:
+                self.more.refresh()
 
     def _account_changed(self) -> None:
         self.refresh_account()

@@ -9,7 +9,12 @@
 после Enter или Esc игра разворачивается и получает фокус обратно.
 
 С привязкой к Lexo перевод идёт через сервер, слова уходят в карточки через outbox,
-сессии закрываются сами. Без привязки F2 работает своим ключом Anthropic, F3 недоступен.
+сессии закрываются сами. Без привязки F2 и F3 работают своим ключом Anthropic: слова
+копятся во вкладке «Слова» и сами уходят в Lexo, когда ПК привяжут.
+
+Переведённые реплики хранятся на диске: повтор переводится мгновенно и бесплатно,
+а вкладка «История» показывает, что было. Автоперевод (по желанию) сам переводит
+следующую реплику, когда игрок пропускает текущую.
 """
 
 from __future__ import annotations
@@ -32,7 +37,7 @@ from PySide6.QtCore import QObject, QTimer, QUrl, Signal
 from PySide6.QtGui import QAction, QDesktopServices, QFont, QGuiApplication, QImage
 from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon, QWidget
 
-from lexoplay import __version__
+from lexoplay import __version__, autostart, updater
 from lexoplay.bg import BackgroundLoop
 from lexoplay.config import (
     Settings,
@@ -48,17 +53,21 @@ from lexoplay.debugdump import DebugDump
 from lexoplay.dedupe import LineMemory, LineRecord
 from lexoplay.games import NOT_GAMES, WindowInfo, clean_title, is_game_exe
 from lexoplay.geometry import Rect
+from lexoplay.history import LineCache
 from lexoplay.hotkeys import HotkeyError, parse
 from lexoplay.lexo import Account, Deck, GameRef, LexoClient, LexoError, LexoOffline, Sense, Usage
+from lexoplay.lookup import AnthropicLookup
 from lexoplay.ocr_model import OcrResult
+from lexoplay.ocrscore import Quality
 from lexoplay.outbox import Outbox
 from lexoplay.pipeline import CaptureError, F2Outcome, Pipeline, ScanOutcome, Target
-from lexoplay.preprocess import is_black, thumbnail
+from lexoplay.preprocess import MODE_NAMES, is_black, thumbnail
 from lexoplay.session import GameSession, Sessions
-from lexoplay.store import Game, Store, Task
+from lexoplay.store import Game, SavedWord, StoredLine, Store, Task
 from lexoplay.textproc import Utterance, to_utterance
-from lexoplay.translate import AnthropicTranslator, LexoTranslator, Translator
-from lexoplay.ui.main_window import AccountStatus, MainWindow
+from lexoplay.translate import AnthropicTranslator, LexoTranslator, TranslationError, Translator, check_key
+from lexoplay.ui.main_window import AccountStatus, MainWindow, UpdateState
+from lexoplay.usage import OwnUsage
 from lexoplay.ui.overlay import Overlay
 from lexoplay.ui.region_picker import RegionPicker
 from lexoplay.ui.theme import app_icon
@@ -75,6 +84,8 @@ log = logging.getLogger(__name__)
 
 RELEASES_URL = "https://github.com/Satoros1/lexoplay/releases/latest"
 FRESH_OCR_S = 2.0  # F3 берёт распознанную для F2 реплику, если она моложе этого
+AUTO_SETTLE_S = 3.0  # автоперевод ждёт, пока реплика допечатается, дольше обычного F2
+UPDATE_EVERY_MS = 6 * 3600 * 1000
 
 
 def native_place(widget: QWidget, rect: Rect) -> None:
@@ -119,6 +130,21 @@ class CurrentLine:
 
 
 @dataclass
+class LastRead:
+    """Что LexoPlay последний раз прочитал в окне диалога игры: видно во вкладке «Игры»."""
+
+    image: Image.Image
+    text: str
+    mode: str
+    quality: Quality | None
+    at: float
+
+    @property
+    def mode_name(self) -> str:
+        return MODE_NAMES.get(self.mode, self.mode)
+
+
+@dataclass
 class WordCtx:
     exe: str
     title: str
@@ -135,15 +161,26 @@ class WordCtx:
 class Bridge(QObject):
     """Сигналы из фонового потока в поток Qt."""
 
-    f2_done = Signal(object, int)  # Future[F2Outcome], token
+    f2_done = Signal(object, object)  # Future[F2Outcome], (token, auto)
     watch_done = Signal(object, int)  # Future[bool], token
     ocr_checked = Signal(object)  # Future[str]
     call = Signal(object)  # функция без аргументов: выполнить в потоке Qt
 
 
 class App(QObject):
-    def __init__(self, qapp: QApplication, settings: Settings, store: Store, bg: BackgroundLoop) -> None:
+    def __init__(
+        self,
+        qapp: QApplication,
+        settings: Settings,
+        store: Store,
+        bg: BackgroundLoop,
+        *,
+        quiet: bool = False,
+        updated: bool = False,
+    ) -> None:
         super().__init__()
+        self.quiet = quiet  # запуск вместе с Windows: сразу в трей, без окна и уведомлений
+        self.just_updated = updated
         self.qapp = qapp
         self.settings = settings
         self.store = store
@@ -157,8 +194,17 @@ class App(QObject):
         self.ocr = WinOcr("en-US")
         self.ocr_error: str | None = None
         self.translator: Translator | None = None
+        self.own_lookup: AnthropicLookup | None = None  # F3 своим ключом, без Lexo
         self.pipelines: dict[str, Pipeline] = {}
-        self.dump = DebugDump(debug_dir())
+        self.dump = DebugDump(debug_dir(), keep=150)
+        self.cache = LineCache(store)
+        self.own_usage = OwnUsage(store)
+        self.last_read: dict[str, LastRead] = {}
+        self.update = UpdateState()
+        self.auto_live = False  # автоперевод идёт: игрок нажал F2, пока не нажмёт F4
+        self._auto_hint = False
+        self._last_input = 0.0  # когда игрок последний раз кликал или жал клавишу (monotonic)
+        self._busy_since = 0.0  # когда начался текущий перевод
 
         # Lexo
         self.client = LexoClient(server_url(settings), get_token())
@@ -175,6 +221,7 @@ class App(QObject):
             on_change=lambda: self.bridge.call.emit(self._update_tray),
             on_paused=lambda exc: self.bridge.call.emit(lambda: self._on_lexo_error(exc)),
             on_sent=self._on_task_sent,
+            can_send=lambda: self.client.linked,  # без привязки задачи молча ждут
         )
         self.sessions = Sessions(on_end=self._session_ended)
 
@@ -210,6 +257,9 @@ class App(QObject):
         self.vocab_timer = QTimer(self)
         self.vocab_timer.setInterval(10 * 60_000)
         self.vocab_timer.timeout.connect(lambda: self._refresh_vocab(full=False))
+        self.update_timer = QTimer(self)
+        self.update_timer.setInterval(UPDATE_EVERY_MS)
+        self.update_timer.timeout.connect(lambda: self.check_updates(manual=False))
 
         self.input = InputWatch()  # клики и клавиши игрока: после них перевод может смениться
         self.input.pressed.connect(self._on_user_input)
@@ -246,11 +296,19 @@ class App(QObject):
         self.tray.show()
         if self.client.linked:
             self._check_account()
+        autostart.refresh()
+        if self.settings.check_updates:
+            QTimer.singleShot(8000, lambda: self.check_updates(manual=False))
+            self.update_timer.start()
         first_run = not self.store.list_games() or (not self.client.linked and not get_api_key())
-        if first_run:
+        if self.just_updated:
+            self.tray.showMessage(
+                "LexoPlay обновлён", f"Теперь версия {__version__}. Что нового, видно на странице релиза.", app_icon(), 6000
+            )
+        elif first_run and not self.quiet:
             page = "lexo" if not self.client.linked and not get_api_key() else "games"
             QTimer.singleShot(200, lambda: self.show_window(page))
-        else:
+        elif not self.quiet:
             hk = self.settings.hotkeys
             self.tray.showMessage(
                 "LexoPlay запущен",
@@ -260,6 +318,8 @@ class App(QObject):
             )
 
     def shutdown(self) -> None:
+        self._closing = True
+        self.update_timer.stop()
         self.word_layer.finish("closed")
         self.sessions.end_all()
         try:  # дослать конец сессий и свежие слова; что не успело, уйдёт при следующем запуске
@@ -375,7 +435,7 @@ class App(QObject):
         pending, failed = self.outbox.counts()
         note = self.server_note
         if not self.client.linked:
-            return AccountStatus(False, queue=pending, failed=failed, note=note)
+            return AccountStatus(False, queue=0, failed=0, note=note, own_key=bool(get_api_key()))
         return AccountStatus(
             True,
             self.account.label if self.account else "аккаунт привязан",
@@ -436,6 +496,151 @@ class App(QObject):
             "translator": type(self.translator).__name__ if self.translator else None,
         }
 
+    # ------------------------------------------------------------------ свой ключ
+    def usage_summary(self) -> str:
+        return self.own_usage.summary(self.settings.model)
+
+    def check_key(self, key: str, done: Callable[[str | None], None]) -> None:
+        """Проверить ключ крошечным запросом. done(None) = работает, иначе текст ошибки."""
+
+        def finished(_r: Any, err: BaseException | None) -> None:
+            if err is None:
+                done(None)
+            elif isinstance(err, TranslationError):
+                done(str(err))
+            else:
+                log.error("проверка ключа упала", exc_info=err)
+                done(f"Не получилось проверить: {err}")
+
+        self.run_bg(check_key(key, self.settings.model), finished)
+
+    # ------------------------------------------------------------------ история, слова, глоссарий
+    def history(self, exe: str | None = None, query: str = "", limit: int = 100, offset: int = 0) -> list[StoredLine]:
+        return self.store.lines_list(exe, query, limit, offset)
+
+    def delete_line(self, line_id: int) -> None:
+        """Перевод не понравился: убрать из кеша, в следующий раз реплика переведётся заново."""
+        self.store.line_delete(line_id)
+        for p in self.pipelines.values():
+            p.memory.clear()  # иначе повтор возьмётся из памяти сессии
+
+    def clear_history(self, exe: str | None = None) -> None:
+        self.store.lines_clear(exe)
+        for p in self.pipelines.values():
+            p.memory.clear()
+
+    def saved_words(self) -> list[SavedWord]:
+        return self.store.words_list()
+
+    def delete_word(self, word_id: int) -> None:
+        self.store.word_delete(word_id)
+
+    def export_words(self, path: str, fmt: str) -> int:
+        from lexoplay.export import export_words
+
+        return export_words(self.store.words_list(), path, fmt)
+
+    def glossary(self, exe: str) -> dict[str, str]:
+        return self.store.glossary(exe)
+
+    def set_glossary(self, exe: str, term: str, translation: str) -> None:
+        self.store.glossary_set(exe, term.strip()[:64], translation.strip()[:128])
+
+    def delete_glossary(self, exe: str, term: str) -> None:
+        self.store.glossary_delete(exe, term)
+
+    def speakers(self, exe: str) -> list[str]:
+        return self.store.line_speakers(exe)
+
+    def get_last_read(self, exe: str) -> LastRead | None:
+        return self.last_read.get(exe.lower())
+
+    # ------------------------------------------------------------------ автозапуск и обновления
+    def autostart_supported(self) -> bool:
+        return autostart.supported()
+
+    def autostart_enabled(self) -> bool:
+        return autostart.enabled()
+
+    def set_autostart(self, on: bool) -> bool:
+        return autostart.set_enabled(on)
+
+    def check_updates(self, *, manual: bool = True) -> None:
+        if getattr(self, "_closing", False) or self.update.phase in ("checking", "downloading", "installing"):
+            return
+        self.update.phase = "checking"
+        self._update_changed()
+
+        def finished(rel: Any, err: BaseException | None) -> None:
+            if err is not None:
+                log.info("проверка обновлений упала: %s", err)
+            self.update.checked_at = time.time()
+            self.update.release = rel
+            self.update.phase = "available" if rel is not None else "latest"
+            self.update.error = None
+            self._update_changed()
+            if rel is not None and not manual and self.store.get_meta("update_told") != rel.version:
+                self.store.set_meta("update_told", rel.version)
+                self.tray.showMessage(
+                    "LexoPlay: есть новая версия",
+                    f"Вышла версия {rel.version}. Обновить можно из меню трея или во вкладке «Ещё», одним нажатием.",
+                    app_icon(),
+                    8000,
+                )
+
+        self.run_bg(updater.check(), finished)
+
+    def install_update(self) -> None:
+        rel = self.update.release
+        if rel is None or self.update.phase in ("downloading", "installing"):
+            return
+        if not updater.frozen():
+            QDesktopServices.openUrl(QUrl(rel.page))
+            return
+        self.update.phase = "downloading"
+        self.update.progress = 0
+        self._update_changed()
+
+        def progress(got: int, total: int) -> None:
+            pct = int(got * 100 / total) if total else 0
+            if pct != self.update.progress:
+                self.update.progress = pct
+                self.bridge.call.emit(self._update_changed)
+
+        def downloaded(path: Any, err: BaseException | None) -> None:
+            if err is not None:
+                self.update.phase = "error"
+                self.update.error = str(err) if isinstance(err, updater.UpdateError) else f"Не получилось скачать: {err}"
+                log.error("обновление не скачалось", exc_info=err)
+                self._update_changed()
+                return
+            self.update.phase = "installing"
+            self._update_changed()
+            try:
+                updater.install(path)
+            except updater.UpdateError as exc:
+                self.update.phase = "error"
+                self.update.error = str(exc)
+                self._update_changed()
+                return
+            self.qapp.quit()  # новый LexoPlay ждёт, пока этот выйдет
+
+        self.run_bg(updater.download(rel, progress), downloaded)
+
+    def _update_changed(self) -> None:
+        rel = self.update.release
+        if self.update.phase == "available" and rel is not None:
+            self._update_action.setText(f"Обновить до {rel.version}")
+            self._update_action.setVisible(True)
+        elif self.update.phase == "downloading":
+            self._update_action.setText(f"Скачиваю обновление… {self.update.progress}%")
+            self._update_action.setVisible(True)
+        else:
+            self._update_action.setVisible(self.update_required)
+            self._update_action.setText("Скачать новую версию")
+        if self.window is not None:
+            self.window.refresh_update()
+
     def settings_changed(self) -> None:
         self.settings.save()
         self._apply_overlay_settings()
@@ -450,6 +655,13 @@ class App(QObject):
         self._rebuild_translator()
         self._define_hotkeys()
         self._apply_hotkey_groups()
+        if not self.settings.auto_translate:
+            self.auto_live = False
+        self._auto_action.setChecked(self.settings.auto_translate)
+        if self.settings.check_updates and not self.update_timer.isActive():
+            self.update_timer.start()
+        elif not self.settings.check_updates:
+            self.update_timer.stop()
         self._update_tray()
 
     def pause_hotkeys(self, paused: bool) -> None:
@@ -557,9 +769,11 @@ class App(QObject):
     def _apply_overlay_settings(self) -> None:
         self.overlay.font_scale = self.settings.font_scale
         self.overlay.opacity = self.settings.strip_opacity
+        self.overlay.show_original = self.settings.show_original
         self.word_layer.font_scale = self.settings.font_scale
 
     def _rebuild_translator(self) -> None:
+        self.own_lookup = None
         if self.client.linked:
             self.translator = LexoTranslator(
                 self.client, on_usage=lambda u: self.bridge.call.emit(lambda: self._set_usage(u))
@@ -567,6 +781,7 @@ class App(QObject):
         else:
             key = get_api_key()
             self.translator = AnthropicTranslator(key, self.settings.model) if key else None
+            self.own_lookup = AnthropicLookup(key, self.settings.model) if key else None
         for p in self.pipelines.values():
             if self.translator:
                 p.translator = self.translator
@@ -603,10 +818,54 @@ class App(QObject):
             self.outbox.resume()
             self._rebuild_translator()
             self._check_account()
+            self._push_local_words()
             self._update_tray()
             done(None)
 
         self.run_bg(self.client.link(code, self._device_name()), finished)
+
+    def _push_local_words(self) -> None:
+        """Слова, сохранённые без Lexo, после привязки сами уходят в карточки."""
+        words = self.store.words_list(only_local=True)
+        if not words:
+            return
+        by_game: dict[str, list[SavedWord]] = {}
+        for w in reversed(words):  # от старых к новым
+            by_game.setdefault(w.exe or "", []).append(w)
+        for exe, items in by_game.items():
+            game = self.store.get_game(exe) if exe else None
+            title = game.title if game else (items[0].game or "Игра")
+            deck_mode = game.deck_mode if game else self.settings.deck
+            session_id = str(uuid.uuid4())
+            for w in items:
+                self.outbox.enqueue(
+                    "card",
+                    {
+                        "idempotency_key": f"local-word-{w.id}-{int(w.created_at)}",
+                        "session_id": session_id,
+                        "game": GameRef(title, exe).to_json(),
+                        "selection": w.selection[:80],
+                        "sentence": (w.sentence or w.selection)[:2000],
+                        "sentence_translation": w.sentence_translation,
+                        "lemma": (w.lemma or None) and w.lemma[:80],
+                        "translation": (w.translation or None) and w.translation[:200],
+                        "marked_translation": None,
+                        "deck": "current" if deck_mode == "current" else "game",
+                        "deck_id": game.deck_id if game and deck_mode == "deck" else None,
+                    },
+                )
+            self.outbox.enqueue(
+                "end",
+                {
+                    "session_id": session_id,
+                    "duration_s": 0,
+                    "lines_count": 0,
+                    "ended_at": datetime.now(UTC).isoformat(),
+                },
+            )
+        self.store.words_mark_lexo([w.id for w in words])
+        log.info("слова без Lexo отправлены в очередь: %s", len(words))
+        self.tray.showMessage("LexoPlay", f"Слова, сохранённые до привязки ({len(words)}), отправляются в Lexo.", app_icon(), 5000)
 
     def unlink(self, done: Callable[[], None]) -> None:
         def finished(_r: Any, err: BaseException | None) -> None:
@@ -705,6 +964,7 @@ class App(QObject):
             if not self.update_required:
                 self.update_required = True
                 self.tray.showMessage("LexoPlay", err.message, QSystemTrayIcon.MessageIcon.Warning, 8000)
+                self.check_updates(manual=True)  # сразу найти новую версию: обновится одним нажатием
             self.overlay.toast(err.message, 4000)
             self._update_tray()
         elif err.code == "server_outdated":
@@ -762,6 +1022,12 @@ class App(QObject):
             text = "LexoPlay: игра не открыта"
         if self.client.linked and self.usage:
             text += f"\nПереводов сегодня: {self.usage.used} из {self.usage.limit}"
+        elif not self.client.linked and self.translator is not None:
+            day = self.own_usage.today()
+            if day.lines or day.words:
+                text += f"\nСвоим ключом сегодня: реплик {day.lines}, слов {day.words}"
+        if self.settings.auto_translate:
+            text += "\nАвтоперевод включён"
         return text[:127]
 
     def _build_tray(self) -> QSystemTrayIcon:
@@ -788,8 +1054,13 @@ class App(QObject):
         self._failed_action.triggered.connect(self.outbox.retry_failed)
         self._failed_action.setVisible(False)
         menu.addAction(self._failed_action)
+        self._auto_action = QAction("Автоперевод реплик", menu)
+        self._auto_action.setCheckable(True)
+        self._auto_action.setChecked(self.settings.auto_translate)
+        self._auto_action.toggled.connect(self._toggle_auto)
+        menu.addAction(self._auto_action)
         self._update_action = QAction("Скачать новую версию", menu)
-        self._update_action.triggered.connect(lambda: QDesktopServices.openUrl(QUrl(RELEASES_URL)))
+        self._update_action.triggered.connect(self._update_clicked)
         self._update_action.setVisible(False)
         menu.addAction(self._update_action)
         menu.addSeparator()
@@ -799,6 +1070,20 @@ class App(QObject):
         tray.activated.connect(self._on_tray)
         self._menu = menu
         return tray
+
+    def _toggle_auto(self, on: bool) -> None:
+        if self.settings.auto_translate == on:
+            return
+        self.settings.auto_translate = on
+        self.settings_changed()
+        if self.window is not None:
+            self.window.refresh_settings()
+
+    def _update_clicked(self) -> None:
+        if self.update.release is not None:
+            self.install_update()
+        else:
+            QDesktopServices.openUrl(QUrl(RELEASES_URL))
 
     def _on_tray(self, reason: QSystemTrayIcon.ActivationReason) -> None:
         if reason in (QSystemTrayIcon.ActivationReason.Trigger, QSystemTrayIcon.ActivationReason.DoubleClick):
@@ -813,10 +1098,10 @@ class App(QObject):
             self._lexo_action.setText("Привязать ПК к Lexo…")
         pending, failed = self.outbox.counts()
         self._queue_action.setText(f"В очереди на отправку: {pending}")
-        self._queue_action.setVisible(pending > 0)
         self._failed_action.setText(f"Не отправлено: {failed}. Повторить")
-        self._failed_action.setVisible(failed > 0)
-        self._update_action.setVisible(self.update_required)
+        self._failed_action.setVisible(failed > 0 and self.client.linked)
+        self._queue_action.setVisible(pending > 0 and self.client.linked)
+        self._update_action.setVisible(self.update_required or self.update.phase in ("available", "downloading"))
         self.tray.setToolTip(self._tooltip())
 
     def _set_status(self) -> None:
@@ -1046,10 +1331,24 @@ class App(QObject):
                 source_lang=self.settings.source_lang,
                 context_size=self.settings.context_lines,
                 debug=self.dump if self.settings.debug else None,
+                cache=self.cache,
             )
             self.pipelines[exe] = p
         p._debug = self.dump if self.settings.debug else None  # noqa: SLF001
         return p
+
+    def _target(self, game: Game, session_id: str = "") -> Target:
+        assert game.region is not None
+        mode = game.ocr_mode or ("pixel" if game.binarize else None)
+        return Target(
+            game.title,
+            game.region,
+            game.name_region,
+            ocr_mode=mode,
+            game_exe=game.exe,
+            session_id=session_id,
+            glossary=self.store.glossary(game.exe),
+        )
 
     def _make_grab(self, active: Active, game: Game, display: Rect):  # type: ignore[no-untyped-def]
         hwnd, store, exe = active.hwnd, self.store, game.exe
@@ -1084,15 +1383,15 @@ class App(QObject):
 
         return grab
 
-    def f2(self) -> None:
+    def f2(self, *, auto: bool = False) -> None:
         if self.state != "idle" or not self.active:
             return
-        if self.overlay.strip_visible:
+        if self.overlay.strip_visible and not auto:
             if self.watcher is None or not self.watcher.acted:
-                self._hide_strip()  # ничего не нажимал: F2 просто прячет перевод
+                self._hide_strip()  # ничего не нажимал: F2 просто прячет перевод (и останавливает автоперевод)
                 return
             # игрок что-то нажимал, а перевод ещё висит: возможно, реплика уже другая
-            self._hide_strip()
+            self._hide_strip(keep_auto=True)
         game = self.store.get_game(self.active.exe)
         if game is None:
             return
@@ -1105,7 +1404,7 @@ class App(QObject):
             return
         pipeline = self._pipeline(game.exe)
         if pipeline is None:
-            self.overlay.toast("Перевод не настроен: открой LexoPlay из трея и привяжи Lexo", 3500)
+            self.overlay.toast("Перевод не настроен: открой LexoPlay из трея и привяжи Lexo или вставь свой ключ", 3500)
             return
         display = self._sync_geometry()
         if display is None:
@@ -1115,25 +1414,53 @@ class App(QObject):
         self.token += 1
         token = self.token
         self.watch_timer.stop()
+        self.watcher = None
+        # клик, пока идёт перевод, тоже считается: реплика могла смениться раньше, чем пришёл перевод
+        self._busy_since = time.monotonic()
+        self.input.start()
         self.overlay.show_busy(game.region)
         self.geom_timer.start()
         if self.settings.debug:
             self.dump.new_shot()
-        target = Target(game.title, game.region, game.name_region, game.binarize, game.exe, session.id)
+        target = self._target(game, session.id)
         region = game.region
 
         def partial(text: str, t: int = token) -> None:
             # из фонового потока: перевод дописывается, показываем как есть
             self.bridge.call.emit(lambda: self._show_partial(t, region, text))
 
-        fut = self.bg.submit(pipeline.run(self._make_grab(self.active, game, display), target, on_partial=partial))
-        fut.add_done_callback(lambda f, t=token: self.bridge.f2_done.emit(f, t))
+        coro = pipeline.run(
+            self._make_grab(self.active, game, display),
+            target,
+            on_partial=partial,
+            settle=AUTO_SETTLE_S if auto else None,
+        )
+        fut = self.bg.submit(coro)
+        fut.add_done_callback(lambda f, t=token, a=auto: self.bridge.f2_done.emit(f, (t, a)))
 
     def _show_partial(self, token: int, region: Rect, text: str) -> None:
         if token == self.token and self.state == "busy" and text:
             self.overlay.show_text(region, text)
 
-    def _on_f2_done(self, fut: concurrent.futures.Future, token: int) -> None:
+    def _remember_reading(
+        self,
+        game: Game,
+        mode: str | None,
+        quality: Quality | None,
+        preview: Image.Image | None,
+        text: str,
+    ) -> None:
+        """Как прочитали окно диалога: для вкладки «Игры» и чтобы в следующий раз читать сразу так же."""
+        if preview is not None and mode:
+            self.last_read[game.exe] = LastRead(preview, text, mode, quality, time.time())
+        if mode and quality is not None and mode != game.ocr_mode and quality.ratio >= 0.6:
+            log.info("%s: OCR читает лучше способом %s (%s)", game.exe, mode, quality)
+            self.store.save_game(game.with_(ocr_mode=mode, binarize=False))
+        if self.window is not None:
+            self.window.refresh_games()
+
+    def _on_f2_done(self, fut: concurrent.futures.Future, info: tuple[int, bool]) -> None:
+        token, auto = info
         if token != self.token:
             return
         self.state = "idle"
@@ -1144,23 +1471,49 @@ class App(QObject):
             self._hide_strip()
             self.overlay.toast(f"Ошибка: {exc}")
             return
-        log.info("F2 %s %s %s", out.kind, out.code or "", {k: round(v, 3) for k, v in out.timings.items()})
+        log.info(
+            "F2 %s%s %s %s %s",
+            out.kind,
+            " (кеш)" if out.cached else "",
+            out.code or "",
+            out.ocr_mode or "",
+            {k: round(v, 3) for k, v in out.timings.items()},
+        )
         if not self._game_in_focus() or not self.active:
             self._hide_strip()
             return
         game = self.store.get_game(self.active.exe)
+        if game is not None:
+            text = out.utterance.text if out.utterance else ""
+            self._remember_reading(game, out.ocr_mode, out.quality, out.preview, text)
+        own = isinstance(self.translator, AnthropicTranslator)
         if out.kind in ("translated", "repeat") and out.record and game and game.region:
-            if out.kind == "translated":
+            if out.kind == "translated" or out.cached:
                 self.sessions.line_translated(game.exe)
+            if own and out.kind == "translated":
+                self.own_usage.add("line", out.usage)
+            elif own and out.cached:
+                self.own_usage.add("cached")
             if out.ocr is not None:
                 self.current = CurrentLine(game.exe, out.ocr, out.utterance, out.record, time.time(), out.thumb)
-            self.overlay.show_text(game.region, out.record.translation)
-            self._watch_line(out.utterance.text if out.utterance else out.record.source, out.thumb)
+            source = out.utterance.text if out.utterance else out.record.source
+            self.overlay.show_text(game.region, out.record.translation, original=source)
+            self._watch_line(source, out.thumb)
+            if self.settings.auto_translate:
+                self.auto_live = True
+                if not self._auto_hint:
+                    self._auto_hint = True
+                    hk = self.settings.hotkeys
+                    self.overlay.toast(f"Автоперевод: следующие реплики переведутся сами. {hk.hide} остановит", 4000)
         elif out.kind == "no_text":
-            self._hide_strip()
-            self.overlay.toast(f"Текст не найден. {self.settings.hotkeys.reselect}, чтобы выделить окно диалога заново")
+            self._hide_strip(keep_auto=auto)
+            if auto and self.auto_live:
+                self._watch_wait("", out.thumb)  # реплика ещё не появилась: ждём дальше
+            else:
+                self.overlay.toast(f"Текст не найден. {self.settings.hotkeys.reselect}, чтобы выделить окно диалога заново")
         elif out.code == "limit_reached" and game and game.region:
             # строка на месте перевода: видно, почему перевода нет; F3 при этом работает
+            self.auto_live = False
             if out.ocr is not None:
                 self.current = CurrentLine(game.exe, out.ocr, out.utterance, None, time.time(), out.thumb)
             self.overlay.show_text(game.region, out.message or "Лимит переводов на сегодня закончился.")
@@ -1172,7 +1525,7 @@ class App(QObject):
             self._hide_strip()
             self._on_lexo_error(LexoError(426, "update_required", out.message or "Вышла новая версия LexoPlay."))
         else:
-            self._hide_strip()
+            self._hide_strip()  # ошибка: автоперевод тоже останавливаем, чтобы не биться в неё на каждой реплике
             if out.code == "offline":
                 self.lexo_offline = True
                 self._update_tray()
@@ -1180,10 +1533,12 @@ class App(QObject):
                 self.server_note = out.message or ""
             self.overlay.toast(out.message or "Не получилось перевести", 4000)
 
-    def _hide_strip(self) -> None:
+    def _hide_strip(self, *, keep_auto: bool = False) -> None:
         if self.state == "busy":
             self.token += 1  # результат пришедшего позже запроса не показываем
             self.state = "idle"
+        if not keep_auto:
+            self.auto_live = False
         self.overlay.hide_strip()
         if not self.word_layer.is_open:
             self._stop_watch()
@@ -1196,6 +1551,18 @@ class App(QObject):
             return
         gated = self.input.start()  # не включился Raw Input: следим без него, как раньше
         self.watcher = LineWatcher(text, thumb, gated=gated)
+        if self._last_input > self._busy_since:
+            self.watcher.arm()  # игрок кликнул, пока шёл перевод: сразу проверить, та ли ещё реплика
+        self.watch_timer.start()
+
+    def _watch_wait(self, last_text: str, thumb: Image.Image | None) -> None:
+        """Автоперевод: перевода на экране нет, ждём, когда в окне диалога появится новая реплика."""
+        if thumb is None or not self.auto_live:
+            return
+        gated = self.input.start()
+        self.watcher = LineWatcher(last_text, thumb, gated=gated, waiting=True)
+        if self._last_input > self._busy_since:
+            self.watcher.arm()
         self.watch_timer.start()
 
     def _stop_watch(self) -> None:
@@ -1204,38 +1571,39 @@ class App(QObject):
         self.input.stop()
 
     def _on_user_input(self) -> None:
+        self._last_input = time.monotonic()
         if self.watcher is not None:
             self.watcher.arm()
 
     def _watch_tick(self) -> None:
-        watching = self.overlay.strip_visible or self.word_layer.is_open
         watcher = self.watcher
+        watching = self.overlay.strip_visible or self.word_layer.is_open or bool(watcher and watcher.waiting)
         if not watching or watcher is None or self.state != "idle" or self._watch_pending or not self.active:
             return
         game = self.store.get_game(self.active.exe)
         if not game or not game.region or self.display is None:
             return
         grab = self._make_grab(self.active, game, self.display)
-        target = Target(game.title, game.region, game.name_region, game.binarize)
+        target = self._target(game)
         pipeline = self._pipeline(game.exe)
 
-        async def check() -> bool:
+        async def check() -> tuple[str | None, Image.Image | None]:
             img = await asyncio.to_thread(grab)
             thumb = thumbnail(img, target.region)
             if not watcher.needs_ocr(thumb):
-                return False
+                return None, None
             if pipeline is None:
-                return True  # перечитать текст нечем: как раньше, по пикселям
-            result, name_text = await pipeline.recognize(img, target)
-            text = to_utterance(result, name_text).text
-            gone = watcher.line_changed(text, thumb)
+                return "gone", thumb  # перечитать текст нечем: как раньше, по пикселям
+            reading = await pipeline.recognize(img, target, explore=False)
+            text = to_utterance(reading.result, reading.name_text).text
+            verdict = watcher.check(text, thumb)
             log.debug("проверка реплики: похожесть %s, %r", watcher.last_score, text[:80])
-            if gone:
+            if verdict:
                 log.info(
-                    "реплика сменилась: было %r, стало %r (похожесть %s, проверок %s)",
-                    watcher.norm[:60], text[:60], watcher.last_score, watcher.checks,
+                    "реплика %s: было %r, стало %r (похожесть %s, проверок %s)",
+                    verdict, watcher.norm[:60], text[:60], watcher.last_score, watcher.checks,
                 )
-            return gone
+            return verdict, thumb
 
         self._watch_pending = True
         fut = self.bg.submit(check())
@@ -1246,13 +1614,25 @@ class App(QObject):
         if token != self.token:
             return
         try:
-            if fut.result():
-                # реплика сменилась (игрок кликнул в игру): старый перевод и подчёркивания убираем
-                self._close_words("changed")
-                self._hide_strip()
-                self.current = None
+            verdict, thumb = fut.result()
         except Exception:
             log.debug("проверка смены реплики не удалась", exc_info=True)
+            return
+        if not verdict:
+            return
+        last = self.watcher.norm if self.watcher else ""
+        auto = self.auto_live and self.settings.auto_translate and self._game_in_focus()
+        # реплика сменилась (игрок кликнул в игру): старый перевод и подчёркивания убираем
+        self._close_words("changed")
+        self.current = None
+        if auto and verdict == "new":
+            self._hide_strip(keep_auto=True)
+            self.f2(auto=True)
+        elif auto:
+            self._hide_strip(keep_auto=True)
+            self._watch_wait(last, thumb)
+        else:
+            self._hide_strip()
 
     # ------------------------------------------------------------------ F3: слова в Lexo
     def _close_words(self, reason: str) -> None:
@@ -1268,8 +1648,8 @@ class App(QObject):
         if game.region is None:
             self.open_picker()
             return
-        if not self.client.linked:
-            self.overlay.toast("Слова сохраняются в Lexo: открой LexoPlay из трея и привяжи ПК", 3500)
+        if not self.client.linked and self.own_lookup is None:
+            self.overlay.toast("Для слов привяжи ПК к Lexo или вставь свой ключ Anthropic: окно LexoPlay → «Ещё»", 4000)
             return
         if self.ocr_error:
             self.overlay.toast("Нет английского OCR в Windows. Подробности в трее.")
@@ -1295,7 +1675,7 @@ class App(QObject):
         token = self.token
         self.watch_timer.stop()
         self.overlay.show_busy(game.region)
-        target = Target(game.title, game.region, game.name_region, game.binarize, game.exe, session.id)
+        target = self._target(game, session.id)
         grab = self._make_grab(self.active, game, display)
 
         def finished(out: Any, err: BaseException | None) -> None:
@@ -1310,6 +1690,11 @@ class App(QObject):
             scan: ScanOutcome = out
             if not self._game_in_focus() or not self.active:
                 return
+            g0 = self.store.get_game(game.exe)
+            if g0 is not None:
+                self._remember_reading(
+                    g0, scan.ocr_mode, scan.quality, scan.preview, scan.utterance.text if scan.utterance else ""
+                )
             if not scan.ok or scan.ocr is None:
                 hint = f"Текст не найден. {self.settings.hotkeys.reselect}, чтобы выделить окно диалога заново"
                 self.overlay.toast(scan.message or hint)
@@ -1329,7 +1714,10 @@ class App(QObject):
         views = build_views(line.ocr, self.vocab.known)
         self.word_ctx = WordCtx(game.exe, game.title, session.id, line, views)
         self.word_layer.font_scale = self.settings.font_scale
-        self.word_layer.deck_label = game.deck_label
+        if self.client.linked:
+            self.word_layer.deck_label = f"Колода {game.deck_label}"
+        else:
+            self.word_layer.deck_label = "Сохранится во вкладку «Слова» в LexoPlay"
         self.word_layer.open(self.display, game.region, views, strip=self.overlay.strip_rect())
         self.hotkeys.set_group("words", not self._hotkeys_paused)
         if self.watcher is None:
@@ -1341,7 +1729,32 @@ class App(QObject):
         self.word_layer.set_card(card)
 
     def _card_from(self, sense: Sense) -> CardState:
-        return CardState("ready", sense.lemma, sense.ipa, sense.pos, list(sense.senses), in_deck=sense.in_deck)
+        return CardState(
+            "ready", sense.lemma, sense.ipa, sense.pos, list(sense.senses), in_deck=sense.in_deck, local=not self.client.linked
+        )
+
+    async def _lookup(self, ctx: WordCtx, selection: str) -> Sense:
+        """Значение слова: через Lexo, а без привязки своим ключом."""
+        translation = ctx.line.record.translation if ctx.line.record else None
+        if self.client.linked or self.own_lookup is None:
+            return await self.client.lookup(
+                session_id=ctx.session_id,
+                game=GameRef(ctx.title, ctx.exe),
+                selection=selection,
+                sentence=ctx.line.sentence,
+                sentence_translation=translation,
+            )
+        lookup = self.own_lookup
+        sense = await lookup.lookup(
+            selection=selection,
+            sentence=ctx.line.sentence,
+            sentence_translation=translation,
+            target_lang=self.settings.target_lang,
+            source_lang=self.settings.source_lang,
+        )
+        known = self.vocab.known(sense.lemma) or self.vocab.known(selection)
+        self.own_usage.add("word", lookup.last_usage)
+        return Sense(sense.lemma, sense.pos, sense.ipa, list(sense.senses), sense.marked_translation, in_deck=known)
 
     def _on_word_selected(self, indices: list) -> None:
         ctx = self.word_ctx
@@ -1359,14 +1772,9 @@ class App(QObject):
             ctx.sense = cached
             self._set_card(self._card_from(cached))
             return
-        self._set_card(CardState("loading", selection))
-        coro = self.client.lookup(
-            session_id=ctx.session_id,
-            game=GameRef(ctx.title, ctx.exe),
-            selection=selection,
-            sentence=ctx.line.sentence,
-            sentence_translation=ctx.line.record.translation if ctx.line.record else None,
-        )
+        local = not self.client.linked
+        self._set_card(CardState("loading", selection, local=local))
+        coro = self._lookup(ctx, selection)
 
         def finished(sense: Any, err: BaseException | None) -> None:
             if self.word_ctx is not ctx or ctx.seq != seq:
@@ -1385,6 +1793,9 @@ class App(QObject):
                 self._on_lexo_error(err)
             elif isinstance(err, LexoError):
                 self._set_card(CardState("error", selection, note=err.message))
+            elif isinstance(err, TranslationError):
+                note = str(err) + " Слово можно сохранить и без перевода."
+                self._set_card(CardState("error", selection, note=note, local=local))
             else:
                 log.error("lookup упал", exc_info=err)
                 self._set_card(CardState("error", selection, note="Не получилось найти значение."))
@@ -1399,6 +1810,25 @@ class App(QObject):
         record = ctx.line.record
         game = self.store.get_game(ctx.exe)
         deck_mode = game.deck_mode if game else self.settings.deck
+        linked = self.client.linked
+        self.store.word_add(
+            SavedWord(
+                exe=ctx.exe,
+                game=ctx.title,
+                selection=ctx.selection[:80],
+                lemma=sense.lemma[:80] if sense else None,
+                translation=sense.translation[:200] if sense and sense.translation else None,
+                ipa=sense.ipa if sense else None,
+                pos=sense.pos if sense else None,
+                sentence=ctx.line.sentence[:2000],
+                sentence_translation=record.translation if record else None,
+                created_at=time.time(),
+                lexo=linked,
+            )
+        )
+        if not linked:
+            self._word_saved_locally(ctx, sense)
+            return
         payload = {
             "idempotency_key": str(uuid.uuid4()),
             "session_id": ctx.session_id,
@@ -1433,6 +1863,27 @@ class App(QObject):
         ctx.views = build_views(ctx.line.ocr, self.vocab.known)
         self.word_layer.set_views(ctx.views)
         self.overlay.toast(f"{word}: сохранено в Lexo")
+
+    def _word_saved_locally(self, ctx: WordCtx, sense: Sense | None) -> None:
+        word = sense.lemma if sense else ctx.selection
+        self.vocab.add(word)
+        self.sessions.word_added(ctx.exe)
+        card = ctx.card
+        assert card is not None
+        self._set_card(
+            CardState(
+                "saved",
+                card.title,
+                card.ipa,
+                card.pos,
+                list(card.senses),
+                note="Сохранено во вкладку «Слова». После привязки к Lexo уйдёт в карточки само",
+                local=True,
+            )
+        )
+        ctx.views = build_views(ctx.line.ocr, self.vocab.known)
+        self.word_layer.set_views(ctx.views)
+        self.overlay.toast(f"{word}: сохранено в «Слова»")
 
     def _on_words_finished(self, reason: str) -> None:
         self.word_ctx = None

@@ -36,14 +36,18 @@ LANGS = {
     "pl": "Polish",
 }
 
-SYSTEM_PROMPT = """You translate dialogue from a video game into {target}.
-Game: {game}. Keep the speaker's tone, slang and politeness level.
-The line was read from the screen by OCR. It may contain recognition errors (l/I, 0/O, rn/m,
-missing spaces, stray symbols) and may be in ALL CAPS because of a pixel font: read it the way
-the game meant it and use normal sentence case in the translation.
-Earlier lines are only context. Translate only the line after "Translate:".
-Reply with the translation and nothing else: no quotes, no notes, no original text, no speaker name.
-Use the glossary for names and terms.
+SYSTEM_PROMPT = """You are the localizer of the video game "{game}". The player reads its dialogue in {target}: you translate it line by line while they play.
+
+How to translate a line:
+- Translate it as the game says it, in the same grammatical person and voice. "I" stays "I", "you" stays "you", "we" stays "we". Never retell or describe the line (no "he says that...", "she asks..."), never talk to the player, never add the speaker's name.
+- A line with a speaker is that character's own words: direct speech, first person when the original is first person. A line without a speaker is narration, a thought, a sign or a menu: translate it as it is.
+- Make it sound like natural {target} dialogue written for this game, not a word-for-word gloss. Keep each character's voice: slang, rudeness, jokes, hesitation, politeness.
+- Stay consistent with the earlier translations: the same form of address between the same characters (ты/вы and the like), the same genders for characters and for the player, the same names and terms. The glossary wins over everything.
+- The text was read from the screen by OCR: silently fix recognition errors (l/I, 0/O, rn/m, missing spaces, stray symbols). ALL CAPS is just the game's font: use normal capitalization.
+- If the speaker label looks like a piece of the sentence rather than a name, treat it as part of the line.
+- If a line is cut off, translate what is there without inventing the rest.
+
+Reply with the translation of the line after "Translate this line" and nothing else: no quotes, no notes, no original text, no speaker name.
 Never use the em dash character; use a comma, a colon or a new sentence instead."""
 
 MAX_TOKENS = 1024
@@ -91,6 +95,7 @@ class TranslateRequest:
 class TranslateResult:
     source: str
     translation: str
+    usage: tuple[int, int] | None = None  # токены своего ключа (вход, выход): для счётчика расходов
 
 
 class Translator(Protocol):
@@ -105,19 +110,33 @@ def build_system(req: TranslateRequest) -> str:
     return SYSTEM_PROMPT.format(target=lang_name(req.target_lang), game=req.game or "unknown")
 
 
-def _speaker(s: str | None) -> str:
-    return f"{s}: " if s else ""
+def _attr(value: str) -> str:
+    return value.replace("&", "&amp;").replace('"', "'").replace("<", "‹").replace(">", "›")
+
+
+def _line(speaker: str | None, text: str) -> str:
+    who = f' speaker="{_attr(speaker)}"' if speaker else ""
+    return f"<line{who}>{text}</line>"
 
 
 def build_user(req: TranslateRequest) -> str:
+    """Глоссарий, прошлые реплики с их переводами (от старых к новым) и сама реплика.
+
+    Прошлые реплики не только для понимания сцены: по ним модель держит те же имена,
+    пол персонажей и «ты/вы», что уже звучали в переводе."""
     parts = []
     if req.glossary:
-        parts.append(f"Glossary: {json.dumps(req.glossary, ensure_ascii=False)}")
+        parts.append("<glossary>")
+        parts += [f"{k} => {v}" for k, v in req.glossary.items()]
+        parts.append("</glossary>")
     if req.context:
-        parts.append("Earlier lines (oldest first, original => translation):")
-        parts += [f"{_speaker(c.speaker)}{c.source} => {c.translation}" for c in req.context]
-    parts.append("Translate:")
-    parts.append(f"{_speaker(req.speaker)}{req.text}")
+        parts.append("<earlier_lines>")
+        for c in req.context:
+            parts.append(_line(c.speaker, c.source))
+            parts.append(f"<translation>{c.translation}</translation>")
+        parts.append("</earlier_lines>")
+    parts.append("Translate this line:")
+    parts.append(_line(req.speaker, req.text))
     return "\n".join(parts)
 
 
@@ -130,11 +149,16 @@ _QUOTES = "\"'«»“”„`"
 _LABEL = re.compile(r"^(translation|перевод)\s*:\s*", re.I)
 
 
+_TAG = re.compile(r"</?(?:translation|line)[^>]*>", re.I)
+
+
 def clean_translation(text: str, speaker: str | None = None, *, partial: bool = False) -> str:
     """Ответ модели → строка для показа: без кавычек, подписи «Перевод:», имени говорящего.
 
-    Если модель по привычке всё же ответила JSON, достаём из него перевод."""
-    t = text.strip()
+    Если модель по привычке всё же ответила JSON или обернула ответ в теги, достаём перевод."""
+    t = _TAG.sub("", text).strip()
+    if partial and t.startswith("<") and ">" not in t:
+        return ""  # тег дописывается
     if t.startswith("```"):
         t = t.strip("`").strip()
         if t.lower().startswith("json"):
@@ -210,7 +234,7 @@ class AnthropicTranslator:
         except Exception:
             log.debug("прогрев соединения не удался", exc_info=True)
 
-    async def _stream(self, req: TranslateRequest) -> tuple[str, str | None]:
+    async def _stream(self, req: TranslateRequest) -> tuple[str, str | None, tuple[int, int] | None]:
         buf = ""
         shown = ""
         async with self._client.messages.stream(**self._params(req)) as stream:
@@ -226,40 +250,24 @@ class AnthropicTranslator:
                             log.debug("on_partial упал", exc_info=True)
             final = await stream.get_final_message()
         self._last_used = time.monotonic()
-        return buf, getattr(final, "stop_reason", None)
+        return buf, getattr(final, "stop_reason", None), usage_of(final)
 
     async def translate(self, req: TranslateRequest) -> TranslateResult:
         a = self._anthropic
         for _attempt in range(3):
             try:
-                raw, stop = await self._stream(req)
-            except a.AuthenticationError as exc:
-                raise TranslationError("Ключ Anthropic не подходит. Проверь его в настройках.", "bad_key") from exc
-            except a.PermissionDeniedError as exc:
-                raise TranslationError("У ключа Anthropic нет доступа к этой модели.", "bad_key") from exc
-            except a.RateLimitError as exc:
-                raise TranslationError("Слишком много запросов. Подожди немного.") from exc
-            except a.APITimeoutError as exc:
-                raise TranslationError("Не успел перевести, попробуй ещё раз.", "offline") from exc
-            except a.APIConnectionError as exc:
-                raise TranslationError("Нет связи с сервером перевода.", "offline") from exc
-            except a.NotFoundError as exc:
-                raise TranslationError(f"Модель {self._model} не найдена. Поменяй её в настройках.") from exc
+                raw, stop, usage = await self._stream(req)
             except a.BadRequestError as exc:
                 if self._thinking_off and "thinking" in str(exc).lower():
                     log.info("модель не даёт выключить thinking, перехожу на effort=low: %s", exc)
                     self._thinking_off = False
                     continue
-                log.warning("Anthropic 400: %s", exc)
-                raise TranslationError(f"Сервер перевода отклонил запрос: {_short(exc)}") from exc
-            except a.APIStatusError as exc:
-                raise TranslationError(f"Сервер перевода ответил ошибкой {exc.status_code}.") from exc
-            except Exception as exc:  # несовместимый SDK и прочее: не показывать игроку трейсбек
-                log.exception("перевод упал")
-                raise TranslationError("Перевод не получился, подробности в логе.") from exc
+                raise friendly_error(a, exc, self._model) from exc
+            except Exception as exc:
+                raise friendly_error(a, exc, self._model) from exc
             translation = clean_translation(raw, req.speaker)
             if translation:
-                return TranslateResult(source=req.text, translation=translation)
+                return TranslateResult(source=req.text, translation=translation, usage=usage)
             if stop == "refusal":
                 raise TranslationError("Модель отказалась переводить эту реплику.")
             log.warning("пустой перевод: stop_reason=%s, ответ=%r", stop, raw[:200])
@@ -269,6 +277,72 @@ class AnthropicTranslator:
 def _short(exc: Exception) -> str:
     msg = getattr(exc, "message", None) or str(exc)
     return str(msg)[:160]
+
+
+def usage_of(message: object) -> tuple[int, int] | None:
+    u = getattr(message, "usage", None)
+    if u is None:
+        return None
+    try:
+        return int(getattr(u, "input_tokens", 0) or 0), int(getattr(u, "output_tokens", 0) or 0)
+    except (TypeError, ValueError):
+        return None
+
+
+def friendly_error(a, exc: BaseException, model: str) -> TranslationError:  # type: ignore[no-untyped-def]
+    """Ошибка SDK Anthropic → понятный текст для игрока."""
+    if isinstance(exc, TranslationError):
+        return exc
+    if isinstance(exc, a.AuthenticationError):
+        return TranslationError("Ключ Anthropic не подходит. Проверь его во вкладке «Ещё».", "bad_key")
+    if isinstance(exc, a.PermissionDeniedError):
+        return TranslationError("У ключа Anthropic нет доступа к этой модели.", "bad_key")
+    if isinstance(exc, a.RateLimitError):
+        return TranslationError("Слишком много запросов. Подожди немного.")
+    if isinstance(exc, a.APITimeoutError):
+        return TranslationError("Не успел перевести, попробуй ещё раз.", "offline")
+    if isinstance(exc, a.APIConnectionError):
+        return TranslationError("Нет связи с сервером перевода.", "offline")
+    if isinstance(exc, a.NotFoundError):
+        return TranslationError(f"Модель {model} не найдена. Поменяй её во вкладке «Ещё».")
+    if isinstance(exc, a.BadRequestError):
+        text = str(exc).lower()
+        if "credit balance" in text or "billing" in text:
+            return TranslationError("На счету Anthropic закончились деньги: пополни баланс в console.anthropic.com.", "no_credit")
+        log.warning("Anthropic 400: %s", exc)
+        return TranslationError(f"Сервер перевода отклонил запрос: {_short(exc)}")
+    if isinstance(exc, a.APIStatusError):
+        if getattr(exc, "status_code", 0) == 529:
+            return TranslationError("Серверы Anthropic перегружены, попробуй через минуту.", "offline")
+        return TranslationError(f"Сервер перевода ответил ошибкой {exc.status_code}.")
+    log.error("перевод упал", exc_info=exc)  # несовместимый SDK и прочее: не показывать трейсбек
+    return TranslationError("Перевод не получился, подробности в логе.")
+
+
+async def check_key(api_key: str, model: str, *, timeout: float = 15.0) -> str:
+    """Проверить ключ и модель крошечным запросом (пара токенов). Ошибка → TranslationError."""
+    import anthropic
+
+    client = anthropic.AsyncAnthropic(api_key=api_key, timeout=timeout, max_retries=0)
+    params: dict = {
+        "model": model,
+        "max_tokens": 16,
+        "messages": [{"role": "user", "content": "Reply with: ok"}],
+        "thinking": {"type": "disabled"},
+    }
+    try:
+        try:
+            await client.messages.create(**params)
+        except anthropic.BadRequestError as exc:
+            if "thinking" not in str(exc).lower():
+                raise
+            params.pop("thinking")
+            await client.messages.create(**params)
+    except Exception as exc:
+        raise friendly_error(anthropic, exc, model) from exc
+    finally:
+        await client.close()
+    return model
 
 
 class LexoTranslator:
@@ -292,6 +366,7 @@ class LexoTranslator:
                 text=req.text,
                 speaker=req.speaker,
                 context=[{"speaker": c.speaker, "source": c.source, "translation": c.translation} for c in req.context],
+                glossary=req.glossary or None,
             )
         except LexoOffline as exc:
             msg = "Не успел перевести, попробуй ещё раз." if str(exc) == "timeout" else "Нет связи с Lexo."

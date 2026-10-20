@@ -60,7 +60,7 @@ HOTKEY_LABELS = {
     "add_game": ("Добавить текущее окно как игру", "Работает в любой программе, поэтому по умолчанию выключено"),
 }
 
-SETTINGS_VERSION = 3
+SETTINGS_VERSION = 4
 
 
 @dataclass
@@ -73,8 +73,11 @@ class Settings:
     magpie_mode: str = "auto"  # auto | always | never
     font_scale: float = 1.0
     strip_opacity: float = 0.84
-    context_lines: int = 8
+    context_lines: int = 12  # сколько прошлых реплик видит модель: имена, пол, «ты/вы»
     debug: bool = False
+    auto_translate: bool = False  # после пропуска реплики следующая переводится сама
+    show_original: bool = False  # английский оригинал мелко над переводом
+    check_updates: bool = True
     hotkeys: Hotkeys = field(default_factory=Hotkeys)
     version: int = SETTINGS_VERSION
 
@@ -102,6 +105,8 @@ class Settings:
                 hk.reselect = "F6"
             if hk.add_game.replace(" ", "").lower() == "ctrl+shift+f2":
                 hk.add_game = ""
+        if int(raw.get("version") or 1) < 4 and data.get("context_lines") == 8:
+            data["context_lines"] = 12  # 0.4: больше контекста, перевод ровнее
         return cls(**data, hotkeys=hk)
 
     def save(self) -> None:
