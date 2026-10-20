@@ -587,10 +587,11 @@ def _own_key_flow(out_dir: Path) -> Callable[[], tuple[str, object]]:
                 calls.append(("anthropic-explain", kw))
                 return Explanation(
                     (
-                        ExplainItem("feels eerie", "кажется жутким", "feel + прилагательное: «ощущается каким-то»"),
+                        ExplainItem("feels eerie", "кажется жутким", "feel + прилагательное: «ощущается каким-то»", "feel eerie"),
                         ExplainItem("after dark", "после наступления темноты", "устойчивое выражение"),
                     ),
-                    "Тревожный, тихий тон.",
+                    "Героиня признаётся, что ей не по себе: днём место обычное, а с темнотой становится жутким.",
+                    "Это место ощущается жутким после темноты.",
                 )
 
         def pump(cond: Callable[[], bool], seconds: float = 5.0) -> bool:
@@ -1008,6 +1009,89 @@ def _qt_checks(out_dir: Path) -> None:
         return ("ok" if ok else "warn"), info
 
     _check("raw_input_player_actions", raw_input)
+
+    def cursor_unlock() -> tuple[str, object]:
+        """Игра держит курсор (пока в фокусе, возвращает его в центр): режим слов замечает и забирает фокус."""
+        import ctypes
+
+        from PySide6.QtCore import QTimer
+        from PySide6.QtWidgets import QWidget as _W
+
+        from lexoplay.cursorguard import CursorGuard
+        from lexoplay.geometry import Rect as _R
+        from lexoplay.ui.word_layer import WordLayer
+        from lexoplay.win import input as rawin
+        from lexoplay.win import winapi as _wa
+
+        u32 = ctypes.windll.user32
+
+        def pump(sec: float) -> None:
+            end = time.time() + sec
+            while time.time() < end:
+                app.processEvents()
+                time.sleep(0.005)
+
+        def native(h: int) -> None:
+            _wa.exclude_from_capture(h)
+            _wa.set_no_activate(h)
+
+        game = _W()
+        game.setWindowTitle("LexoPlay cursor test")
+        game.setGeometry(200, 200, 600, 400)
+        game.show()
+        pump(0.3)
+        ghwnd = int(game.winId())
+        _wa.force_foreground(ghwnd)
+        pump(0.3)
+        center = (500, 400)
+
+        def lock() -> None:  # как игра: пока она в фокусе, курсор каждый кадр в центр
+            if _wa.root_window(_wa.foreground_window()) == ghwnd:
+                u32.SetCursorPos(*center)
+
+        locker = QTimer()
+        locker.setInterval(10)
+        locker.timeout.connect(lock)
+        locker.start()
+        iw = rawin.InputWatch()
+        iw.start()
+        layer = WordLayer(on_native=native)
+        layer.open(_R(200, 200, 600, 400), _R(0.05, 0.7, 0.9, 0.25), [])
+        info: dict[str, object] = {"game_in_focus": _wa.root_window(_wa.foreground_window()) == ghwnd}
+        pump(0.1)
+        guard = CursorGuard(_wa.cursor_pos, lambda: iw.travel, counts=lambda p: not _wa.at_screen_edge(p))
+        guard.reset()
+        detected = took = False
+        end = time.time() + 3
+        while time.time() < end and not detected:
+            u32.mouse_event(0x0001, 30, 0, 0, 0)  # MOUSEEVENTF_MOVE: сдвиг, как от настоящей мыши
+            pump(0.05)
+            detected = guard.tick()
+        info["detected"] = detected
+        info["travel"] = iw.travel
+        info["exclusive_fullscreen"] = _wa.exclusive_fullscreen()
+        if detected:
+            lh = int(layer.winId())
+            _wa.set_no_activate(lh, False)
+            _wa.force_foreground(lh)
+            pump(0.3)
+            took = _wa.root_window(_wa.foreground_window()) == lh
+        info["took_focus"] = took
+        start = _wa.cursor_pos()
+        for _ in range(10):
+            u32.mouse_event(0x0001, 15, 0, 0, 0)
+            pump(0.03)
+        info["cursor_moves_after"] = _wa.cursor_pos() != start
+        locker.stop()
+        layer.finish("esc")
+        layer.close()
+        iw.close()
+        game.close()
+        pump(0.1)
+        ok = detected and took and info["cursor_moves_after"]
+        return ("ok" if ok else "fail"), info
+
+    _check("cursor_unlock_in_word_mode", cursor_unlock)
 
     def no_activate() -> tuple[str, object]:
         import ctypes

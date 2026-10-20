@@ -103,6 +103,43 @@ def _ocr_line(text, y=0.85):
     return Line(tuple(words))
 
 
+def test_word_layer_arrow_keys_select_words_and_phrases(qapp):
+    from lexoplay.wordmode import ExplainRow, ExplainState, next_word, word_in_line
+
+    res = OcrResult((_ocr_line("Don't jump to conclusions.", 0.80), _ocr_line("Look at the evidence first.", 0.86)))
+    views = build_views(res)
+    assert next_word(views, None, 1) == 0 and next_word(views, 0, -1) == 0  # у края стоим
+    assert word_in_line(views, 1, 1) in (5, 6) and word_in_line(views, 4, -1) in (0, 1)  # ближайшее по горизонтали
+    layer = WordLayer()
+    picked, saves, again = [], [], []
+    layer.selected.connect(picked.append)
+    layer.explain_save.connect(saves.append)
+    layer.retranslate_clicked.connect(lambda: again.append(1))
+    layer.open(Rect(0, 0, 1000, 700), Rect(0.05, 0.75, 0.9, 0.2), views)
+    layer.navigate("right")  # первое слово
+    layer.navigate("right")
+    assert layer.selection == [1] and picked == []  # значение спросим, когда выбор остановится
+    QTest.qWait(450)
+    assert picked == [[1]]
+    layer.navigate("shift_right")
+    layer.navigate("shift_right")
+    QTest.qWait(450)
+    assert picked[-1] == [1, 2, 3]  # «jump to conclusions»
+    layer.navigate("down")
+    assert len(layer.selection) == 1 and layer.selection[0] >= 4
+    layer.can_retranslate = True
+    layer.request_retranslate()
+    assert again == [1]
+    layer.set_explain(ExplainState("ready", [ExplainRow("jump to conclusions", "спешить с выводами", base="")], "Совет"))
+    layer.save_explain_item(0)
+    layer.save_explain_item(3)  # такого пункта нет
+    assert saves == [0]
+    layer.grab()
+    layer.finish("esc")
+    assert not layer.is_open and not layer._blank  # noqa: SLF001  пустой кадр нарисован и сброшен
+    layer.close()
+
+
 def test_word_layer_click_select_and_add(qapp):
     res = OcrResult((_ocr_line("This place feels eerie after dark."),))
     views = build_views(res, lambda w: w.lower().startswith("eerie"))
@@ -251,8 +288,8 @@ class FakeCtl:
         self.store.line_retranslated(line.exe, "ru", line.norm, "Новый перевод.", 3, touch=False)
         done("Новый перевод.", None)
 
-    def save_phrase(self, line, phrase, meaning):
-        self.saved_phrases.append(phrase)
+    def save_phrase(self, line, phrase, meaning, base=""):
+        self.saved_phrases.append(base or phrase)
         return "«Слова»"
 
     def delete_line(self, line_id):
@@ -406,6 +443,14 @@ def test_keys_page_capture_and_conflict(window, qapp):
     add.click()
     QTest.keyClick(add, Qt.Key.Key_Escape)
     assert ctl.settings.hotkeys.add_game == ""
+    assert ctl.paused[-1] is False  # передумал (Esc): клавиши LexoPlay снова работают
+    same = w.keys.edits["translate"]
+    same.click()
+    QTest.keyClick(same, Qt.Key.Key_F2)  # та же клавиша, что была
+    assert ctl.paused[-1] is False
+    same.click()
+    w.show_page("games")  # ушёл с вкладки посреди ввода
+    assert ctl.paused[-1] is False
 
 
 def test_view_page_saves_sliders(window, qapp):

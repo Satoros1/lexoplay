@@ -54,7 +54,8 @@ from lexoplay.dedupe import LineMemory, LineRecord, normalize_text
 from lexoplay.games import NOT_GAMES, WindowInfo, clean_title, is_game_exe
 from lexoplay.geometry import Rect
 from lexoplay.history import LineCache
-from lexoplay.hotkeys import HotkeyError, parse
+from lexoplay.cursorguard import CursorGuard
+from lexoplay.hotkeys import MOD_NOREPEAT, Hotkey, HotkeyError, parse
 from lexoplay.lexo import Account, Deck, GameRef, LexoClient, LexoError, LexoOffline, Sense, Usage
 from lexoplay.lookup import (
     AnthropicLookup,
@@ -106,6 +107,10 @@ WATCH_IDLE_MS = 400  # как часто смотреть на окно диал
 WATCH_HOT_MS = 110  # сразу после клика или клавиши: реплика вот-вот сменится
 KICK_MS = 70  # первая проверка после клика: игре нужен кадр-другой, чтобы сменить текст
 WATCH_OCR_SLOT = 3  # свой движок OCR для проверок смены реплики (F2 читает слотами 0–2)
+WORDS_REPEAT = {"words_left", "words_right", "words_up", "words_down", "words_shift_left", "words_shift_right"}
+# клавиши режима слов: Esc, Enter, стрелки, R, 1–5 и Shift (для Shift+стрелка)
+WORDS_VKS = {0x1B, 0x0D, 0x25, 0x26, 0x27, 0x28, 0x52, 0x31, 0x32, 0x33, 0x34, 0x35, 0x10, 0xA0, 0xA1}
+CURSOR_TICK_MS = 150  # режим слов: как часто смотреть, не держит ли курсор игра
 BUSY_LIMIT_MS = 40_000  # перевод или чтение не вернулись за это время: снять «занято», чтобы F2 снова работал
 UPDATE_EVERY_MS = 6 * 3600 * 1000
 
@@ -306,6 +311,15 @@ class App(QObject):
 
         self.input = InputWatch()  # клики и клавиши игрока: после них перевод может смениться
         self.input.pressed.connect(self._on_user_input)
+        # режим слов: курсор может держать игра (см. cursorguard.py)
+        self._cursor_guard = CursorGuard(winapi.cursor_pos, lambda: self.input.travel, counts=self._cursor_over_game)
+        self._cursor_timer = QTimer(self)
+        self._cursor_timer.setInterval(CURSOR_TICK_MS)
+        self._cursor_timer.timeout.connect(self._cursor_tick)
+        self._took_focus = False  # слой слов забрал фокус у игры, чтобы она отпустила курсор
+        self._took_focus_at = 0.0
+        self._focus_bad: set[str] = set()  # игры, которые от потери фокуса свернулись: фокус у них больше не берём
+        self._history_sessions: dict[str, str] = {}  # exe -> сессия для разбора и слов из истории (без игры)
         self.hotkeys = HotkeyManager()
         self.hotkeys.triggered.connect(self._on_hotkey)
         self.hotkeys.failed.connect(self._on_hotkey_failed)
@@ -367,6 +381,11 @@ class App(QObject):
         self.play_timer.stop()
         self.word_layer.finish("closed")
         self.sessions.end_all()
+        if self.client.linked:  # сессии разборов и слов из истории тоже закрываем
+            for sid in self._history_sessions.values():
+                self.outbox.enqueue(
+                    "end", {"session_id": sid, "duration_s": 0, "lines_count": 0, "ended_at": datetime.now(UTC).isoformat()}
+                )
         try:  # дослать конец сессий и свежие слова; что не успело, уйдёт при следующем запуске
             self.bg.run(asyncio.wait_for(self.outbox.flush(), 3), timeout=4)
         except Exception:
@@ -817,11 +836,23 @@ class App(QObject):
             ("add_game", hk.add_game, "global"),
             ("words_esc", "Escape", "words"),
             ("words_enter", "Enter", "words"),
+            # выбор слов без мыши (игра может держать курсор у себя)
+            ("words_left", "Left", "words"),
+            ("words_right", "Right", "words"),
+            ("words_up", "Up", "words"),
+            ("words_down", "Down", "words"),
+            ("words_shift_left", "Shift+Left", "words"),
+            ("words_shift_right", "Shift+Right", "words"),
+            ("words_retranslate", "R", "words"),
+            *((f"words_save_{n}", str(n), "words") for n in range(1, 6)),
         ):
             if not text:
                 continue
             try:
-                self.hotkeys.define(name, parse(text), group)
+                hk = parse(text)
+                if name in WORDS_REPEAT:  # стрелку можно держать: слово за словом
+                    hk = Hotkey(hk.mods & ~MOD_NOREPEAT, hk.vk, hk.text)
+                self.hotkeys.define(name, hk, group)
             except HotkeyError as exc:
                 log.warning("хоткей %s=%s: %s", name, text, exc)
         self._sync_ignored_keys()
@@ -838,7 +869,7 @@ class App(QObject):
             except HotkeyError:
                 pass
         if self.word_layer.is_open:
-            vks |= {0x1B, 0x0D}
+            vks |= WORDS_VKS
         return vks
 
     def _sync_ignored_keys(self) -> None:
@@ -1245,7 +1276,14 @@ class App(QObject):
             self._hide_strip()
             self._close_words("focus")
 
-    def _on_minimized(self, _hwnd: int, minimized: bool) -> None:
+    def _on_minimized(self, hwnd: int, minimized: bool) -> None:
+        if minimized and self._took_focus and self.active and time.monotonic() - self._took_focus_at < 5:
+            # игра свернулась, потому что режим слов забрал фокус: больше так не делаем и разворачиваем её
+            log.warning("%s свернулась без фокуса: в режиме слов фокус у неё больше не берём", self.active.exe)
+            self._focus_bad.add(self.active.exe)
+            self._close_words("closed")
+            self._return_to_game()
+            return
         if minimized and self.state != "picking":
             self._close_words("closed")
             self._hide_strip()
@@ -1309,6 +1347,16 @@ class App(QObject):
         if name == "words_enter":
             if self.word_layer.is_open:
                 self.word_layer.press_enter()
+            return
+        if name.startswith("words_"):
+            if self.word_layer.is_open:
+                key = name[len("words_") :]
+                if key == "retranslate":
+                    self.word_layer.request_retranslate()
+                elif key.startswith("save_"):
+                    self.word_layer.save_explain_item(int(key[len("save_") :]) - 1)
+                else:
+                    self.word_layer.navigate(key)
             return
         if name == "explain" and self.word_layer.is_open:
             if self.word_layer.explain_open:
@@ -1903,6 +1951,8 @@ class App(QObject):
         self.word_layer.open(self.display, game.region, views, strip=self.overlay.strip_rect())
         self.hotkeys.set_group("words", not self._hotkeys_paused)
         self._sync_ignored_keys()
+        self._cursor_guard.reset()
+        self._cursor_timer.start()
         if self.watcher is None or self.watcher.waiting:
             # следим за открытой репликой (автоперевод ждал следующую: теперь ждёт после неё)
             self._watch_line(line.sentence, line.thumb)
@@ -2152,8 +2202,20 @@ class App(QObject):
             else:
                 done(None, self._explain_error(err))
 
-        coro = self._explain_fetch(line.exe, title, str(uuid.uuid4()), line.source, line.speaker, line.translation, earlier)
+        coro = self._explain_fetch(
+            line.exe, title, self._history_session(line.exe), line.source, line.speaker, line.translation, earlier
+        )
         self.run_bg(coro, finished)
+
+    def _history_session(self, exe: str) -> str:
+        """Сессия для запросов из истории: идущая сейчас игровая или одна на игру до выхода из LexoPlay."""
+        live = self.sessions.get(exe)
+        if live is not None:
+            return live.id
+        sid = self._history_sessions.get(exe)
+        if sid is None:
+            sid = self._history_sessions[exe] = str(uuid.uuid4())
+        return sid
 
     def retranslate_history_line(self, line: StoredLine, done: Callable[[str | None, str | None], None]) -> None:
         """«Перевести иначе» из истории: моделью посильнее, с репликами перед этой и прошлым вариантом."""
@@ -2172,7 +2234,7 @@ class App(QObject):
             context=tuple(ContextLine(r.speaker, r.source, r.translation) for r in earlier),
             glossary=self.store.glossary(line.exe),
             line_id=str(uuid.uuid4()),
-            session_id=str(uuid.uuid4()),
+            session_id=self._history_session(line.exe),
             game_exe=line.exe,
             previous=line.translation,
         )
@@ -2197,27 +2259,20 @@ class App(QObject):
 
         self.run_bg(translator.translate(req), finished)
 
-    def save_phrase(self, line: StoredLine, phrase: str, meaning: str) -> str:
-        """«+» в разборе из истории: фраза в слова. Возвращает, куда ушла."""
+    def save_phrase(self, line: StoredLine, phrase: str, meaning: str, base: str = "") -> str:
+        """«+» в разборе из истории: фраза в слова (словарной формой, если она есть). Возвращает, куда ушла."""
         game = self.store.get_game(line.exe)
         title = game.title if game else line.exe
-        linked = self.client.linked
-        session_id = str(uuid.uuid4())
         self._store_word(
-            line.exe, title, session_id,
-            selection=phrase, lemma=phrase, translation=meaning, ipa=None, pos=None,
+            line.exe, title, self._history_session(line.exe),
+            selection=phrase, lemma=base or phrase, translation=meaning, ipa=None, pos=None,
             sentence=line.source, sentence_translation=line.translation,
         )
-        if linked:  # у карточек сервер ждёт сессию: короткая, закрываем сразу, как при отправке слов после привязки
-            self.outbox.enqueue(
-                "end",
-                {"session_id": session_id, "duration_s": 0, "lines_count": 0, "ended_at": datetime.now(UTC).isoformat()},
-            )
-        return "Lexo" if linked else "«Слова»"
+        return "Lexo" if self.client.linked else "«Слова»"
 
     def _explain_state(self, ctx: WordCtx, exp: Explanation) -> ExplainState:
-        rows = [ExplainRow(i.phrase, i.meaning, i.note, match_phrase(ctx.views, i.phrase)) for i in exp.items]
-        return ExplainState("ready", rows, exp.summary)
+        rows = [ExplainRow(i.phrase, i.meaning, i.note, match_phrase(ctx.views, i.phrase), base=i.base) for i in exp.items]
+        return ExplainState("ready", rows, exp.summary, literal=exp.literal)
 
     def _on_explain_save(self, index: int) -> None:
         """«+» у пункта разбора: фраза уходит в слова (в Lexo или во вкладку «Слова»)."""
@@ -2227,11 +2282,11 @@ class App(QObject):
         row = ctx.explain.rows[index]
         if row.saved:
             return
-        self._save_word(ctx, selection=row.phrase, lemma=row.phrase, translation=row.meaning, ipa=None, pos=None)
+        self._save_word(ctx, selection=row.phrase, lemma=row.lemma, translation=row.meaning, ipa=None, pos=None)
         row.saved = True
         self.word_layer.set_explain(ctx.explain)
         where = "Lexo" if self.client.linked else "«Слова»"
-        self.overlay.toast(f"{row.phrase}: сохранено в {where}")
+        self.overlay.toast(f"{row.lemma}: сохранено в {where}")
 
     def _save_word(
         self,
@@ -2424,10 +2479,53 @@ class App(QObject):
             self._set_card(CardState("saved", card.title, card.ipa, card.pos, list(card.senses), note=note, local=True))
             self.overlay.toast(f"{word}: сохранено в «Слова»")
 
+    def _cursor_tick(self) -> None:
+        """Режим слов открыт: не держит ли курсор игра (мышь двигают, а он стоит)."""
+        if not self.word_layer.is_open:
+            self._cursor_timer.stop()
+            return
+        if self._cursor_guard.locked:
+            winapi.release_cursor()  # игра держит курсор: пока открыт режим слов, снимаем её зажим
+            return
+        if not self._cursor_guard.tick():
+            return
+        winapi.release_cursor()
+        self.word_layer.cursor_locked = True
+        self.word_layer.update()
+        exe = self.active.exe if self.active else "?"
+        if self.active is None or exe in self._focus_bad or winapi.exclusive_fullscreen():
+            log.info("курсор держит игра %s: слова стрелками, фокус не забираем", exe)
+            return
+        # игра без фокуса обычно отпускает курсор: на время режима слов фокус у слоя
+        hwnd = int(self.word_layer.winId())
+        winapi.set_no_activate(hwnd, False)
+        winapi.force_foreground(hwnd)
+        self._took_focus = True
+        self._took_focus_at = time.monotonic()
+        log.info("курсор держит игра %s: слой слов забрал фокус, чтобы игра отпустила курсор", exe)
+
+    def _cursor_over_game(self, pos: tuple[int, int]) -> bool:
+        """Курсор над игрой и не упёрт в край экрана: только тогда «стоит» значит «держит игра»."""
+        d = self.display
+        if d is None or not (d.x <= pos[0] < d.x + d.w and d.y <= pos[1] < d.y + d.h):
+            return False
+        return not winapi.at_screen_edge(pos)
+
+    def _give_focus_back(self, reason: str) -> None:
+        """Режим слов закрыт: фокус обратно игре (если его забирали и игрок не ушёл в другое окно)."""
+        if not self._took_focus:
+            return
+        self._took_focus = False
+        winapi.set_no_activate(int(self.word_layer.winId()), True)
+        if reason not in ("focus", "switch", "closed"):
+            self._return_to_game()
+
     def _on_words_finished(self, reason: str) -> None:
         self.word_ctx = None
         self.hotkeys.set_group("words", False)
         self._sync_ignored_keys()
+        self._cursor_timer.stop()
+        self._give_focus_back(reason)
         log.debug("режим слов закрыт: %s", reason)
         if self.overlay.strip_visible:
             return

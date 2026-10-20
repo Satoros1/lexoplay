@@ -70,6 +70,7 @@ class Overlay(QWidget):
         self.font_family = ""
         self.font_bold = False
         self.fade = True  # плавное появление и исчезание плашки
+        self._blank = False  # пустой кадр перед скрытием: при следующем показе не мелькнёт старый
         self._alpha = 1.0
         self._ghost: _Strip | None = None  # исчезающая плашка
         self._anim = QVariantAnimation(self)
@@ -195,7 +196,10 @@ class Overlay(QWidget):
                 self._placer(self, self._display)
             self.update()
         elif self.isVisible():
+            self._blank = True
+            self.repaint()
             self.hide()
+            self._blank = False
 
     # --- отрисовка ---
     def _original_shown(self, strip: _Strip) -> str | None:
@@ -264,6 +268,11 @@ class Overlay(QWidget):
 
     def paintEvent(self, _event: QPaintEvent) -> None:  # noqa: N802
         p = QPainter(self)
+        if self._blank:
+            p.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
+            p.fillRect(self.rect(), Qt.GlobalColor.transparent)
+            p.end()
+            return
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
         strip = self._shown() if self.strip_visible else self._ghost

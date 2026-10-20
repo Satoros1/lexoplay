@@ -323,8 +323,11 @@ class SessionCard(QFrame):
         if isinstance(got, str):
             lay.addWidget(label(got, "error", wrap=True))
             return box
+        # сначала смысл реплики целиком, потом «дословно», потом трудные выражения
         if got.summary:
-            lay.addWidget(label(got.summary, "muted", wrap=True))
+            lay.addWidget(label(got.summary, None, wrap=True))
+        if got.literal:
+            lay.addWidget(label(f"Дословно: {got.literal}", "muted", wrap=True))
         for i, item in enumerate(got.items):
             row = QHBoxLayout()
             row.setSpacing(8)
@@ -332,7 +335,8 @@ class SessionCard(QFrame):
             col.setSpacing(1)
             head = label("", None, wrap=True)
             head.setTextFormat(Qt.TextFormat.RichText)
-            head.setText(f"<b>{html.escape(item.phrase)}</b>: {html.escape(item.meaning)}")
+            base = f' <span style="color:{theme.MUTED}">· {html.escape(item.base)}</span>' if item.base else ""
+            head.setText(f"<b>{html.escape(item.phrase)}</b>{base}: {html.escape(item.meaning)}")
             col.addWidget(head)
             if item.note:
                 col.addWidget(label(item.note, "version", wrap=True))
@@ -344,13 +348,18 @@ class SessionCard(QFrame):
                 row.addWidget(done, 0, Qt.AlignmentFlag.AlignTop)
             elif page.can_save:
                 row.addWidget(
-                    row_tool("plus", "Сохранить в слова", lambda i=i, item=item: page.save_phrase(line, i, item.phrase, item.meaning), theme.GREEN),
+                    row_tool(
+                        "plus",
+                        "Сохранить в слова",
+                        lambda i=i, item=item: page.save_phrase(line, i, item.phrase, item.meaning, item.base),
+                        theme.GREEN,
+                    ),
                     0,
                     Qt.AlignmentFlag.AlignTop,
                 )
             lay.addLayout(row)
-        if not got.items and not got.summary:
-            lay.addWidget(label("Ничего трудного в этой реплике нет.", "muted"))
+        if not got.items:
+            lay.addWidget(label("Отдельных трудных выражений здесь нет.", "muted"))
         return box
 
     def _earlier(self) -> None:
@@ -369,7 +378,8 @@ class SessionCard(QFrame):
         lines, _n = self.page.store.lines_range(self.s.exe, self.s.start, self.s.end, limit=100_000)
         copy_text(session_text(self.title, self.s, lines))
         btn.setText(" Скопировано")
-        QTimer.singleShot(1500, lambda: btn.setText(" Скопировать сессию") if btn.isVisible() else None)
+        # кнопку могли уже убрать (сессию перерисовали): таймер с привязкой к ней тогда просто не сработает
+        QTimer.singleShot(1500, btn, lambda: btn.setText(" Скопировать сессию"))
 
 
 class HistoryPage(QWidget):
@@ -581,10 +591,10 @@ class HistoryPage(QWidget):
         self.ctl.retranslate_history_line(line, done)
         self._rerender_cards()
 
-    def save_phrase(self, line: StoredLine, index: int, phrase: str, meaning: str) -> None:
-        where = self.ctl.save_phrase(line, phrase, meaning)
+    def save_phrase(self, line: StoredLine, index: int, phrase: str, meaning: str, base: str = "") -> None:
+        where = self.ctl.save_phrase(line, phrase, meaning, base)
         self.saved.add((line.id, index))
-        self.notes[line.id] = (True, f"«{phrase}» сохранено в {where}")
+        self.notes[line.id] = (True, f"«{base or phrase}» сохранено в {where}")
         self._rerender_cards()
 
     def star_line(self, line: StoredLine, on: bool) -> None:

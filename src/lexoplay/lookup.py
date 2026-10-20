@@ -180,13 +180,19 @@ class AnthropicLookup:
 
 
 # ---------------------------------------------------------------------- разбор реплики
-EXPLAIN_PROMPT = """A learner whose native language is {tgt} is playing the video game "{game}" in {src}.
-Explain one line of its dialogue so they understand what is really said and learn from it.
+# v2: сначала смысл реплики целиком (тон, подтекст), «дословно», если помогает увидеть
+# устройство фразы, и только 0–3 настоящих трудных выражения целиком. v1 резал реплику на
+# кусочки по слову-два, и разбор читался как словарь, а не объяснение.
+EXPLAIN_VERSION = 2
+MAX_ITEMS = 3
+
+EXPLAIN_PROMPT = """A learner whose native language is {tgt} is playing the video game "{game}" in {src} and wants to understand one line of its dialogue.
 {context}Line{speaker}: "{sentence}"
-{translation_line}Reply with JSON only:
-{{"items": [{{"phrase": "<exact words copied from the line>", "meaning": "<what it means here, in {tgt}, a few words>", "note": "<one short sentence in {tgt}: why it is tricky (idiom, slang, phrasal verb, grammar, wordplay, a reference to the game) or how it is used>"}}],
- "summary": "<one or two sentences in {tgt}: the tone of the line and what a word-by-word reading would miss>"}}
-Rules: at most 5 items, the most useful for a learner: idioms, slang, phrasal verbs, set phrases, tricky grammar, names and references. Skip simple everyday words. Copy each phrase exactly as it is in the line. Write meanings, notes and the summary in {tgt}. Never use the em dash character."""
+{translation_line}Explain it like a good teacher, briefly. Reply with JSON only:
+{{"meaning": "<one or two sentences in {tgt}: what this line really means here, its tone and subtext, what or whom it refers to>",
+ "literal": "<a word-for-word rendering in {tgt} that shows how the {src} sentence is built, or empty if it would read the same as the translation>",
+ "items": [{{"phrase": "<a whole expression copied exactly from the line>", "base": "<its dictionary form if it differs, e.g. \\"jump to conclusions\\", \\"be reluctant to do something\\">", "meaning": "<what it means here, in {tgt}, a few words>", "note": "<one short sentence in {tgt}: how it is used or why it is tricky>"}}]}}
+Items: 0 to {max_items}, only what a learner would not get from the words alone: idioms, phrasal verbs, set phrases, slang, a tricky grammar construction, a reference to the game or its culture. Each item is a complete expression, never a single everyday word and never a random piece of the sentence. If nothing is tricky, return an empty list. Write everything except "phrase" and "base" in {tgt}. Never use the em dash character."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -194,12 +200,19 @@ class ExplainItem:
     phrase: str
     meaning: str
     note: str = ""
+    base: str = ""  # словарная форма, если отличается: «jump to conclusions»
+
+    @property
+    def lemma(self) -> str:
+        """Что сохранять в слова: словарную форму, а если её нет, саму фразу."""
+        return self.base or self.phrase
 
 
 @dataclass(frozen=True, slots=True)
 class Explanation:
     items: tuple[ExplainItem, ...]
-    summary: str = ""
+    summary: str = ""  # смысл реплики целиком
+    literal: str = ""  # дословно, если помогает увидеть устройство фразы
 
 
 def build_explain_prompt(
@@ -224,22 +237,35 @@ def build_explain_prompt(
         speaker=f" ({speaker})" if speaker else "",
         sentence=sentence.replace('"', "'")[:1500],
         translation_line=f'Its translation shown to the player: "{translation}"\n' if translation else "",
+        max_items=MAX_ITEMS,
     )
 
 
 def explanation_json(exp: Explanation) -> str:
-    """Разбор для хранения на диске (таблица explains)."""
+    """Разбор для хранения на диске (таблица explains), с версией промпта."""
     return json.dumps(
-        {"items": [{"phrase": i.phrase, "meaning": i.meaning, "note": i.note} for i in exp.items], "summary": exp.summary},
+        {
+            "v": EXPLAIN_VERSION,
+            "meaning": exp.summary,
+            "literal": exp.literal,
+            "items": [{"phrase": i.phrase, "base": i.base, "meaning": i.meaning, "note": i.note} for i in exp.items],
+        },
         ensure_ascii=False,
     )
 
 
 def explanation_from_json(raw: str) -> Explanation | None:
+    """Сохранённый разбор или None (испорчен или сделан старым промптом: разберём заново)."""
     try:
+        if json.loads(raw).get("v") != EXPLAIN_VERSION:
+            return None
         return parse_explanation(raw)
-    except (ValueError, json.JSONDecodeError):
+    except (ValueError, json.JSONDecodeError, AttributeError):
         return None
+
+
+def _same(a: str, b: str) -> bool:
+    return re.sub(r"[^\w']+", " ", a.lower()).strip() == re.sub(r"[^\w']+", " ", b.lower()).strip()
 
 
 def parse_explanation(raw: str) -> Explanation:
@@ -253,9 +279,14 @@ def parse_explanation(raw: str) -> Explanation:
             continue
         phrase = str(it.get("phrase") or "").strip().strip('"«»')
         meaning = no_dash(str(it.get("meaning") or ""))
+        base = str(it.get("base") or "").strip().strip('"«»')
+        if base and _same(base, phrase):
+            base = ""  # словарная форма та же, что во фразе: не повторяем
         if phrase and meaning:
-            items.append(ExplainItem(phrase[:80], meaning[:200], no_dash(str(it.get("note") or ""))[:300]))
-    summary = no_dash(str(data.get("summary") or ""))[:600]
+            items.append(ExplainItem(phrase[:80], meaning[:200], no_dash(str(it.get("note") or ""))[:300], base[:80]))
+    # v1 называл смысл реплики summary, v2 meaning
+    summary = no_dash(str(data.get("meaning") or data.get("summary") or ""))[:600]
+    literal = no_dash(str(data.get("literal") or ""))[:600]
     if not items and not summary:
         raise ValueError("empty explanation")
-    return Explanation(tuple(items[:5]), summary)
+    return Explanation(tuple(items[:MAX_ITEMS]), summary, literal)

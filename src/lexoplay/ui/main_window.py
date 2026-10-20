@@ -736,7 +736,7 @@ class KeysPage(QWidget):
             col.addWidget(note)
             rl.addLayout(col, 1)
             edit = HotkeyEdit(value, allow_empty=name == "add_game")
-            edit.clicked.connect(lambda: self.ctl.pause_hotkeys(True))
+            edit.capturing.connect(self.ctl.pause_hotkeys)  # и снова включить, чем бы ввод ни кончился
             edit.changed.connect(lambda text, n=name: self._changed(n, text))
             rl.addWidget(edit, 0, Qt.AlignmentFlag.AlignVCenter)
             self.box_lay.addWidget(row)
@@ -744,10 +744,14 @@ class KeysPage(QWidget):
             self.notes[name] = note
         self._validate()
 
+    def cancel_capture(self) -> None:
+        """Ушли с вкладки или закрыли окно посреди ввода клавиши: ввод прекратить, клавиши LexoPlay включить."""
+        for edit in self.edits.values():
+            edit.cancel()
+
     def _changed(self, name: str, text: str) -> None:
         setattr(self.ctl.settings.hotkeys, name, text)
         self._validate()
-        self.ctl.pause_hotkeys(False)
         self.ctl.settings_changed()
 
     def _validate(self) -> None:
@@ -1409,6 +1413,7 @@ class MainWindow(QWidget):
 
     # --- навигация
     def show_page(self, key: str) -> None:
+        self.keys.cancel_capture()
         self.stack.setCurrentWidget(self.pages[key])
         self.nav_buttons[key].setChecked(True)
         if key == "games":
@@ -1487,5 +1492,6 @@ class MainWindow(QWidget):
 
     def closeEvent(self, e: QCloseEvent) -> None:  # noqa: N802
         e.ignore()
+        self.keys.cancel_capture()
         self.hide()
         self.ctl.window_hidden()

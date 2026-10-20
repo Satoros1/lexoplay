@@ -94,6 +94,45 @@ def cursor_window() -> int:
     return _hwnd(user32.WindowFromPoint(pt))
 
 
+def cursor_pos() -> tuple[int, int]:
+    pt = wintypes.POINT()
+    if not user32.GetCursorPos(ctypes.byref(pt)):
+        return (0, 0)
+    return (pt.x, pt.y)
+
+
+user32.ClipCursor.argtypes = [ctypes.c_void_p]
+SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN = 76, 77, 78, 79
+
+
+def at_screen_edge(pos: tuple[int, int], margin: int = 2) -> bool:
+    """Курсор упёрся в край рабочего стола (всех мониторов вместе)."""
+    m = user32.GetSystemMetrics
+    x0, y0 = m(SM_XVIRTUALSCREEN), m(SM_YVIRTUALSCREEN)
+    x1, y1 = x0 + m(SM_CXVIRTUALSCREEN) - 1, y0 + m(SM_CYVIRTUALSCREEN) - 1
+    x, y = pos
+    return x <= x0 + margin or y <= y0 + margin or x >= x1 - margin or y >= y1 - margin
+
+
+def release_cursor() -> None:
+    """Снять «зажим» курсора (ClipCursor), которым игра держит его в своём окне."""
+    user32.ClipCursor(None)
+
+
+QUNS_RUNNING_D3D_FULL_SCREEN = 3
+
+
+def exclusive_fullscreen() -> bool:
+    """Сейчас идёт игра в эксклюзивном полноэкранном режиме D3D: такую нельзя лишать фокуса, свернётся."""
+    state = ctypes.c_int(0)
+    try:
+        if ctypes.windll.shell32.SHQueryUserNotificationState(ctypes.byref(state)) != 0:
+            return False
+    except (AttributeError, OSError):
+        return False
+    return state.value == QUNS_RUNNING_D3D_FULL_SCREEN
+
+
 def cursor_over_own_window() -> bool:
     """Клик пришёлся в окно LexoPlay (режим слов, разбор реплики), а не в игру."""
     hwnd = cursor_window()
@@ -263,10 +302,13 @@ def restore_window(hwnd: int) -> None:
         user32.ShowWindow(hwnd, SW_RESTORE)
 
 
-def set_no_activate(hwnd: int) -> None:
-    """Окно получает клики, но не забирает фокус: игра остаётся активной и не сворачивается."""
+def set_no_activate(hwnd: int, on: bool = True) -> None:
+    """Окно получает клики, но не забирает фокус: игра остаётся активной и не сворачивается.
+
+    on=False: на время разрешить фокус (режим слов, когда игра держит курсор)."""
     style = user32.GetWindowLongPtrW(hwnd, GWL_EXSTYLE)
-    user32.SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style | WS_EX_NOACTIVATE)
+    style = style | WS_EX_NOACTIVATE if on else style & ~WS_EX_NOACTIVATE
+    user32.SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style)
 
 
 def _cloaked(hwnd: int) -> bool:

@@ -55,6 +55,48 @@ def selection_range(anchor: int | None, index: int, *, max_words: int = MAX_PHRA
     return list(range(lo, hi + 1))
 
 
+# ---------------------------------------------------------------------- выбор стрелками
+def word_lines(views: list[WordView]) -> list[list[WordView]]:
+    """Слова по строкам: соседние по порядку, если середины по высоте близко."""
+    rows: list[list[WordView]] = []
+    for v in views:
+        cy, h = v.rect.y + v.rect.h / 2, v.rect.h
+        if rows:
+            last = rows[-1][-1]
+            if abs(cy - (last.rect.y + last.rect.h / 2)) <= max(h, last.rect.h) * 0.6:
+                rows[-1].append(v)
+                continue
+        rows.append([v])
+    return rows
+
+
+def next_word(views: list[WordView], current: int | None, step: int) -> int | None:
+    """Соседнее слово по порядку чтения (step +1 вправо, -1 влево); у края остаёмся на месте."""
+    words = [v.index for v in views if v.clickable]
+    if not words:
+        return None
+    if current is None:
+        return words[0] if step > 0 else words[-1]
+    ahead = [i for i in words if (i > current if step > 0 else i < current)]
+    if not ahead:
+        return current
+    return ahead[0] if step > 0 else ahead[-1]
+
+
+def word_in_line(views: list[WordView], current: int | None, step: int) -> int | None:
+    """Слово в строке выше (step -1) или ниже (+1), ближайшее по горизонтали."""
+    if current is None:
+        return next_word(views, None, step)
+    rows = [[v for v in row if v.clickable] for row in word_lines(views)]
+    rows = [r for r in rows if r]
+    at = next((i for i, r in enumerate(rows) if any(v.index == current for v in r)), None)
+    if at is None or not 0 <= at + step < len(rows):
+        return current
+    cur = next(v for v in rows[at] if v.index == current)
+    cx = cur.rect.x + cur.rect.w / 2
+    return min(rows[at + step], key=lambda v: abs(v.rect.x + v.rect.w / 2 - cx)).index
+
+
 def selected_text(views: list[WordView], indices: list[int]) -> str:
     tokens = [views[i].text for i in sorted(indices) if 0 <= i < len(views)]
     return clean(" ".join(tokens))
@@ -141,14 +183,20 @@ class ExplainRow:
     note: str = ""
     indices: list[int] = field(default_factory=list)  # слова реплики, к которым относится
     saved: bool = False
+    base: str = ""  # словарная форма, если отличается от фразы
+
+    @property
+    def lemma(self) -> str:
+        return self.base or self.phrase
 
 
 @dataclass
 class ExplainState:
     phase: Literal["loading", "ready", "error"]
     rows: list[ExplainRow] = field(default_factory=list)
-    summary: str = ""
+    summary: str = ""  # смысл реплики целиком
     note: str = ""  # текст ошибки
+    literal: str = ""  # дословно
 
 
 def _norm_token(text: str) -> str:

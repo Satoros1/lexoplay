@@ -67,6 +67,7 @@ def key_text(key: int, mods: Qt.KeyboardModifier) -> str | None:
 
 class HotkeyEdit(QPushButton):
     changed = Signal(str)
+    capturing = Signal(bool)  # ждёт клавишу (на это время клавиши LexoPlay выключены) или перестал
 
     def __init__(self, value: str, *, allow_empty: bool = False) -> None:
         super().__init__()
@@ -101,12 +102,22 @@ class HotkeyEdit(QPushButton):
         self.setFocus()
         self.grabKeyboard()
         self._render()
+        self.capturing.emit(True)
 
     def _stop(self) -> None:
+        """Конец ввода: новая клавиша, Esc, клик мимо или та же клавиша. Во всех случаях клавиши LexoPlay снова работают."""
         if self._capturing:
             self._capturing = False
             self.releaseKeyboard()
             self._render()
+            self.capturing.emit(False)
+
+    def cancel(self) -> None:
+        self._stop()
+
+    def hideEvent(self, e) -> None:  # type: ignore[no-untyped-def]  # noqa: N802
+        self._stop()  # окно LexoPlay закрыли или ушли на другую вкладку посреди ввода
+        super().hideEvent(e)
 
     def keyPressEvent(self, e: QKeyEvent) -> None:  # noqa: N802
         if not self._capturing:

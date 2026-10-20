@@ -27,6 +27,7 @@ RIM_TYPEKEYBOARD = 1
 RIDEV_REMOVE = 0x00000001
 RIDEV_INPUTSINK = 0x00000100
 RI_KEY_BREAK = 0x01
+MOUSE_MOVE_ABSOLUTE = 0x01  # планшет, удалённый рабочий стол: координаты, а не сдвиг
 # кнопки вниз (левая, правая, средняя, 4, 5), колесо и отпускание левой: многие новеллы
 # листают реплику по отпусканию кнопки, и проверка сразу после него ловит смену быстрее
 MOUSE_ACTION = 0x0001 | 0x0002 | 0x0004 | 0x0010 | 0x0040 | 0x0100 | 0x0400 | 0x0800
@@ -142,6 +143,7 @@ class InputWatch(QObject):
         QCoreApplication.instance().installNativeEventFilter(self._filter)
         self.active = False
         self.ignore_vks: set[int] = set()
+        self.travel = 0  # сколько мышь проехала (сырые отсчёты): видно, что курсор держит игра
         self._buf = RAWINPUT()
 
     def _devices(self, flags: int, hwnd: int | None) -> bool:
@@ -171,6 +173,8 @@ class InputWatch(QObject):
         )
         if got in (0, 0xFFFFFFFF):
             return
+        if self._buf.header.dwType == RIM_TYPEMOUSE and not self._buf.data.mouse.usFlags & MOUSE_MOVE_ABSOLUTE:
+            self.travel += abs(self._buf.data.mouse.lLastX) + abs(self._buf.data.mouse.lLastY)
         if is_action(self._buf, self.ignore_vks):
             self.pressed.emit(action_kind(self._buf))
 

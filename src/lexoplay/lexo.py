@@ -332,11 +332,14 @@ class LexoClient:
             timeout=25,
         )
         items = tuple(
-            ExplainItem(str(i.get("phrase") or ""), str(i.get("meaning") or ""), str(i.get("note") or ""))
+            ExplainItem(
+                str(i.get("phrase") or ""), str(i.get("meaning") or ""), str(i.get("note") or ""), str(i.get("base") or "")
+            )
             for i in data.get("items", [])
             if i.get("phrase") and i.get("meaning")
         )
-        return Explanation(items, str(data.get("summary") or ""))
+        # старый сервер шлёт только summary, новый ещё literal и base у пунктов
+        return Explanation(items, str(data.get("summary") or ""), str(data.get("literal") or ""))
 
     async def add_card(self, payload: dict[str, Any]) -> dict[str, Any]:
         return await self._request("POST", "/desktop/cards", json=payload, timeout=20)
