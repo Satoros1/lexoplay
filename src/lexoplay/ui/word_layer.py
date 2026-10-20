@@ -413,12 +413,17 @@ class WordLayer(QWidget):
                 p.setPen(Qt.PenStyle.NoPen)
                 p.setBrush(fill)
                 p.drawEllipse(r)
-                p.setPen(QColor("#06261F") if not saved else TEXT)
-                f_btn = QFont(FONT_FAMILY)
-                f_btn.setPixelSize(max(1, round(btn * 0.62)))
-                f_btn.setWeight(QFont.Weight.Bold)
-                p.setFont(f_btn)
-                p.drawText(r, int(Qt.AlignmentFlag.AlignCenter), "✓" if saved else "+")
+                # «+» и галочка линиями: текстовые символы в мелком кружке выходят крошечными
+                pen = QPen(TEXT if saved else QColor("#06261F"), max(1.6, btn * 0.11))
+                pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+                pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+                p.setPen(pen)
+                c, k = r.center(), btn * 0.26
+                if saved:
+                    p.drawPolyline([QPointF(c.x() - k, c.y()), QPointF(c.x() - k * 0.25, c.y() + k * 0.7), QPointF(c.x() + k, c.y() - k * 0.7)])
+                else:
+                    p.drawLine(QPointF(c.x() - k, c.y()), QPointF(c.x() + k, c.y()))
+                    p.drawLine(QPointF(c.x(), c.y() - k), QPointF(c.x(), c.y() + k))
             elif b[0] == "skeleton":
                 p.setPen(Qt.PenStyle.NoPen)
                 p.setBrush(QColor(255, 255, 255, 30))
