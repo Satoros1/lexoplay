@@ -15,7 +15,6 @@ from PySide6.QtCore import QRectF, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QAction, QCloseEvent, QColor, QDesktopServices, QFont, QFontMetricsF, QImage, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QButtonGroup,
-    QCheckBox,
     QComboBox,
     QFrame,
     QGridLayout,
@@ -28,7 +27,6 @@ from PySide6.QtWidgets import (
     QPushButton,
     QRadioButton,
     QSizePolicy,
-    QSlider,
     QStackedWidget,
     QToolButton,
     QVBoxLayout,
@@ -127,7 +125,20 @@ class Controller(Protocol):
     def install_update(self) -> None: ...
 
 
-from lexoplay.ui.widgets import Tile, button, card, clear, keycap, label, page_shell, tile_color  # noqa: E402,F401
+from lexoplay.ui.widgets import (  # noqa: E402,F401
+    Tile,
+    Toggle,
+    ValueSlider,
+    button,
+    card,
+    card_list,
+    clear,
+    keycap,
+    label,
+    page_shell,
+    setting_row,
+    tile_color,
+)
 
 
 # ------------------------------------------------------------------ Игры
@@ -809,47 +820,44 @@ class ViewPage(QWidget):
         outer.addWidget(scroll)
 
         lay.addWidget(label("СТРОКА ПЕРЕВОДА", "section"))
-        box, bl = card()
+        box, bl = card_list()
+        prev_wrap = QWidget()
+        pw = QVBoxLayout(prev_wrap)
+        pw.setContentsMargins(16, 16, 16, 6)
         self.preview = StripPreview(s)
-        bl.addWidget(self.preview)
-        grid = QGridLayout()
-        grid.setHorizontalSpacing(16)
-        self.size = QSlider(Qt.Orientation.Horizontal)
-        self.size.setRange(70, 180)
-        self.size.setValue(round(s.font_scale * 100))
-        self.size_val = label("", "muted")
-        self.opacity = QSlider(Qt.Orientation.Horizontal)
-        self.opacity.setRange(40, 100)
-        self.opacity.setValue(round(s.strip_opacity * 100))
-        self.opacity_val = label("", "muted")
-        grid.addWidget(label("Размер текста"), 0, 0)
-        grid.addWidget(self.size, 0, 1)
-        grid.addWidget(self.size_val, 0, 2)
-        grid.addWidget(label("Плотность фона"), 1, 0)
-        grid.addWidget(self.opacity, 1, 1)
-        grid.addWidget(self.opacity_val, 1, 2)
-        grid.setColumnStretch(1, 1)
-        bl.addLayout(grid)
-        self.original = QCheckBox("Показывать английский оригинал мелко над переводом")
-        self.original.setChecked(s.show_original)
+        pw.addWidget(self.preview)
+        bl.addWidget(prev_wrap)
+        self.size_ctl = ValueSlider(70, 180, round(s.font_scale * 100))
+        self.opacity_ctl = ValueSlider(40, 100, round(s.strip_opacity * 100))
+        self.size, self.opacity = self.size_ctl.slider, self.opacity_ctl.slider
+        self.size_val, self.opacity_val = self.size_ctl.value, self.opacity_ctl.value
+        self.original = Toggle(s.show_original)
+        bl.addWidget(setting_row("Размер текста", "Насколько крупно перевод поверх игры", self.size_ctl))
+        bl.addWidget(setting_row("Плотность фона", "Чем выше, тем меньше игра просвечивает сквозь плашку", self.opacity_ctl))
+        bl.addWidget(
+            setting_row(
+                "Английский оригинал над переводом",
+                "Мелким шрифтом: видно, что именно переведено, и легче учить слова",
+                self.original,
+                last=True,
+            )
+        )
         self.original.toggled.connect(self._original)
-        bl.addWidget(self.original)
         lay.addWidget(box)
 
         lay.addWidget(label("АВТОПЕРЕВОД", "section"))
-        auto_box, al = card()
-        self.auto = QCheckBox("Переводить следующую реплику автоматически")
-        self.auto.setChecked(s.auto_translate)
+        auto_box, al = card_list()
+        self.auto = Toggle(s.auto_translate)
         self.auto.toggled.connect(self._auto)
-        al.addWidget(self.auto)
         hk = s.hotkeys
         al.addWidget(
-            label(
-                f"Нажми {hk.translate} один раз: дальше, когда пропускаешь реплику, LexoPlay сам переведёт следующую. "
-                f"{hk.hide} останавливает до следующего {hk.translate}. Каждая новая реплика это запрос к модели, "
-                "повторы берутся из истории бесплатно. Включается и в меню значка в трее.",
-                "muted",
-                wrap=True,
+            setting_row(
+                "Переводить следующую реплику автоматически",
+                f"Нажми {hk.translate} один раз: дальше, когда пропускаешь реплику, следующая переводится сама. "
+                f"{hk.hide} останавливает. Каждая новая реплика это запрос к модели, повторы из истории бесплатно. "
+                "Включается и в меню значка в трее.",
+                self.auto,
+                last=True,
             )
         )
         lay.addWidget(auto_box)
@@ -859,7 +867,6 @@ class ViewPage(QWidget):
         self._save_timer.setSingleShot(True)
         self._save_timer.setInterval(250)
         self._save_timer.timeout.connect(self.ctl.settings_changed)
-        self._labels()
 
         lay.addWidget(label("РАСТЯНУТА ЛИ ИГРА", "section"))
         modes = QHBoxLayout()
@@ -894,14 +901,9 @@ class ViewPage(QWidget):
         )
         lay.addStretch(1)
 
-    def _labels(self) -> None:
-        self.size_val.setText(f"{self.size.value()}%")
-        self.opacity_val.setText(f"{self.opacity.value()}%")
-
     def _sliders(self) -> None:
         self.ctl.settings.font_scale = self.size.value() / 100
         self.ctl.settings.strip_opacity = self.opacity.value() / 100
-        self._labels()
         self.preview.update()
         self._save_timer.start()
 
@@ -994,37 +996,49 @@ class MorePage(QWidget):
         lay.addWidget(box)
 
         lay.addWidget(label("ЗАПУСК И ОБНОВЛЕНИЯ", "section"))
-        box4, b4 = card()
-        self.autostart = QCheckBox("Запускать LexoPlay вместе с Windows (сразу в трей, без окна)")
+        box4, b4 = card_list()
         supported = ctl.autostart_supported()
+        self.autostart = Toggle(supported and ctl.autostart_enabled())
         self.autostart.setEnabled(supported)
-        self.autostart.setChecked(supported and ctl.autostart_enabled())
-        if not supported:
-            self.autostart.setToolTip("Работает в LexoPlay.exe")
         self.autostart.toggled.connect(self._autostart)
-        b4.addWidget(self.autostart)
-        self.auto_updates = QCheckBox("Проверять новые версии (раз в несколько часов)")
-        self.auto_updates.setChecked(s.check_updates)
+        b4.addWidget(
+            setting_row(
+                "Запускать вместе с Windows",
+                "Сразу в трей, без окна: в игре клавиши уже работают" if supported else "Работает в LexoPlay.exe",
+                self.autostart,
+            )
+        )
+        self.auto_updates = Toggle(s.check_updates)
         self.auto_updates.toggled.connect(self._auto_updates)
-        b4.addWidget(self.auto_updates)
+        b4.addWidget(setting_row("Проверять новые версии", "Раз в несколько часов, ставится одной кнопкой", self.auto_updates))
+        upd_row = QFrame()
+        upd_row.setObjectName("rowLast")
+        ul = QVBoxLayout(upd_row)
+        ul.setContentsMargins(18, 14, 18, 14)
+        ul.setSpacing(8)
         upd = QHBoxLayout()
         upd.setSpacing(10)
+        vcol = QVBoxLayout()
+        vcol.setSpacing(2)
         self.version = label("", "title")
-        upd.addWidget(self.version)
+        vcol.addWidget(self.version)
         self.update_note = label("", "muted")
-        upd.addWidget(self.update_note, 1)
+        vcol.addWidget(self.update_note)
+        upd.addLayout(vcol, 1)
+        notes = button("Что нового", "link")
+        notes.clicked.connect(lambda: QDesktopServices.openUrl(QUrl("https://github.com/Satoros1/lexoplay/releases")))
+        upd.addWidget(notes, 0, Qt.AlignmentFlag.AlignVCenter)
+        upd.addSpacing(8)
         self.update_btn = button("Проверить")
         self.update_btn.clicked.connect(self._update_clicked)
-        upd.addWidget(self.update_btn)
-        b4.addLayout(upd)
+        upd.addWidget(self.update_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        ul.addLayout(upd)
         self.update_bar = QProgressBar()
         self.update_bar.setTextVisible(False)
         self.update_bar.setRange(0, 100)
         self.update_bar.hide()
-        b4.addWidget(self.update_bar)
-        notes = button("Что нового в версиях", "link")
-        notes.clicked.connect(lambda: QDesktopServices.openUrl(QUrl("https://github.com/Satoros1/lexoplay/releases")))
-        b4.addWidget(notes, 0, Qt.AlignmentFlag.AlignLeft)
+        ul.addWidget(self.update_bar)
+        b4.addWidget(upd_row)
         lay.addWidget(box4)
 
         lay.addWidget(label("СЕРВЕР", "section"))
@@ -1038,11 +1052,20 @@ class MorePage(QWidget):
         lay.addWidget(box2)
 
         lay.addWidget(label("ПОМОЩЬ", "section"))
-        box3, b3 = card()
-        self.debug = QCheckBox("Сохранять кадры и распознанный текст (для поиска ошибок)")
-        self.debug.setChecked(s.debug)
+        box3, b3 = card_list()
+        self.debug = Toggle(s.debug)
         self.debug.toggled.connect(self._debug)
-        b3.addWidget(self.debug)
+        b3.addWidget(
+            setting_row(
+                "Режим отладки",
+                "Сохранять кадры окна диалога и распознанный текст: пригодится, если что-то читается не так",
+                self.debug,
+            )
+        )
+        help_row = QFrame()
+        help_row.setObjectName("rowLast")
+        hl = QVBoxLayout(help_row)
+        hl.setContentsMargins(18, 14, 18, 14)
         btns = QHBoxLayout()
         report = button(" Собрать отчёт об ошибке", None, "send")
         report.clicked.connect(self._report)
@@ -1051,7 +1074,9 @@ class MorePage(QWidget):
         btns.addWidget(report)
         btns.addWidget(logs)
         btns.addStretch(1)
-        b3.addLayout(btns)
+        hl.addLayout(btns)
+        b3.addWidget(help_row)
+        b3 = hl  # заметка об отчёте под кнопками
         self.report_note = label("", "muted", wrap=True)
         self.report_note.hide()
         b3.addWidget(self.report_note)

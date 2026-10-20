@@ -149,10 +149,15 @@ QCheckBox {{ font-size: 10.5pt; spacing: 8px; }}
 QCheckBox::indicator {{ width: 18px; height: 18px; border-radius: 5px; border: 1px solid {BORDER_STRONG}; background: {CARD}; }}
 QCheckBox::indicator:checked {{ background: {GREEN}; border-color: {GREEN}; }}
 QRadioButton {{ font-size: 10.5pt; font-weight: 700; spacing: 8px; }}
-QSlider::groove:horizontal {{ height: 4px; background: {BORDER}; border-radius: 2px; }}
+QSlider {{ min-height: 22px; background: transparent; }}
+QSlider::groove:horizontal {{ height: 4px; background: #E4E1D8; border-radius: 2px; }}
 QSlider::sub-page:horizontal {{ background: {GREEN}; border-radius: 2px; }}
-QSlider::handle:horizontal {{ background: {CARD}; border: 2px solid {GREEN}; width: 14px; height: 14px;
+QSlider::add-page:horizontal {{ background: #E4E1D8; border-radius: 2px; }}
+QSlider::handle:horizontal {{ background: {CARD}; border: 1px solid #C9C5BA; width: 16px; height: 16px;
                              margin: -7px 0; border-radius: 9px; }}
+QSlider::handle:horizontal:hover {{ border: 2px solid {GREEN}; width: 14px; height: 14px; }}
+QLabel#valueChip {{ background: #F1EFE9; border: 1px solid {BORDER}; border-radius: 7px; padding: 3px 0;
+                   font-size: 9.5pt; font-weight: 700; color: {INK}; }}
 QProgressBar {{ background: #ECEAE4; border: none; border-radius: 4px; height: 8px; max-height: 8px; }}
 QProgressBar::chunk {{ background: {GREEN}; border-radius: 4px; }}
 QListWidget {{ background: {CARD}; border: 1px solid {BORDER}; border-radius: 12px; padding: 4px; outline: 0; }}
