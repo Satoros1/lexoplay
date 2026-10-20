@@ -306,3 +306,27 @@ def test_waits_for_text_over_animated_scene():
     out = run(p.run(animated, Target("DR", REGION)))
     assert out.kind == "translated"
     assert tr.requests[0].text == "Oh, and they mentioned the Ultimate Biker Gang Leader too."
+
+
+def test_wobbly_pixel_text_does_not_stall_translation():
+    """Буквы «дышат» (Hotline Miami): кадры всегда разные, OCR чуть плавает, но текст не растёт."""
+    import itertools
+    import random
+
+    rnd = random.Random(2)
+
+    def animated():
+        return Image.new("RGB", (800, 600), (rnd.randint(0, 255), 20, 40))
+
+    reads = itertools.cycle(["YOU'RE NOT LEAVING THIS ROOM", "YOUIRE NOT LEAVING THIS R00M", "YOU'RE NOT LEAVlNG THIS ROOM"])
+    calls = {"n": 0}
+
+    class WobblyOcr:
+        async def recognize(self, prepared):
+            calls["n"] += 1
+            return result(next(reads))
+
+    p = Pipeline(WobblyOcr(), FakeTranslator(), LineMemory(), sleep=no_sleep, run_sync=direct)
+    out = run(p.run(animated, Target("HM", REGION)))
+    assert out.kind == "translated"
+    assert calls["n"] <= 2 + 4  # два чтения на «перестал расти» и четыре способа для перевода

@@ -167,14 +167,16 @@ class Pipeline:
                 return frame
             prev = cur
         # сцена шевелится: ждём, пока перестанет меняться сам текст
+        # Текст «готов», когда перестал расти. Сравниваем мягко: пиксельный шрифт, который
+        # «дышит» (Hotline Miami), OCR читает чуть по-разному от кадра к кадру.
         read_mode = mode if mode in MODES else MODES[0]
         last = normalize_text((await self._read(frame, region, read_mode)).raw_text)
-        for _ in range(max(1, int(wait * 2 / 0.3))):
+        for _ in range(max(1, int(wait * 1.5 / 0.3))):
             await self._sleep(0.3)
             nxt = await self._grab(grab)
             now = normalize_text((await self._read(nxt, region, read_mode)).raw_text)
             frame = nxt
-            if now and similarity(now, last) >= 0.95 and len(now) <= len(last) + 2:
+            if now and len(now) <= len(last) + 3 and similarity(now, last) >= 0.8:
                 return frame
             last = now
         return frame
