@@ -974,6 +974,10 @@ def run(report: str) -> int:
     data = {"version": __version__, "python": sys.version, "frozen": bool(getattr(sys, "frozen", False)), "results": RESULTS}
     out.write_text(json.dumps(data, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
     if sys.stdout is not None:
+        try:  # консоль CI в cp1252: русский текст в деталях иначе роняет печать
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+        except (AttributeError, ValueError):
+            pass
         for r in RESULTS:
             print(f"[{r['status']:>4}] {r['check']}: {str(r['detail'])[:300]}")
     return 1 if failed else 0
