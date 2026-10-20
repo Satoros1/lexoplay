@@ -20,15 +20,23 @@ from collections.abc import Callable
 from pathlib import Path
 
 RESULTS: list[dict[str, object]] = []
+_TRACE: dict[str, object] = {}  # куда писать ход проверки: если процесс упадёт, видно, на чём
 
 
 def _check(name: str, fn: Callable[[], tuple[str, object]]) -> None:
+    progress = _TRACE.get("progress")
+    if isinstance(progress, Path):
+        with progress.open("a", encoding="utf-8") as f:
+            f.write(f"start {name}\n")
     t0 = time.perf_counter()
     try:
         status, detail = fn()
     except Exception as exc:
         status, detail = "fail", f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}"
     RESULTS.append({"check": name, "status": status, "detail": detail, "seconds": round(time.perf_counter() - t0, 3)})
+    report = _TRACE.get("report")
+    if isinstance(report, Path):  # отчёт после каждой проверки: упади процесс, готовое останется
+        report.write_text(json.dumps({"partial": True, "results": RESULTS}, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
 
 
 def _core() -> tuple[str, object]:
@@ -1538,6 +1546,12 @@ def run(report: str) -> int:
     out_dir = out.parent
     out_dir.mkdir(parents=True, exist_ok=True)
     from lexoplay import __version__
+
+    import faulthandler
+
+    crash = (out_dir / "crash.txt").open("w", encoding="utf-8")  # падение в C (хуки, Qt): стек всех потоков
+    faulthandler.enable(file=crash, all_threads=True)
+    _TRACE.update(progress=out_dir / "progress.txt", report=out, crash=crash)
 
     _check("core_pipeline", _core)
 
