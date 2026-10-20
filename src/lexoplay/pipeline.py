@@ -135,6 +135,7 @@ class Pipeline:
         self._run_sync = run_sync or (lambda fn: asyncio.to_thread(fn))
         self._debug = debug
         self.cache = cache
+        self.parallel_ok = True  # читать способами OCR одновременно; выключается, если движок не тянет
         self._warm_task: asyncio.Future | None = None
 
     async def _grab(self, grab: Grab) -> Image.Image:
@@ -181,11 +182,35 @@ class Pipeline:
             last = now
         return frame
 
-    async def _read(self, frame: Image.Image, region: Rect, mode: str) -> OcrResult:
+    async def _read(self, frame: Image.Image, region: Rect, mode: str, slot: int = 0) -> OcrResult:
         prepared = await asyncio.to_thread(prepare, frame, region, mode=mode)
         if self._debug:
             self._debug(f"prepared_{mode}", prepared.image)
+        if slot and getattr(self._ocr, "parallel", False):
+            return await self._ocr.recognize(prepared, slot=slot)  # type: ignore[call-arg]
         return await self._ocr.recognize(prepared)
+
+    async def _read_all(self, frame: Image.Image, region: Rect, modes: list[str]) -> list[OcrResult | BaseException]:
+        """Все способы: параллельно (у каждого свой движок OCR), а если так не вышло, по очереди."""
+        parallel = self.parallel_ok and getattr(self._ocr, "parallel", False)
+        if parallel:
+            got: list = list(
+                await asyncio.gather(
+                    *(self._read(frame, region, m, slot=i) for i, m in enumerate(modes)), return_exceptions=True
+                )
+            )
+        else:
+            got = [None] * len(modes)
+        for i, mode in enumerate(modes):
+            if got[i] is None or isinstance(got[i], BaseException):
+                if parallel:
+                    self.parallel_ok = False
+                    log.info("OCR несколькими способами сразу не вышло (%s), дальше по очереди", got[i])
+                try:
+                    got[i] = await self._read(frame, region, mode)
+                except Exception as exc:  # noqa: BLE001
+                    got[i] = exc
+        return got
 
     async def recognize(self, frame: Image.Image, target: Target, *, explore: bool = True) -> Reading:
         """Распознать окно диалога.
@@ -199,7 +224,7 @@ class Pipeline:
             reading = Reading(result, None, first, quality(result, self.source_lang))
         else:
             modes = [first] + [m for m in MODES if m != first]
-            got = await asyncio.gather(*(self._read(frame, target.region, m) for m in modes), return_exceptions=True)
+            got = await self._read_all(frame, target.region, modes)
             readings = []
             for mode, res in zip(modes, got, strict=True):
                 if isinstance(res, BaseException):

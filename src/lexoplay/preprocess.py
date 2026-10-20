@@ -53,14 +53,8 @@ def background_is_dark(img: Image.Image) -> bool:
 # pixel   пиксельный шрифт: увеличение «по пикселям», сглаживание и чёрно-белая картинка;
 # color   цветные буквы на тёмном фоне: яркость по самому яркому каналу (синий и красный
 #         текст в обычной яркости почти чёрный и сливается с фоном).
-MODES = ("normal", "pixel", "color", "bright")
-MODE_NAMES = {
-    "normal": "обычный",
-    "pixel": "пиксельный шрифт",
-    "color": "цветной текст",
-    "bright": "яркий текст с обводкой",
-}
-BRIGHT = 195  # bright: что ярче, то буквы (по самому яркому каналу)
+MODES = ("normal", "pixel", "color")
+MODE_NAMES = {"normal": "обычный", "pixel": "пиксельный шрифт", "color": "цветной текст"}
 
 
 def value_gray(img: Image.Image) -> Image.Image:
@@ -100,25 +94,6 @@ def _pixel_scale(frame_h: int) -> int:
     return max(2, min(4, round(upscale_factor(frame_h) + 0.5)))
 
 
-def bright_letters(img: Image.Image) -> Image.Image:
-    """Яркие буквы с обводкой поверх пёстрой сцены (Danganronpa и многие аниме-игры).
-
-    Буквы светлые, вокруг тёмная или цветная обводка. Берём всё яркое, а большие яркие
-    пятна фона (небо, вспышки, одежда) убираем: тонкие штрихи букв исчезают при сжатии
-    картинки, пятна остаются, по ним и вычитаем. На выходе тёмные буквы на белом."""
-    v = value_gray(img)
-    mask = v.point(lambda p: 255 if p >= BRIGHT else 0)
-    # пятно = шире ~1/6 высоты окна диалога (строка текста тоньше): сжимаем так, чтобы такое
-    # пятно стало 5 пикселей, тогда «стирание» на 5 пикселей убирает буквы, а пятна остаются
-    k = max(3, round(mask.height / 30))
-    small = mask.resize((max(1, mask.width // k), max(1, mask.height // k)), Image.Resampling.BOX)
-    small = small.point(lambda p: 255 if p >= 160 else 0)
-    blobs = small.filter(ImageFilter.MinFilter(5)).filter(ImageFilter.MaxFilter(7))
-    blobs = blobs.resize(mask.size, Image.Resampling.BILINEAR).point(lambda p: 255 if p >= 60 else 0)
-    letters = ImageChops.subtract(mask, blobs)  # яркое минус большие пятна
-    return ImageOps.invert(letters).filter(ImageFilter.GaussianBlur(0.6))
-
-
 def prepare(frame: Image.Image, region: Rect, *, mode: str = "normal", binarize: bool = False) -> Prepared:
     if binarize and mode == "normal":
         mode = "pixel"  # профили игр из 0.1–0.3
@@ -139,8 +114,6 @@ def prepare(frame: Image.Image, region: Rect, *, mode: str = "normal", binarize:
         crop_img = crop_img.resize(
             (round(crop_img.width * scale), round(crop_img.height * scale)), Image.Resampling.LANCZOS
         )
-    if mode == "bright":
-        return Prepared(bright_letters(crop_img), scale, crop, frame.width, frame.height)
     gray = value_gray(crop_img) if mode == "color" else crop_img.convert("L")
     if background_is_dark(gray):
         gray = ImageOps.invert(gray)  # тёмный текст на светлом читается стабильнее

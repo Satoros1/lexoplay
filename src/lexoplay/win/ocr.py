@@ -41,10 +41,31 @@ def _make_buffer(data: bytes):  # type: ignore[no-untyped-def]
 
 
 class WinOcr:
+    """parallel: у каждого «слота» свой OcrEngine, чтобы читать несколькими способами сразу.
+    Один движок одновременные вызовы не переносит (проверено в CI: часть падает)."""
+
+    parallel = True
+
     def __init__(self, lang: str = "en-US") -> None:
         self._lang_tag = lang
         self._engine = None
+        self._extra: dict[int, object] = {}
         self.language_used: str | None = None
+
+    def _engine_for(self, slot: int):  # type: ignore[no-untyped-def]
+        base = self._ensure()
+        if slot <= 0:
+            return base
+        engine = self._extra.get(slot)
+        if engine is None:
+            from winrt.windows.globalization import Language
+            from winrt.windows.media.ocr import OcrEngine
+
+            engine = OcrEngine.try_create_from_language(Language(self.language_used or self._lang_tag))
+            if engine is None:
+                return base
+            self._extra[slot] = engine
+        return engine
 
     def _ensure(self):  # type: ignore[no-untyped-def]
         if self._engine is not None:
@@ -74,12 +95,14 @@ class WinOcr:
         self._ensure()
         return self.language_used or self._lang_tag
 
-    async def recognize_image(self, img: Image.Image) -> list[tuple[str, list[tuple[str, float, float, float, float]]]]:
+    async def recognize_image(
+        self, img: Image.Image, slot: int = 0
+    ) -> list[tuple[str, list[tuple[str, float, float, float, float]]]]:
         """Сырые строки: [(текст строки, [(слово, x, y, w, h), ...]), ...] в пикселях img."""
         from winrt.windows.graphics.imaging import BitmapPixelFormat, SoftwareBitmap
         from winrt.windows.media.ocr import OcrEngine
 
-        engine = self._ensure()
+        engine = self._engine_for(slot)
         limit = int(OcrEngine.max_image_dimension)
         scale = 1.0
         if max(img.width, img.height) > limit:
@@ -99,8 +122,8 @@ class WinOcr:
             out.append((line.text, words))
         return out
 
-    async def recognize(self, prepared: Prepared) -> OcrResult:
-        raw = await self.recognize_image(prepared.image)
+    async def recognize(self, prepared: Prepared, slot: int = 0) -> OcrResult:
+        raw = await self.recognize_image(prepared.image, slot)
         lines = []
         for _text, words in raw:
             lines.append(Line(tuple(Word(t, prepared.to_norm(x, y, w, h)) for t, x, y, w, h in words)))

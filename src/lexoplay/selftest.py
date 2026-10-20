@@ -241,7 +241,9 @@ def _ocr_auto(out_dir: Path) -> Callable[[], tuple[str, object]]:
                     prep.image.save(out_dir / f"ocr-auto-{name}-{mode}.png")
                     res = await ocr.recognize(prep)
                     each[mode] = {"quality": str(quality(res)), "text": res.raw_text}
+                t0 = time.perf_counter()
                 reading = await p.recognize(frame, Target("t", region))
+                report[f"{name}_seconds"] = round(time.perf_counter() - t0, 3)
                 report[name] = {
                     "chosen": reading.mode,
                     "quality": str(reading.quality),
@@ -250,6 +252,7 @@ def _ocr_auto(out_dir: Path) -> Callable[[], tuple[str, object]]:
                     "tried": reading.tried,
                     "modes": each,
                 }
+            report["parallel"] = p.parallel_ok
             return report
 
         try:
@@ -263,6 +266,9 @@ def _ocr_auto(out_dir: Path) -> Callable[[], tuple[str, object]]:
             return "fail", report
         color_text = str(color["text"]).lower()  # type: ignore[index]
         color_ok = all(w in color_text for w in ("mentioned", "ultimate", "biker", "leader", "too"))
+        all_modes = all(len(report[c]["tried"]) >= 3 for c in ("novel", "pixel", "vn_color"))  # type: ignore[index]
+        if not all_modes:
+            return "fail", report  # каким-то способом не прочитали вовсе: подбор способа не работает
         return ("ok" if pixel["ratio"] >= 0.75 and color_ok else "warn"), report  # type: ignore[index]
 
     return run
