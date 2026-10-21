@@ -519,6 +519,7 @@ def _app_flow(out_dir: Path) -> Callable[[], tuple[str, object]]:
             u32 = ctypes.windll.user32
             raw_seen: list[str] = []
             app.input.pressed.connect(raw_seen.append)
+            pump(lambda: False, 0.3)  # окно встало на место и панель разложилась под его размер
             lr = _wa.window_rect(int(app.word_layer.winId()))
             v = app.word_layer.views[3] if app.word_layer.views else None  # рамки ставит панель
             if v is not None:
