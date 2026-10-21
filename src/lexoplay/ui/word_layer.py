@@ -134,6 +134,7 @@ class WordLayer(QWidget):
         self.deck_label = ""
         self.explain_key = "F7"
         self.cursor_locked = False  # игра держит курсор: подсказка про стрелки
+        self.focus_warning = False  # фокус у игры: клик может дойти до неё, подсказка про стрелки
         self._focus: int | None = None  # куда двигают стрелки
         self._close_armed = False  # нажали мимо слов (или правой): закроемся, когда кнопку отпустят
         self._blank = False
@@ -182,6 +183,7 @@ class WordLayer(QWidget):
         self._sel, self._anchor, self._hover, self._card, self._focus = [], None, None, None, None
         self._explain, self._explain_open = None, False
         self.cursor_locked = False
+        self.focus_warning = False
         self._close_armed = False
         self._pick.stop()
         self._open = True
@@ -698,6 +700,8 @@ class WordLayer(QWidget):
         fm = QFontMetricsF(f)
         if self.cursor_locked:
             text = "Курсор держит игра: слова стрелками ←→, Shift+→ фраза, Enter сохранить, Esc выйти"
+        elif self.focus_warning:
+            text = "Игра не отдала фокус: клик может пролистать реплику. Слова стрелками ←→, Enter сохранить"
         else:
             text = "Клик или ←→ по слову · Shift фраза · Esc выйти"
         x = max(4.0, region.x)
@@ -713,7 +717,7 @@ class WordLayer(QWidget):
         p.setBrush(bg)
         p.drawRoundedRect(rect, h / 2, h / 2)
         p.setFont(f)
-        p.setPen(QColor("#F2C94C") if self.cursor_locked else TEXT_MUTED)
+        p.setPen(QColor("#F2C94C") if self.cursor_locked or self.focus_warning else TEXT_MUTED)
         p.drawText(rect, int(Qt.AlignmentFlag.AlignCenter), text)
 
     def _paint_explain(self, p: QPainter, st: ExplainState, region: Rect, bounds: Rect, px: float) -> None:

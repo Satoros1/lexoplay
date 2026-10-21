@@ -320,6 +320,7 @@ class App(QObject):
         self._cursor_timer.setInterval(CURSOR_TICK_MS)
         self._cursor_timer.timeout.connect(self._cursor_tick)
         self._took_focus = False  # слой слов забрал фокус у игры, чтобы она отпустила курсор
+        self._last_words_click = 0.0  # когда хук последний раз отдал нам клик в режиме слов
         self._took_focus_at = 0.0
         # игры, которые от потери фокуса свернулись: фокус у них больше не берём (помним и после перезапуска)
         self._focus_bad: set[str] = set(settings.no_focus_games)
@@ -2597,12 +2598,13 @@ class App(QObject):
             return False
         exe = self.active.exe
         why = ""
-        if exe in self._focus_bad:
-            why = "она сворачивалась без фокуса"
+        if exe in self._focus_bad and self._game_fullscreen():
+            why = "она сворачивалась без фокуса"  # в окне не свернётся: там фокус берём
         elif self._magpie_scaling():
             why = "игру растягивает Magpie"
         if why:
             log.info("режим слов без фокуса у %s: %s", exe, why)
+            self.word_layer.focus_warning = True
             return False
         if winapi.exclusive_fullscreen():
             # полноэкранная игра может свернуться без фокуса: тогда _on_minimized развернёт её
@@ -2613,7 +2615,37 @@ class App(QObject):
         winapi.force_foreground(hwnd)
         self._took_focus = True
         self._took_focus_at = time.monotonic()
+        QTimer.singleShot(150, lambda: self._check_words_focus(retry=True))
         return True
+
+    def _check_words_focus(self, *, retry: bool) -> None:
+        """Взялся ли фокус на самом деле: если нет, ещё раз, а потом честная подсказка в панели."""
+        if not self.word_layer.is_open or not self._took_focus:
+            return
+        layer = int(self.word_layer.winId())
+        fg = winapi.root_window(winapi.foreground_window())
+        if fg == layer:
+            log.info("режим слов: фокус у слоя, игра ввод не получает")
+            return
+        who = winapi.process_exe(winapi.window_pid(fg)) if fg else None
+        if retry:
+            log.info("режим слов: фокус не взялся (в фокусе %s), пробую ещё раз", who)
+            winapi.force_foreground(layer)
+            QTimer.singleShot(200, lambda: self._check_words_focus(retry=False))
+            return
+        log.warning("режим слов: фокус так и не взялся (в фокусе %s), клик может дойти до игры", who)
+        self.word_layer.focus_warning = True
+        self.word_layer.update()
+
+    def _game_fullscreen(self) -> bool:
+        """Игра на весь монитор (полноэкранный режим), а не в окне."""
+        if self.active is None:
+            return False
+        try:
+            w, m = winapi.window_rect(self.active.hwnd), winapi.monitor_rect(self.active.hwnd)
+        except Exception:
+            return False
+        return w.x <= m.x + 2 and w.y <= m.y + 2 and w.right >= m.right - 2 and w.bottom >= m.bottom - 2
 
     def _magpie_scaling(self) -> bool:
         if self.active is None or self.settings.magpie_mode == "never":
@@ -2649,6 +2681,7 @@ class App(QObject):
     def _on_shield_click(self, vk: int, x: int, y: int, mods: int) -> None:
         """Клик над слоем слов, который хук не пустил в игру: отвечаем на него сами."""
         layer = self.word_layer
+        self._last_words_click = time.monotonic()
         if not layer.is_open:
             return
         lx, ly = to_local(int(layer.winId()), x, y, layer.devicePixelRatioF())
@@ -2659,6 +2692,13 @@ class App(QObject):
             self.word_layer.release()
 
     def _on_words_finished(self, reason: str) -> None:
+        if reason == "changed" and time.monotonic() - self._last_words_click < 2.0:
+            fg = winapi.root_window(winapi.foreground_window())
+            log.warning(
+                "реплика сменилась сразу после клика в режиме слов: фокус у слоя %s, взяли фокус %s, игра на весь экран %s, %s",
+                fg == int(self.word_layer.winId()), self._took_focus, self._game_fullscreen(),
+                self.active.exe if self.active else "?",
+            )  # fmt: skip
         self.word_ctx = None
         self.shield.stop()
         self.hotkeys.set_group("words", False)

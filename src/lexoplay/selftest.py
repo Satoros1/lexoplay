@@ -711,6 +711,8 @@ def _app_vs_game(out_dir: Path) -> Callable[[], tuple[str, object]]:
             lh = int(app.word_layer.winId())
             info["took_focus"] = app._took_focus
             info["layer_foreground"] = _wa.root_window(_wa.foreground_window()) == lh
+            pump(lambda: False, 0.4)  # проверка фокуса через 150 мс: подсказки «игра не отдала фокус» быть не должно
+            info["focus_warning"] = app.word_layer.focus_warning
             v = app.word_layer.views[3] if app.word_layer.views else None
             lr = _wa.window_rect(lh)
             s0 = game_state()
@@ -766,6 +768,7 @@ def _app_vs_game(out_dir: Path) -> Callable[[], tuple[str, object]]:
             info.get("game_foreground")
             and info.get("took_focus")
             and info.get("layer_foreground")
+            and info.get("focus_warning") is False
             and info.get("picked")
             and info.get("card_ready")
             and info.get("card_saved")
