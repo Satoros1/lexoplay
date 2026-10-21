@@ -3,10 +3,11 @@
 Основной путь: сервер Lexo (/desktop/translate), там кеш, лимит и языки из профиля.
 Запасной путь без привязки: Claude Haiku напрямую своим ключом Anthropic.
 
-Напрямую переводим быстро:
-* thinking выключен: Haiku 5.x по умолчанию сначала думает, это лишние секунды и
-  токены, а при маленьком max_tokens ответ обрывался до текста;
-* модель отвечает просто переводом, без JSON, поэтому разбирать нечего;
+Напрямую:
+* модель немного думает перед ответом (adaptive thinking, effort medium): перевод ровнее
+  на секунду-другую дольше. В настройках это выключается, тогда thinking выключен совсем;
+* модель отвечает переводом, а после строки «@@» той же репликой по-английски без ошибок
+  OCR: её показывает режим слов. Без JSON, поэтому перевод виден сразу, пока пишется;
 * ответ идёт потоком: первые слова видны в строке, пока модель дописывает остальное;
 * соединение с сервером открывается заранее, пока идёт распознавание.
 """
@@ -38,7 +39,7 @@ LANGS = {
 
 # Версия промпта и обработки перевода. Меняется, когда перевод заметно меняется: кеш
 # реплик со старой версией не используется, они переведутся заново уже по-новому.
-TRANSLATION_VERSION = 3
+TRANSLATION_VERSION = 4  # 4: модель думает перед переводом и чинит оригинал после «@@»
 
 SYSTEM_PROMPT = """You are the localizer of the video game "{game}". The player reads its dialogue in {target}: you translate it line by line while they play.
 
@@ -53,8 +54,10 @@ Write the translation a professional {target} game localizer would ship:
 - If the speaker label looks like a piece of the sentence rather than a name, treat it as part of the line.
 - Punctuation: keep ? ! and three dots (...) as in the original, and a period where it has one. If the original ends with a comma or breaks off because the sentence continues in the next text box, end with "..." and never with a comma.
 {examples}
-Reply with the translation of the line after "Translate this line" and nothing else: no quotes, no notes, no original text, no speaker name.
+Reply with the translation of the line after "Translate this line". Then on a new line write "@@" and that line in {source} as the game really shows it: the OCR mistakes fixed, the same words and punctuation, normal capitalization, no speaker name. Nothing else: no quotes, no notes.
 Never use the em dash character; use a comma, a colon or a new sentence instead."""
+
+SOURCE_MARK = "@@"
 
 # Образцы хорошего перевода: маленькой модели они дают больше, чем любые правила.
 EXAMPLES = {
@@ -79,6 +82,7 @@ def examples_block(target_lang: str) -> str:
 
 
 MAX_TOKENS = 1024
+MAX_TOKENS_THINKING = 4096  # thinking тратит те же max_tokens, что и ответ
 
 
 class TranslationError(Exception):
@@ -138,6 +142,7 @@ def lang_name(code: str) -> str:
 def build_system(req: TranslateRequest) -> str:
     return SYSTEM_PROMPT.format(
         target=lang_name(req.target_lang),
+        source=lang_name(req.source_lang),
         game=(req.game or "unknown").replace('"', "'"),
         examples=examples_block(req.target_lang),
     )
@@ -251,10 +256,36 @@ _LABEL = re.compile(r"^(translation|перевод)\s*:\s*", re.I)
 _TAG = re.compile(r"</?(?:translation|line)[^>]*>", re.I)
 
 
+def split_reply(raw: str) -> tuple[str, str | None]:
+    """Ответ модели → (перевод, исправленный оригинал после «@@» или None)."""
+    if SOURCE_MARK not in raw:
+        return raw, None
+    tr, src = raw.split(SOURCE_MARK, 1)
+    src = " ".join(src.split()).strip(_QUOTES).strip()
+    return tr, src or None
+
+
+def pick_source(ocr_text: str, fixed: str | None) -> str:
+    """Оригинал для показа: исправленный моделью, если это та же реплика, а не что-то своё."""
+    from difflib import SequenceMatcher
+
+    if not fixed:
+        return ocr_text
+    a = re.sub(r"\W+", "", ocr_text.lower())
+    b = re.sub(r"\W+", "", fixed.lower())
+    if not a or not b or not 0.6 <= len(b) / len(a) <= 1.6:
+        return ocr_text
+    return fixed if SequenceMatcher(None, a, b).ratio() >= 0.6 else ocr_text
+
+
 def clean_translation(text: str, speaker: str | None = None, *, partial: bool = False) -> str:
     """Ответ модели → строка для показа: без кавычек, подписи «Перевод:», имени говорящего.
 
-    Если модель по привычке всё же ответила JSON или обернула ответ в теги, достаём перевод."""
+    Если модель по привычке всё же ответила JSON или обернула ответ в теги, достаём перевод.
+    Исправленный оригинал после «@@» сюда не попадает."""
+    text = split_reply(text)[0]
+    if partial:
+        text = text.rstrip("@")  # «@@» дописывается
     t = _TAG.sub("", text).strip()
     if partial and t.startswith("<") and ">" not in t:
         return ""  # тег дописывается
@@ -298,16 +329,17 @@ class AnthropicTranslator:
     """Haiku через официальный SDK, потоком. Ключ и модель берутся из настроек.
 
     Без temperature: модели Claude 4.7+ и 5.x не принимают параметры сэмплинга.
-    thinking выключен; если какая-то модель его выключить не даст, переходим на effort=low.
+    think: модель немного думает (effort medium). Модель без effort переводит без thinking;
+    модель, которая не даёт выключить thinking, переводит с effort=low.
     """
 
-    def __init__(self, api_key: str, model: str, *, timeout: float = 15.0) -> None:
+    def __init__(self, api_key: str, model: str, *, timeout: float = 20.0, think: bool = True) -> None:
         import anthropic  # лениво: тесты и самопроверка не тянут SDK без нужды
 
         self._anthropic = anthropic
         self._client = anthropic.AsyncAnthropic(api_key=api_key, timeout=timeout, max_retries=1)
         self._model = model
-        self._thinking_off = True
+        self._mode = "think" if think else "off"  # think | off | low
         self._last_used = 0.0
 
     def _params(self, req: TranslateRequest) -> dict:
@@ -318,7 +350,10 @@ class AnthropicTranslator:
             "system": [{"type": "text", "text": build_system(req), "cache_control": {"type": "ephemeral"}}],
             "messages": [{"role": "user", "content": build_user(req)}],
         }
-        if self._thinking_off:
+        if self._mode == "think":
+            params["output_config"] = {"effort": "medium"}
+            params["max_tokens"] = MAX_TOKENS_THINKING
+        elif self._mode == "off":
             params["thinking"] = {"type": "disabled"}
         else:
             params["output_config"] = {"effort": "low"}
@@ -358,16 +393,22 @@ class AnthropicTranslator:
             try:
                 raw, stop, usage = await self._stream(req)
             except a.BadRequestError as exc:
-                if self._thinking_off and "thinking" in str(exc).lower():
+                msg = str(exc).lower()
+                if self._mode == "think" and ("effort" in msg or "output_config" in msg):
+                    log.info("модель без effort, перевожу без thinking: %s", exc)
+                    self._mode = "off"
+                    continue
+                if self._mode == "off" and "thinking" in msg:
                     log.info("модель не даёт выключить thinking, перехожу на effort=low: %s", exc)
-                    self._thinking_off = False
+                    self._mode = "low"
                     continue
                 raise friendly_error(a, exc, self._model) from exc
             except Exception as exc:
                 raise friendly_error(a, exc, self._model) from exc
             translation = fix_punctuation(req.text, clean_translation(raw, req.speaker))
             if translation:
-                return TranslateResult(source=req.text, translation=translation, usage=usage)
+                source = pick_source(req.text, split_reply(raw)[1])
+                return TranslateResult(source=source, translation=translation, usage=usage)
             if stop == "refusal":
                 raise TranslationError("Модель отказалась переводить эту реплику.")
             log.warning("пустой перевод: stop_reason=%s, ответ=%r", stop, raw[:200])

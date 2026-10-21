@@ -118,25 +118,51 @@ def _ok(http, body):
     return http.Response(200, headers={"content-type": "text/event-stream"}, content=body)
 
 
-def test_streams_translation_without_thinking_or_temperature():
+def test_streams_translation_with_medium_effort_and_fixed_source():
     http = _http()
     seen = []
 
     def handler(req):
         seen.append(json.loads(req.content))
-        return _ok(http, _sse("Подозреваемые ", "утверждают, что им ", "угрожали…"))
+        return _ok(
+            http, _sse("Подозреваемые ", "утверждают, что им ", "угрожали…\n@", "@ ...Suspects claim to have been threatened into...")
+        )
 
     parts = []
-    req = TranslateRequest("...SUSPECTS CLAIM TO HAVE BEEN THREATENED INTO...", None, "Hotline Miami", on_partial=parts.append)
+    req = TranslateRequest("...SUSPECTS CLAIM TO HAVE BEEN THREATENED INT0...", None, "Hotline Miami", on_partial=parts.append)
     res = asyncio.run(_sdk_translator(handler).translate(req))
     assert res.translation == "Подозреваемые утверждают, что им угрожали…"
-    assert res.source == req.text
-    assert parts[0] == "Подозреваемые" and parts[-1].startswith("Подозреваемые утверждают")
+    assert res.source == "...Suspects claim to have been threatened into..."  # оригинал без ошибок OCR, для режима слов
+    assert parts[0] == "Подозреваемые" and not any("@" in x or "Suspects" in x for x in parts)
     body = seen[0]
-    assert body["thinking"] == {"type": "disabled"}  # Haiku 5.x иначе сначала думает
-    assert body["stream"] is True and body["max_tokens"] >= 1024
+    assert body["output_config"] == {"effort": "medium"} and "thinking" not in body  # немного думает перед ответом
+    assert body["stream"] is True and body["max_tokens"] >= 4096  # thinking тратит те же max_tokens
     assert "temperature" not in body and "top_p" not in body
     assert "Hotline Miami" in body["system"][0]["text"] and body["system"][0]["cache_control"] == {"type": "ephemeral"}
+    assert "@@" in body["system"][0]["text"]
+
+
+def test_without_thinking_and_strange_source_is_ignored():
+    import anthropic
+
+    from lexoplay.translate import AnthropicTranslator, pick_source
+
+    http = _http()
+    seen = []
+
+    def handler(req):
+        seen.append(json.loads(req.content))
+        return _ok(http, _sse("Привет.\n@@ Something totally different here, not the line at all."))
+
+    tr = AnthropicTranslator("sk-test", "claude-haiku-5-5", think=False)
+    tr._client = anthropic.AsyncAnthropic(  # noqa: SLF001
+        api_key="sk-test", max_retries=0, http_client=http.AsyncClient(transport=http.MockTransport(handler))
+    )
+    res = asyncio.run(tr.translate(TranslateRequest("Hi there.", None, "G")))
+    assert res.translation == "Привет." and res.source == "Hi there."  # чужой текст после @@ не берём
+    assert seen[0]["thinking"] == {"type": "disabled"} and "output_config" not in seen[0]
+    assert pick_source("l can't be|ieve it", "I can't believe it") == "I can't believe it"
+    assert pick_source("Hi", None) == "Hi"
 
 
 def test_thinking_block_and_json_habit_are_handled():
@@ -149,13 +175,17 @@ def test_thinking_block_and_json_habit_are_handled():
     assert res.translation == "Привет"
 
 
-def test_falls_back_to_low_effort_if_thinking_cannot_be_disabled():
+def test_falls_back_without_effort_then_to_low_effort():
     http = _http()
     seen = []
 
     def handler(req):
         body = json.loads(req.content)
         seen.append(body)
+        if "output_config" in body and body["output_config"].get("effort") == "medium":
+            return http.Response(
+                400, json={"type": "error", "error": {"type": "invalid_request_error", "message": "effort is not supported"}}
+            )
         if "thinking" in body:
             return http.Response(
                 400,
@@ -166,9 +196,10 @@ def test_falls_back_to_low_effort_if_thinking_cannot_be_disabled():
     tr = _sdk_translator(handler)
     res = asyncio.run(tr.translate(TranslateRequest("Done", None, "G")))
     assert res.translation == "Готово"
-    assert seen[1]["output_config"] == {"effort": "low"} and "thinking" not in seen[1]
+    assert seen[1]["thinking"] == {"type": "disabled"} and "output_config" not in seen[1]  # без effort
+    assert seen[2]["output_config"] == {"effort": "low"} and "thinking" not in seen[2]
     asyncio.run(tr.translate(TranslateRequest("Again", None, "G")))
-    assert "thinking" not in seen[2]  # запомнили, больше не пробуем
+    assert seen[3]["output_config"] == {"effort": "low"}  # запомнили, больше не пробуем
 
 
 def test_only_thinking_and_cut_off_gives_clear_error():

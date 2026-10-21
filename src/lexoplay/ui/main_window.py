@@ -914,8 +914,18 @@ class ViewPage(QWidget):
         self.original.toggled.connect(self._original)
         lay.addWidget(box)
 
-        lay.addWidget(label("АВТОПЕРЕВОД", "section"))
+        lay.addWidget(label("ПЕРЕВОД", "section"))
         auto_box, al = card_list()
+        self.think = Toggle(s.translate_think)
+        self.think.toggled.connect(self._think)
+        al.addWidget(
+            setting_row(
+                "Модель думает перед переводом",
+                "Трудные реплики переводятся точнее, перевод приходит на секунду-две позже. "
+                "Это для своего ключа Anthropic: с Lexo так переводит сервер.",
+                self.think,
+            )
+        )
         self.auto = Toggle(s.auto_translate)
         self.auto.toggled.connect(self._auto)
         hk = s.hotkeys
@@ -994,6 +1004,11 @@ class ViewPage(QWidget):
         self.ctl.settings.show_original = on
         self.preview.update()
         self.ctl.settings_changed()
+
+    def _think(self, on: bool) -> None:
+        if self.ctl.settings.translate_think != on:
+            self.ctl.settings.translate_think = on
+            self.ctl.settings_changed()
 
     def _auto(self, on: bool) -> None:
         if self.ctl.settings.auto_translate != on:

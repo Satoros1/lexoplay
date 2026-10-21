@@ -450,6 +450,11 @@ def _app_flow(out_dir: Path) -> Callable[[], tuple[str, object]]:
                 )
             if path == "/desktop/vocab":
                 return httpx.Response(200, json={"items": ["reluctant"], "server_time": "2026-10-19T00:00:00Z"})
+            if path == "/desktop/translate":  # режим слов сам переводит реплику без перевода
+                text = (body or {}).get("text") or "This place feels eerie after dark."
+                return httpx.Response(
+                    200, json={"source": text, "translation": "Это место по ночам жуткое.", "cached": False, "usage": {"used": 4, "limit": 50}}
+                )
             if path == "/desktop/lookup":
                 return httpx.Response(
                     200,
@@ -515,7 +520,7 @@ def _app_flow(out_dir: Path) -> Callable[[], tuple[str, object]]:
             raw_seen: list[str] = []
             app.input.pressed.connect(raw_seen.append)
             lr = _wa.window_rect(int(app.word_layer.winId()))
-            v = app.word_ctx.views[3] if app.word_ctx else None
+            v = app.word_layer.views[3] if app.word_layer.views else None  # рамки ставит панель
             if v is not None:
                 u32.SetCursorPos(int(lr.x + (v.rect.x + v.rect.w / 2) * lr.w), int(lr.y + (v.rect.y + v.rect.h / 2) * lr.h))
                 pump(lambda: False, 0.1)
@@ -610,6 +615,11 @@ def _app_vs_game(out_dir: Path) -> Callable[[], tuple[str, object]]:
 
         def handler(req: httpx.Request) -> httpx.Response:
             path = req.url.path
+            if path == "/desktop/translate":
+                text = json.loads(req.content).get("text") or "This place feels eerie after dark."
+                return httpx.Response(
+                    200, json={"source": text, "translation": "Это место по ночам жуткое.", "cached": False, "usage": {"used": 4, "limit": 50}}
+                )
             if path == "/desktop/me":
                 user = {"username": "selftest", "native_lang": "ru", "learning_lang": "en", "premium": False}
                 return httpx.Response(200, json={"user": user, "usage": {"used": 0, "limit": 50}, "device_name": "CI"})
@@ -700,7 +710,7 @@ def _app_vs_game(out_dir: Path) -> Callable[[], tuple[str, object]]:
             lh = int(app.word_layer.winId())
             info["took_focus"] = app._took_focus
             info["layer_foreground"] = _wa.root_window(_wa.foreground_window()) == lh
-            v = app.word_ctx.views[3] if app.word_ctx else None
+            v = app.word_layer.views[3] if app.word_layer.views else None
             lr = _wa.window_rect(lh)
             s0 = game_state()
             if v is not None:
@@ -847,6 +857,15 @@ def _own_key_flow(out_dir: Path) -> Callable[[], tuple[str, object]]:
         app._rebuild_translator()
         info: dict[str, object] = {"translator": type(app.translator).__name__}
         app.own_lookup = FakeLookup()  # type: ignore[assignment]
+
+        class FakeTranslator:  # реплики без перевода режим слов переводит сам: без настоящего ключа
+            async def translate(self, req):  # type: ignore[no-untyped-def]
+                from lexoplay.translate import TranslateResult
+
+                calls.append(("anthropic-translate", req.text))
+                return TranslateResult(source=req.text, translation="Это место по ночам жуткое.")
+
+        app.translator = FakeTranslator()  # type: ignore[assignment]
         try:
             app.start()
             app.display = Rect(80, 80, 1000, 700)
@@ -857,6 +876,7 @@ def _own_key_flow(out_dir: Path) -> Callable[[], tuple[str, object]]:
                 x += 0.012 * len(w) + 0.012
             line = CurrentLine(game.exe, OcrResult((Line(tuple(words)),)), Utterance(None, "This place feels eerie after dark."), None, time.time())
             app._open_words(game, session, line)
+            info["panel_translated"] = pump(lambda: app.word_layer._translation == "Это место по ночам жуткое.")  # noqa: SLF001
             app._on_word_selected([3])
             info["card_ready"] = pump(lambda: bool(app.word_ctx and app.word_ctx.card and app.word_ctx.card.phase == "ready"))
             info["button"] = app.word_ctx.card.button if app.word_ctx and app.word_ctx.card else None
@@ -895,7 +915,8 @@ def _own_key_flow(out_dir: Path) -> Callable[[], tuple[str, object]]:
         card = next((c[1] for c in calls if c[0] == "/desktop/cards"), None) or {}
         info["card_payload"] = card
         ok = (
-            info["card_ready"]
+            info["panel_translated"]
+            and info["card_ready"]
             and info["button"] == "+ в мои слова"
             and info["saved_local"] == [("eerie", "жуткий, зловещий", False)]
             and info["explain_ready"]
@@ -1428,7 +1449,7 @@ def _qt_checks(out_dir: Path) -> None:
         sh.clicked.connect(on_click)
         info: dict[str, object] = {"keys": sorted(keys.values()), "started": sh.start(lh, keys, set()), "failed": sh.failed}
         r = _wa.window_rect(lh)
-        v0 = views[0]
+        v0 = layer.views[0]  # рамку слову ставит панель
         u32.SetCursorPos(int(r.x + (v0.rect.x + v0.rect.w / 2) * r.w), int(r.y + (v0.rect.y + v0.rect.h / 2) * r.h))
         pump(0.1)
         u32.mouse_event(0x0002, 0, 0, 0, 0)  # левая вниз над словом

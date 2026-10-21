@@ -1,15 +1,17 @@
-"""Режим слов (F3) и разбор реплики (F7): подчёркивания под словами, карточка слова, разбор.
+"""Режим слов (F3) и разбор реплики (F7): реплика нашим шрифтом поверх окна диалога, карточка, разбор.
 
-Отдельное окно поверх игры размером с display_rect. Пока режим открыт, оно лежит над
-всей игрой (слегка затемняет её) и отвечает на все клики над ней: по слову, по кнопкам,
-по пустому месту (это закрывает режим, когда кнопку отпустят). Сами клики и колесо до игры
-не доходят: их ещё до окон забирает хук (win/llhooks.py) и передаёт сюда в click() и
-release(), а App на время режима забирает у игры фокус. Иначе игры, которые читают мышь
-через Raw Input или DirectInput, пропускали бы реплику.
+Отдельное окно поверх игры размером с display_rect. Окно диалога игры оно закрывает своей
+панелью: в ней имя, реплика и перевод, написанные нами. Рамки слов из OCR неточные (буква
+мимо, слово пополам), а свои слова мы раскладываем сами и знаем, где каждое: клик попадает
+ровно в слово. Остальную игру окно слегка затемняет и отвечает на все клики над ней: по
+слову, по кнопкам, мимо панели (это закрывает режим, когда кнопку отпустят). Сами клики и
+колесо до игры не доходят: их ещё до окон забирает хук (win/llhooks.py) и передаёт сюда в
+click() и release(), а App на время режима забирает у игры фокус. Иначе игры, которые
+читают мышь через Raw Input или DirectInput, пропускали бы реплику.
 
-Окно создаётся с WS_EX_NOACTIVATE: фокус ему даёт только App, и не всем играм (эксклюзивный
-полноэкранный режим, Magpie). Esc, Enter и стрелки приходят через App глобальными клавишами. Стрелками слова выбираются и без мыши: это выручает, когда игра держит
-курсор у себя (тогда App ещё и забирает фокус на время режима, см. CursorGuard).
+Окно создаётся с WS_EX_NOACTIVATE: фокус ему даёт только App. Esc, Enter и стрелки
+приходят через App. Стрелками слова выбираются и без мыши: это выручает, когда игра
+держит курсор у себя.
 
 Перед тем как спрятаться, окно рисует пустой кадр: иначе при следующем F3 Windows на
 миг показывала бы последний кадр (например, старый разбор реплики).
@@ -18,6 +20,7 @@ release(), а App на время режима забирает у игры фо
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass, replace
 
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import (
@@ -29,6 +32,7 @@ from PySide6.QtGui import (
     QPainter,
     QPaintEvent,
     QPen,
+    QResizeEvent,
     QWheelEvent,
 )
 from PySide6.QtWidgets import QWidget
@@ -45,10 +49,12 @@ from lexoplay.wordmode import (
     union,
     word_in_line,
 )
+from lexoplay.words import clean
 
 Placer = Callable[[QWidget, Rect], None]
 
 KNOWN = QColor("#F2C94C")
+TRANSLATION = QColor("#C3CBD8")
 IDLE_MS = 30_000
 PICK_MS = 350  # стрелками: значение слова запрашиваем, когда выбор остановился
 
@@ -56,6 +62,24 @@ PICK_MS = 350  # стрелками: значение слова запраши�
 def _qt_placer(widget: QWidget, rect: Rect) -> None:
     x, y, w, h = rect.to_int()
     widget.setGeometry(x, y, w, h)
+
+
+@dataclass
+class _Plan:
+    """Раскладка панели: координаты внутри неё, считая от левого верхнего угла."""
+
+    size: float  # кегль реплики
+    pad: float
+    width: float
+    words: list[tuple[float, float, float, float]]  # x, y, w, h каждого слова
+    name_y: float
+    tr_y: float  # где начинается перевод (0: перевода нет)
+    tr_h: float
+    height: float
+
+
+def _rect(r: QRectF) -> Rect:
+    return Rect(r.x(), r.y(), r.width(), r.height())
 
 
 class WordLayer(QWidget):
@@ -91,6 +115,11 @@ class WordLayer(QWidget):
         self._button_rect: QRectF | None = None
         self._card_rect: QRectF | None = None
         self._strip: Rect | None = None  # строка перевода: карточка её не закрывает
+        self._speaker: str | None = None
+        self._translation: str | None = None
+        self.translating = False  # перевод реплики ещё пишется
+        self._panel: QRectF | None = None  # панель с репликой поверх окна диалога
+        self._plan: _Plan | None = None
         self._open = False
         self._explain: ExplainState | None = None
         self._explain_open = False
@@ -101,6 +130,7 @@ class WordLayer(QWidget):
         self._explain_rect: QRectF | None = None
         self._explain_saves: list[QRectF] = []
         self.font_scale = 1.0
+        self.font_family = ""  # шрифт реплики в панели; пусто = как в окне LexoPlay
         self.deck_label = ""
         self.explain_key = "F7"
         self.cursor_locked = False  # игра держит курсор: подсказка про стрелки
@@ -128,8 +158,27 @@ class WordLayer(QWidget):
     def selection(self) -> list[int]:
         return list(self._sel)
 
-    def open(self, display: Rect, region: Rect, views: list[WordView], strip: Rect | None = None) -> None:
+    @property
+    def views(self) -> list[WordView]:
+        """Слова с рамками в панели (нормализованные к окну, как у OCR)."""
+        return list(self._views)
+
+    @property
+    def panel(self) -> QRectF | None:
+        return QRectF(self._panel) if self._panel is not None else None
+
+    def open(
+        self,
+        display: Rect,
+        region: Rect,
+        views: list[WordView],
+        strip: Rect | None = None,
+        *,
+        speaker: str | None = None,
+        translation: str | None = None,
+    ) -> None:
         self._display, self._region, self._views, self._strip = display, region, views, strip
+        self._speaker, self._translation = speaker, translation
         self._sel, self._anchor, self._hover, self._card, self._focus = [], None, None, None, None
         self._explain, self._explain_open = None, False
         self.cursor_locked = False
@@ -139,6 +188,7 @@ class WordLayer(QWidget):
         self._placer(self, display)
         self.show()
         self._placer(self, display)
+        self._relayout()
         self._idle.start()
         self.repaint()  # сразу свежий кадр
 
@@ -154,8 +204,33 @@ class WordLayer(QWidget):
             self._placer(self, rect)
 
     def set_views(self, views: list[WordView]) -> None:
+        """Те же слова заново (например, сохранённое стало жёлтым) или другой текст реплики."""
         self._views = views
+        if self._sel and max(self._sel) >= len(views):
+            self._sel, self._anchor, self._focus, self._card = [], None, None, None
+        self._relayout()
         self.update()
+
+    def set_translation(self, text: str | None, *, partial: bool = False) -> None:
+        """Перевод реплики в панели. partial: модель ещё пишет.
+
+        Слова при этом стоят на месте, пока перевод влезает в отведённое ему место: иначе
+        реплика прыгала бы под курсором, пока перевод дописывается."""
+        self._translation = text
+        self.translating = partial
+        plan, panel = self._plan, self._panel
+        if plan is not None and panel is not None and plan.tr_y:
+            fresh = self._measure(plan.size, plan.width)
+            if fresh.height <= panel.height() + 0.5:
+                plan.tr_h = max(plan.tr_h, fresh.tr_h)
+                self.update()
+                return
+        self._relayout()
+        self.update()
+
+    def resizeEvent(self, e: QResizeEvent) -> None:  # noqa: N802
+        super().resizeEvent(e)
+        self._relayout()
 
     def set_card(self, card: CardState | None) -> None:
         self._card = card
@@ -252,6 +327,104 @@ class WordLayer(QWidget):
     def _px(self) -> float:
         return font_px_for(float(self.height()), 17.0, self.font_scale)
 
+    def _fonts(self, size: float) -> tuple[QFont, QFont, QFont]:
+        """Реплика, имя, перевод."""
+        family = self.font_family or FONT_FAMILY
+
+        def make(px: float, weight: QFont.Weight) -> QFont:
+            f = QFont(family)
+            f.setPixelSize(max(9, round(px)))
+            f.setWeight(weight)
+            return f
+
+        return make(size, QFont.Weight.Medium), make(size * 0.74, QFont.Weight.DemiBold), make(size * 0.76, QFont.Weight.Normal)
+
+    def _translation_text(self) -> str:
+        if self._translation:
+            return self._translation + (" …" if self.translating else "")
+        return "Перевожу…" if self.translating else ""
+
+    def _measure(self, size: float, width: float) -> _Plan:
+        f_text, f_name, f_tr = self._fonts(size)
+        fm, fm_name, fm_tr = QFontMetricsF(f_text), QFontMetricsF(f_name), QFontMetricsF(f_tr)
+        pad = max(10.0, size * 0.6)
+        inner = max(40.0, width - 2 * pad)
+        y = pad
+        name_y = y
+        if self._speaker:
+            y += fm_name.height() + size * 0.2
+        line_h = fm.height() * 1.16
+        space = fm.horizontalAdvance(" ")
+        x, row = 0.0, 0
+        words: list[tuple[float, float, float, float]] = []
+        for v in self._views:
+            w = min(fm.horizontalAdvance(v.text), inner)
+            if x > 0 and x + w > inner:  # не влезает: на новую строку
+                row += 1
+                x = 0.0
+            words.append((pad + x, y + row * line_h, w, fm.height()))
+            x += w + space
+        if self._views:
+            y += (row + 1) * line_h
+        tr_y = tr_h = 0.0
+        tr = self._translation_text()
+        if tr:
+            y += size * 0.45
+            tr_y = y
+            tr_h = fm_tr.boundingRect(QRectF(0, 0, inner, 10000), int(Qt.TextFlag.TextWordWrap), tr).height()
+            if self.translating:  # перевод ещё пишется: место под него сразу, по числу строк реплики
+                tr_h = max(tr_h, (row + 1) * fm_tr.lineSpacing())
+            y += tr_h
+        return _Plan(size, pad, width, words, name_y, tr_y, tr_h, y + pad)
+
+    def _relayout(self) -> None:
+        """Разложить реплику по панели поверх окна диалога и дать словам точные рамки."""
+        bounds = self._bounds()
+        if bounds.w < 50 or bounds.h < 50:
+            return
+        reg = denormalize(self._region, bounds)
+        base = reg
+        strip = self._strip
+        if strip is not None and strip.bottom >= reg.y - 40 and strip.y <= reg.bottom + 40:
+            base = union([reg, strip])  # строка перевода вплотную к окну диалога: панель накрывает и её
+        px = self._px()
+        left = max(8.0, base.x)
+        width = max(240.0, min(base.right, bounds.w - 8) - left)
+        size = min(px * 2.4, max(px * 1.2, reg.h * 0.16))  # примерно кегль самой игры
+        room = max(base.h, bounds.h * 0.5)
+        plan = self._measure(size, width)
+        for _ in range(8):  # длинная реплика: шрифт помельче, пока не влезет
+            if plan.height <= room or size <= px * 0.9:
+                break
+            size *= 0.9
+            plan = self._measure(size, width)
+        h = max(base.h, plan.height)
+        top = base.bottom - h if base.y + base.h / 2 > bounds.h / 2 else base.y  # окно внизу: растём вверх
+        top = min(max(8.0, top), max(8.0, bounds.h - 8 - h))
+        shift = (h - plan.height) / 2  # панель выше текста (закрывает всё окно диалога): текст посередине
+        if shift > 0:
+            plan.words = [(x, y + shift, w, hh) for x, y, w, hh in plan.words]
+            plan.name_y += shift
+            if plan.tr_y:
+                plan.tr_y += shift
+        self._panel = QRectF(left, top, width, h)
+        self._plan = plan
+        W, H = bounds.w, bounds.h
+        self._views = [
+            replace(v, rect=Rect((left + x) / W, (top + y) / H, w / W, hh / H))
+            for v, (x, y, w, hh) in zip(self._views, plan.words, strict=True)
+        ]
+
+    def _avoid(self) -> Rect:
+        """Что карточка и разбор не закрывают: панель с репликой (и строку перевода)."""
+        if self._panel is not None:
+            rects = [_rect(self._panel)]
+        else:
+            rects = [denormalize(self._region, self._bounds())]
+        if self._strip is not None:
+            rects.append(self._strip)
+        return union(rects)
+
     def _word_rect(self, v: WordView) -> QRectF:
         r = denormalize(v.rect, self._bounds())
         return QRectF(r.x, r.y, r.w, r.h)
@@ -317,7 +490,9 @@ class WordLayer(QWidget):
             return
         idx = self._hit_word(pos)
         if idx is None:
-            self._close_armed = True  # пустое место: закрыть режим, в игру клик не попадёт
+            if self._panel is not None and self._panel.contains(pos):
+                return  # между словами: промахнулся, режим не закрываем
+            self._close_armed = True  # мимо панели: закрыть режим, в игру клик не попадёт
             return
         self._explain_open = False  # слово важнее: разбор спрячется, F7 вернёт
         self._pick.stop()
@@ -365,16 +540,40 @@ class WordLayer(QWidget):
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
         bounds = self._bounds()
-        region = denormalize(self._region, bounds)
-        p.fillRect(self.rect(), QColor(0, 0, 0, 34))  # ловим все клики над игрой и чуть затемняем её
+        p.fillRect(self.rect(), QColor(0, 0, 0, 46))  # ловим все клики над игрой и чуть затемняем её
+        avoid = self._avoid()
 
         px = self._px()
-        line_w = max(1.5, px / 11)
+        plan = self._plan
+        size = plan.size if plan else px
+        line_w = max(1.5, size / 14)
+        f_text, f_name, f_tr = self._fonts(size)
+        fm = QFontMetricsF(f_text)
+        panel = self._panel
+        if panel is not None and plan is not None:
+            bg = QColor(STRIP_BG)
+            bg.setAlphaF(0.97)
+            p.setPen(QPen(QColor(255, 255, 255, 30), 1))
+            p.setBrush(bg)
+            p.drawRoundedRect(panel, 14, 14)
+            if self._speaker:
+                p.setFont(f_name)
+                p.setPen(NAME)
+                p.drawText(QPointF(panel.x() + plan.pad, panel.y() + plan.name_y + QFontMetricsF(f_name).ascent()), self._speaker)
+            tr = self._translation_text()
+            if tr:
+                sep_y = panel.y() + plan.tr_y - size * 0.24
+                p.setPen(QPen(QColor(255, 255, 255, 26), 1))
+                p.drawLine(QPointF(panel.x() + plan.pad, sep_y), QPointF(panel.right() - plan.pad, sep_y))
+                p.setFont(f_tr)
+                p.setPen(TRANSLATION if self._translation else TEXT_MUTED)
+                box = QRectF(panel.x() + plan.pad, panel.y() + plan.tr_y, panel.width() - 2 * plan.pad, plan.tr_h + 2)
+                p.drawText(box, int(Qt.TextFlag.TextWordWrap), tr)
         explained: set[int] = set()
         if self._explain_open and self._explain and self._explain.phase == "ready":
             for row in self._explain.rows:
                 explained.update(row.indices)
-            self._paint_phrase_lines(p, line_w)
+            self._paint_phrase_lines(p, line_w, fm)
         for v in self._views:
             r = self._word_rect(v)
             if v.index in self._sel:
@@ -387,11 +586,15 @@ class WordLayer(QWidget):
                 p.setPen(Qt.PenStyle.NoPen)
                 p.setBrush(QColor(255, 255, 255, 34))
                 p.drawRoundedRect(r.adjusted(-3, -2, 3, 2), 4, 4)
+            p.setFont(f_text)
+            p.setPen(TEXT)
+            p.drawText(QPointF(r.x(), r.y() + fm.ascent()), v.text)
             if v.index in explained:
                 continue  # выражение из разбора подчёркнуто целиком (_paint_phrase_lines)
             if not v.clickable or v.stop:
                 continue
-            y = r.bottom() + line_w * 1.6
+            y = r.y() + fm.ascent() + fm.descent() * 0.55 + line_w
+            x0, x1 = self._core_span(v.text, r, fm)  # под самим словом, без запятой и кавычек
             if v.known:
                 pen = QPen(KNOWN, line_w * 1.2)
             else:
@@ -401,7 +604,7 @@ class WordLayer(QWidget):
                 pen.setStyle(Qt.PenStyle.DotLine)
             pen.setCapStyle(Qt.PenCapStyle.RoundCap)
             p.setPen(pen)
-            p.drawLine(QPointF(r.left(), y), QPointF(r.right(), y))
+            p.drawLine(QPointF(x0, y), QPointF(x1, y))
 
         self._button_rect = None
         self._card_rect = None
@@ -410,15 +613,25 @@ class WordLayer(QWidget):
         self._explain_btn = None
         self._retranslate_btn = None
         if self._explain_open and self._explain is not None:
-            self._paint_explain(p, self._explain, region, bounds, px)
+            self._paint_explain(p, self._explain, avoid, bounds, px)
         elif self._card and self._sel:
             sel = union([denormalize(self._views[i].rect, bounds) for i in self._sel if i < len(self._views)])
-            self._paint_card(p, self._card, sel, bounds, px)
+            self._paint_card(p, self._card, sel, bounds, px, avoid)
         if not self._explain_open:
-            self._paint_explain_button(p, region, bounds, px)
+            self._paint_explain_button(p, avoid, bounds, px)
         p.end()
 
-    def _paint_phrase_lines(self, p: QPainter, line_w: float) -> None:
+    @staticmethod
+    def _core_span(text: str, r: QRectF, fm: QFontMetricsF) -> tuple[float, float]:
+        """Где в слове сами буквы: «school,» подчёркиваем без запятой."""
+        core = clean(text)
+        at = text.find(core) if core else -1
+        if at < 0:
+            return r.left(), r.right()
+        x0 = r.left() + fm.horizontalAdvance(text[:at])
+        return x0, min(r.right(), x0 + fm.horizontalAdvance(core))
+
+    def _paint_phrase_lines(self, p: QPainter, line_w: float, fm: QFontMetricsF) -> None:
         """Выражения из разбора: одна сплошная линия под каждым целиком, а не чёрточки под словами."""
         assert self._explain is not None
         pen = QPen(NAME, line_w * 1.6)
@@ -431,14 +644,14 @@ class WordLayer(QWidget):
                 r = self._word_rect(by_index[i]) if i is not None and i in by_index else None
                 same_line = r is not None and run and abs(r.center().y() - run[-1].center().y()) < r.height() * 0.6
                 if run and not same_line:  # строка кончилась (или выражение): линия под набранным куском
-                    y = max(x.bottom() for x in run) + line_w * 1.6
+                    y = max(x.y() for x in run) + fm.ascent() + fm.descent() * 0.55 + line_w
                     p.drawLine(QPointF(run[0].left() - 2, y), QPointF(run[-1].right() + 2, y))
                     run = []
                 if r is not None:
                     run.append(r)
 
     def _paint_explain_button(self, p: QPainter, region: Rect, bounds: Rect, px: float) -> None:
-        """Кнопки над строкой перевода справа: «Перевести иначе» и «Разбор реплики»."""
+        """Кнопки над панелью справа: «Перевести иначе» и «Разбор реплики». region: панель (и строка перевода)."""
         f = QFont(FONT_FAMILY)
         f.setPixelSize(max(12, round(px * 0.82)))
         f.setWeight(QFont.Weight.DemiBold)
@@ -451,8 +664,6 @@ class WordLayer(QWidget):
         widths = [fm.horizontalAdvance(text) + px * 1.6 for _key, text in buttons]
         total = sum(widths) + px * 0.5 * (len(buttons) - 1)
         top, bottom = region.y, region.bottom
-        if self._strip is not None:  # над строкой перевода, чтобы ничего не закрывать
-            top, bottom = min(top, self._strip.y), max(bottom, self._strip.bottom)
         y = top - h - px * 0.4
         if y < 4:
             y = bottom + px * 0.4
@@ -506,6 +717,7 @@ class WordLayer(QWidget):
         p.drawText(rect, int(Qt.AlignmentFlag.AlignCenter), text)
 
     def _paint_explain(self, p: QPainter, st: ExplainState, region: Rect, bounds: Rect, px: float) -> None:
+        """Разбор реплики над панелью. region: панель (и строка перевода), её разбор не закрывает."""
         pad = px * 0.95
         card_w = min(max(px * 26, 340.0), bounds.w * 0.55, bounds.w - 16)
         inner = card_w - 2 * pad
@@ -566,8 +778,7 @@ class WordLayer(QWidget):
                 heights.append(px * 0.35)
         card_h = sum(heights) + gap * (len(blocks) - 1) + 2 * pad
         card_h = min(card_h, bounds.h - 16)
-        avoid = union([region] + ([self._strip] if self._strip else []))
-        box = place_card(region, card_w, card_h, bounds, gap=max(8.0, px * 0.6), avoid=avoid)
+        box = place_card(region, card_w, card_h, bounds, gap=max(8.0, px * 0.6), avoid=region)
         rect = QRectF(box.x, box.y, box.w, box.h)
         self._explain_rect = rect
         bg = QColor(STRIP_BG)
@@ -616,7 +827,7 @@ class WordLayer(QWidget):
         p.restore()
         self._explain_saves = saves
 
-    def _paint_card(self, p: QPainter, card: CardState, sel: Rect, bounds: Rect, px: float) -> None:
+    def _paint_card(self, p: QPainter, card: CardState, sel: Rect, bounds: Rect, px: float, avoid: Rect) -> None:
         pad = px * 0.95
         card_w = min(max(px * 20, 280.0), bounds.w - 16)
         inner = card_w - 2 * pad
@@ -665,7 +876,6 @@ class WordLayer(QWidget):
             else:
                 heights.append(btn_h + px * 0.25)
         card_h = sum(heights) + gap * (len(blocks) - 1) + 2 * pad
-        avoid = union([denormalize(self._region, bounds)] + ([self._strip] if self._strip else []))
         box = place_card(sel, card_w, card_h, bounds, gap=max(8.0, px * 0.6), avoid=avoid)
         rect = QRectF(box.x, box.y, box.w, box.h)
         self._card_rect = rect

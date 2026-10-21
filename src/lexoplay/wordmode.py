@@ -1,7 +1,8 @@
 """Режим слов (F3) без Qt: какие слова кликабельны, выбор фразы, где поставить карточку.
 
-Рамки слов из OCR нормализованы (0..1 от области игры), поэтому одинаково ложатся
-на окно игры, полноэкранный режим и картинку под Magpie.
+Рамки слов нормализованы (0..1 от окна игры), поэтому одинаково ложатся на окно игры,
+полноэкранный режим и картинку под Magpie. В панели режима слов рамки ставит сама панель
+(reader_views), у слов из OCR (build_views) они с экрана.
 """
 
 from __future__ import annotations
@@ -38,6 +39,25 @@ def build_views(ocr: OcrResult, known: Callable[[str], bool] = lambda _w: False)
                 text=w.text,
                 rect=w.rect,
                 known=bool(word and not stop and known(w.text)),
+                stop=stop,
+                clickable=word,
+            )
+        )
+    return out
+
+
+def reader_views(text: str, known: Callable[[str], bool] = lambda _w: False) -> list[WordView]:
+    """Слова реплики для панели режима слов. Рамки им ставит сама панель, когда раскладывает текст."""
+    out: list[WordView] = []
+    for i, token in enumerate(text.split()):
+        word = is_word(token)
+        stop = word and is_stopword(token)
+        out.append(
+            WordView(
+                index=i,
+                text=token,
+                rect=Rect(0, 0, 0, 0),
+                known=bool(word and not stop and known(token)),
                 stop=stop,
                 clickable=word,
             )

@@ -82,6 +82,7 @@ from lexoplay.translate import (
     TranslationError,
     Translator,
     check_key,
+    pick_source,
 )
 from lexoplay.ui.main_window import AccountStatus, MainWindow, UpdateState
 from lexoplay.usage import OwnUsage
@@ -96,7 +97,7 @@ from lexoplay.win.hooks import HotkeyManager, WindowEvents
 from lexoplay.win.input import InputWatch
 from lexoplay.win.llhooks import InputShield, to_local
 from lexoplay.win.ocr import INSTALL_HINT, OcrUnavailable, WinOcr
-from lexoplay.wordmode import CardState, ExplainRow, ExplainState, WordView, build_views, match_phrase, selected_text
+from lexoplay.wordmode import CardState, ExplainRow, ExplainState, WordView, match_phrase, reader_views, selected_text
 
 log = logging.getLogger(__name__)
 
@@ -902,6 +903,7 @@ class App(QObject):
         self.overlay.font_family = self.settings.strip_font
         self.overlay.font_bold = self.settings.strip_bold
         self.word_layer.font_scale = self.settings.font_scale
+        self.word_layer.font_family = self.settings.strip_font
 
     def _rebuild_translator(self) -> None:
         """Переводчик под привязку или свой ключ. Пересобирается, только когда сменились
@@ -909,7 +911,8 @@ class App(QObject):
         остаётся тёплым, и следующий перевод не ждёт нового рукопожатия."""
         linked = self.client.linked
         key = None if linked else get_api_key()
-        sig = (linked, id(self.client), self.client.server, self.client.token if linked else None, key, self.settings.model)
+        think = self.settings.translate_think
+        sig = (linked, id(self.client), self.client.server, self.client.token if linked else None, key, self.settings.model, think)
         if sig != self._translator_sig:
             self._translator_sig = sig
             self.own_lookup = None
@@ -919,7 +922,7 @@ class App(QObject):
                     self.client, on_usage=lambda u: self.bridge.call.emit(lambda: self._set_usage(u))
                 )
             else:
-                self.translator = AnthropicTranslator(key, self.settings.model) if key else None
+                self.translator = AnthropicTranslator(key, self.settings.model, think=think) if key else None
                 self.own_lookup = AnthropicLookup(key, self.settings.model) if key else None
         for p in self.pipelines.values():
             if self.translator:
@@ -1969,10 +1972,22 @@ class App(QObject):
 
         self.run_bg(pipeline.scan(grab, target), finished)
 
+    def _line_views(self, line: CurrentLine) -> list[WordView]:
+        """Слова реплики для панели: текст, исправленный моделью при переводе, иначе прочитанный с экрана."""
+        return reader_views(line.sentence, self.vocab.known)
+
+    @staticmethod
+    def _line_speaker(line: CurrentLine) -> str | None:
+        if line.record is not None and line.record.speaker:
+            return line.record.speaker
+        return line.utterance.speaker if line.utterance else None
+
     def _open_words(self, game: Game, session: GameSession, line: CurrentLine) -> None:
         if self.display is None or game.region is None or not line.ocr.words:
             return
-        views = build_views(line.ocr, self.vocab.known)
+        views = self._line_views(line)
+        if not views:
+            return
         self.word_ctx = WordCtx(game.exe, game.title, session.id, line, views)
         self.word_layer.font_scale = self.settings.font_scale
         if self.client.linked:
@@ -1982,7 +1997,13 @@ class App(QObject):
         self.word_layer.explain_key = self.settings.hotkeys.explain
         self.word_layer.can_retranslate = self.translator is not None
         self.word_layer.retranslating = False
-        self.word_layer.open(self.display, game.region, views, strip=self.overlay.strip_rect())
+        # перевода нет: панель сразу оставит под него место (_translate_words_line ниже)
+        self.word_layer.translating = line.record is None and self.translator is not None
+        translation = line.record.translation if line.record is not None else None
+        self.word_layer.open(
+            self.display, game.region, views, strip=self.overlay.strip_rect(),
+            speaker=self._line_speaker(line), translation=translation,
+        )  # fmt: skip
         self.hotkeys.set_group("words", not self._hotkeys_paused)
         self._shield_on()
         self._words_focus()
@@ -1992,6 +2013,8 @@ class App(QObject):
         if self.watcher is None or self.watcher.waiting:
             # следим за открытой репликой (автоперевод ждал следующую: теперь ждёт после неё)
             self._watch_line(line.sentence, line.thumb)
+        if line.record is None and not self._translate_words_line(again=False):  # перевода нет: панель допишет
+            self.word_layer.set_translation(None)
 
     # ------------------------------------------------------------------ «Перевести иначе»
     def _better_translator(self) -> Translator | None:
@@ -2003,19 +2026,25 @@ class App(QObject):
             return None
         model = self.settings.better_model or self.settings.model
         if self._better is None or self._better_model != model:
-            self._better = AnthropicTranslator(key, model)
+            self._better = AnthropicTranslator(key, model, think=self.settings.translate_think)
             self._better_model = model
         return self._better
 
     def _retranslate(self) -> None:
         """Перевод реплики не понравился: перевести заново, показав модели прошлый вариант."""
+        self._translate_words_line(again=True)
+
+    def _translate_words_line(self, *, again: bool) -> bool:
+        """Перевести реплику, открытую в режиме слов. again: «Перевести иначе» (модель посильнее,
+        видит прошлый перевод); иначе перевода у реплики ещё не было, и панель его допишет.
+        False: перевести нечем (нет ключа, игры, области)."""
         ctx = self.word_ctx
-        if ctx is None or self.word_layer.retranslating:
-            return
+        if ctx is None or (again and self.word_layer.retranslating):
+            return False
         game = self.store.get_game(ctx.exe)
-        translator = self._better_translator()
+        translator = self._better_translator() if again else self.translator
         if game is None or game.region is None or translator is None:
-            return
+            return False
         line = ctx.line
         record = line.record
         text = line.utterance.text if line.utterance else (record.source if record else line.sentence)
@@ -2028,7 +2057,7 @@ class App(QObject):
         self._retranslate_token = token
 
         def partial(t: str) -> None:
-            self.bridge.call.emit(lambda: self._retranslate_partial(token, region, t, text))
+            self.bridge.call.emit(lambda: self._retranslate_partial(token, region, t, text, again))
 
         req = TranslateRequest(
             text=text,
@@ -2041,27 +2070,34 @@ class App(QObject):
             line_id=str(uuid.uuid4()),
             session_id=ctx.session_id,
             game_exe=ctx.exe,
-            previous=record.translation if record else None,
+            previous=record.translation if record and again else None,
             on_partial=partial,
         )
-        self.word_layer.retranslating = True
-        self.word_layer.update()
-        model = self._better_model if isinstance(translator, AnthropicTranslator) else ""
+        if again:
+            self.word_layer.retranslating = True
+            self.word_layer.update()
+        else:
+            self.word_layer.set_translation(None, partial=True)
+        own = isinstance(translator, AnthropicTranslator)
+        model = (self._better_model if again else self.settings.model) if own else ""
 
         def done(res: Any, err: BaseException | None) -> None:
             if self._retranslate_token is not token:
                 return
             self._retranslate_token = None
             self.word_layer.retranslating = False
+            self.word_layer.translating = False
             self.word_layer.update()
             if err is not None:
                 if not isinstance(err, TranslationError):
-                    log.error("перевести иначе: упало", exc_info=err)
-                self.overlay.toast(str(err) if isinstance(err, TranslationError) else "Не получилось перевести заново", 4000)
+                    log.error("перевод в режиме слов: упало", exc_info=err)
+                self.overlay.toast(str(err) if isinstance(err, TranslationError) else "Не получилось перевести", 4000)
                 if record is not None:
                     self.overlay.show_text(region, record.translation, original=text)
+                if self.word_ctx is ctx:
+                    self.word_layer.set_translation(record.translation if record else None)
                 return
-            rec = LineRecord(req.line_id, speaker, res.source, res.translation, normalize_text(text))
+            rec = LineRecord(req.line_id, speaker, pick_source(text, res.source), res.translation, normalize_text(text))
             if pipeline is not None:
                 pipeline.memory.replace(rec)
             self.cache.retranslated(ctx.exe, self.settings.target_lang, rec)
@@ -2070,16 +2106,30 @@ class App(QObject):
             ctx.explain = None
             if model:
                 self.own_usage.add("line", res.usage, model)
-            self.overlay.show_text(region, res.translation, original=text)
-            self.word_layer.set_explain(None, show=False)
-            self.overlay.toast("Переведено заново" + (f" ({model})" if model else ""), 2500)
-            log.info("перевели иначе: %r -> %r", record.translation if record else None, res.translation)
+            if self.overlay.strip_visible or again:
+                self.overlay.show_text(region, res.translation, original=text)
+            if self.word_ctx is ctx:
+                self.word_layer.set_explain(None, show=False)
+                self.word_layer.set_translation(res.translation)
+                if not self.word_layer.selection and rec.source != text:
+                    ctx.views = self._line_views(line)  # модель поправила, что прочитал OCR
+                    self.word_layer.set_views(ctx.views)
+            if again:
+                self.overlay.toast("Переведено заново" + (f" ({model})" if model else ""), 2500)
+                log.info("перевели иначе: %r -> %r", record.translation if record else None, res.translation)
 
         self.run_bg(translator.translate(req), done)
+        return True
 
-    def _retranslate_partial(self, token: object, region: Rect, text: str, original: str | None = None) -> None:
-        if token is self._retranslate_token and text:
+    def _retranslate_partial(
+        self, token: object, region: Rect, text: str, original: str | None = None, again: bool = True
+    ) -> None:
+        if token is not self._retranslate_token or not text:
+            return
+        if again or self.overlay.strip_visible:
             self.overlay.show_text(region, text, original=original)
+        if self.word_layer.is_open:
+            self.word_layer.set_translation(text, partial=True)
 
     # ------------------------------------------------------------------ разбор реплики (F7)
     def _request_explain(self) -> None:
@@ -2343,7 +2393,7 @@ class App(QObject):
             sentence=ctx.line.sentence, sentence_translation=record.translation if record else None, marked=marked,
         )
         self.sessions.word_added(ctx.exe)
-        ctx.views = build_views(ctx.line.ocr, self.vocab.known)
+        ctx.views = self._line_views(ctx.line)
         self.word_layer.set_views(ctx.views)
 
     def _store_word(
@@ -2539,8 +2589,8 @@ class App(QObject):
 
         Многие игры читают мышь и клавиатуру через Raw Input или DirectInput. Это хук не
         останавливает, и клик по слову листал бы реплику. Без фокуса игре такой ввод просто
-        не приходит. Не берём фокус, если игра свернётся (эксклюзивный полноэкранный режим или
-        уже сворачивалась) или её растягивает Magpie (он бы перестал)."""
+        не приходит. Не берём фокус, если игра уже сворачивалась от этого или её растягивает
+        Magpie (он бы перестал)."""
         if self._took_focus:
             return True
         if self.active is None or not self.word_layer.is_open:
@@ -2549,13 +2599,15 @@ class App(QObject):
         why = ""
         if exe in self._focus_bad:
             why = "она сворачивалась без фокуса"
-        elif winapi.exclusive_fullscreen():
-            why = "эксклюзивный полноэкранный режим"
         elif self._magpie_scaling():
             why = "игру растягивает Magpie"
         if why:
             log.info("режим слов без фокуса у %s: %s", exe, why)
             return False
+        if winapi.exclusive_fullscreen():
+            # полноэкранная игра может свернуться без фокуса: тогда _on_minimized развернёт её
+            # и запомнит, что фокус у неё брать нельзя
+            log.info("режим слов: %s в полноэкранном режиме, фокус всё равно берём", exe)
         hwnd = int(self.word_layer.winId())
         winapi.set_no_activate(hwnd, False)
         winapi.force_foreground(hwnd)

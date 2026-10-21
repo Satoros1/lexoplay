@@ -107,9 +107,13 @@ def test_word_layer_arrow_keys_select_words_and_phrases(qapp):
     from lexoplay.wordmode import ExplainRow, ExplainState, next_word, word_in_line
 
     res = OcrResult((_ocr_line("Don't jump to conclusions.", 0.80), _ocr_line("Look at the evidence first.", 0.86)))
-    views = build_views(res)
-    assert next_word(views, None, 1) == 0 and next_word(views, 0, -1) == 0  # у края стоим
-    assert word_in_line(views, 1, 1) in (5, 6) and word_in_line(views, 4, -1) in (0, 1)  # ближайшее по горизонтали
+    ocr_views = build_views(res)
+    assert next_word(ocr_views, None, 1) == 0 and next_word(ocr_views, 0, -1) == 0  # у края стоим
+    assert word_in_line(ocr_views, 1, 1) in (5, 6) and word_in_line(ocr_views, 4, -1) in (0, 1)  # ближайшее по горизонтали
+    from lexoplay.wordmode import reader_views
+
+    # панель раскладывает реплику сама: длинная переносится на несколько строк
+    views = reader_views("Don't jump to conclusions. Look at the evidence first, then decide what really happened here.")
     layer = WordLayer()
     picked, saves, again = [], [], []
     layer.selected.connect(picked.append)
@@ -126,7 +130,8 @@ def test_word_layer_arrow_keys_select_words_and_phrases(qapp):
     QTest.qWait(450)
     assert picked[-1] == [1, 2, 3]  # «jump to conclusions»
     layer.navigate("down")
-    assert len(layer.selection) == 1 and layer.selection[0] >= 4
+    lv = layer.views
+    assert len(layer.selection) == 1 and lv[layer.selection[0]].rect.y > lv[3].rect.y  # строкой ниже
     layer.can_retranslate = True
     layer.request_retranslate()
     assert again == [1]
@@ -150,6 +155,7 @@ def test_word_layer_click_select_and_add(qapp):
     layer.finished.connect(done.append)
     layer.open(Rect(0, 0, 1000, 700), Rect(0.05, 0.8, 0.9, 0.15), views)
     qapp.processEvents()
+    views = layer.views  # рамки слов ставит панель, когда раскладывает реплику
     eerie = views[3]
     cx = int((eerie.rect.x + eerie.rect.w / 2) * layer.width())
     cy = int((eerie.rect.y + eerie.rect.h / 2) * layer.height())
@@ -189,6 +195,7 @@ def test_word_layer_clicks_from_hook(qapp):
     assert done == [] and picked == []
     layer.open(Rect(0, 0, 1000, 700), Rect(0.05, 0.8, 0.9, 0.15), views)
     qapp.processEvents()
+    views = layer.views
 
     def center(v):  # type: ignore[no-untyped-def]
         return QPointF((v.rect.x + v.rect.w / 2) * layer.width(), (v.rect.y + v.rect.h / 2) * layer.height())
