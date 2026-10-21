@@ -991,15 +991,25 @@ def _qt_checks(out_dir: Path) -> None:
             n = sum(1 for y in range(0, shot.height(), 6) for x in range(0, shot.width(), 6) if shot.pixelColor(x, y).alpha() > 0)
             return n, shot
 
-        # плашка появляется плавно: ждём, пока проявится (первая отрисовка в exe бывает медленной)
-        end = time.monotonic() + 5
+        # плашка появляется плавно: ждём, пока проявится. Первая отрисовка в exe бывает очень
+        # медленной (рядом ещё работает exe из проверки обновления), поэтому ждём до 15 с, а ошибки
+        # из отрисовки собираем, чтобы в отчёте было видно, что именно не так
+        errors: list[str] = []
+        old_hook = sys.excepthook
+        sys.excepthook = lambda t, v, tb: errors.append(f"{t.__name__}: {v}")
+        t0 = time.monotonic()
         painted, img = 0, None
-        while time.monotonic() < end:
-            app.processEvents()
-            time.sleep(0.05)
-            painted, img = painted_now()
-            if painted > 50:
-                break
+        try:
+            while time.monotonic() < t0 + 15:
+                app.processEvents()
+                time.sleep(0.05)
+                painted, img = painted_now()
+                if painted > 50:
+                    break
+        finally:
+            sys.excepthook = old_hook
+        waited = round(time.monotonic() - t0, 2)
+        diag = {"alpha": round(ov._alpha, 2), "visible": ov.isVisible(), "strip": ov.strip_visible, "toast": ov._toast is not None}  # noqa: SLF001
         img.save(str(out_dir / "overlay.png"))  # type: ignore[union-attr]
         ov.hide_strip()
         end = time.monotonic() + 0.4
@@ -1008,7 +1018,8 @@ def _qt_checks(out_dir: Path) -> None:
             time.sleep(0.02)
         hidden_ok = ov.strip_visible is False and ov._ghost is None
         ov.close()
-        return ("ok" if painted > 50 and hidden_ok else "fail"), {"painted_samples": painted, "size": [img.width(), img.height()]}
+        detail = {"painted_samples": painted, "size": [img.width(), img.height()], "waited": waited, **diag, "errors": errors[:3]}  # type: ignore[union-attr]
+        return ("ok" if painted > 50 and hidden_ok else "fail"), detail
 
     _check("overlay_render", overlay)
 
