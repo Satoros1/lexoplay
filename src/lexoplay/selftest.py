@@ -751,7 +751,7 @@ def _app_vs_game(out_dir: Path) -> Callable[[], tuple[str, object]]:
             pump(lambda: _wa.foreground_window() == ghwnd, 2)
             app._open_words(game, session, line)
             pump(lambda: False, 0.4)
-            info["frozen"] = app._frozen and _wa.is_minimized(ghwnd) and app.word_layer.backdrop is not None
+            info["frozen"] = app._frozen and _wa.is_minimized(ghwnd) and app.freeze_frame.showing
             s_f = game_state()
             fv = app.word_layer.views[4] if app.word_layer.views else None
             if fv is not None:
@@ -761,6 +761,7 @@ def _app_vs_game(out_dir: Path) -> Callable[[], tuple[str, object]]:
             info["frozen_game_saw"] = delta(s_f, game_state())
             app._close_words("esc")
             info["unfrozen"] = pump(lambda: not _wa.is_minimized(ghwnd) and _wa.foreground_window() == ghwnd, 3)
+            info["frame_dropped"] = pump(lambda: not app.freeze_frame.showing, 4)  # снимок убран, когда игра на месте
             app.settings.words_freeze = "never"
             pump(lambda: False, 0.3)
             s3 = game_state()
@@ -806,6 +807,7 @@ def _app_vs_game(out_dir: Path) -> Callable[[], tuple[str, object]]:
             and after.get("raw_down", 0) >= 1  # type: ignore[union-attr]
             and after.get("msg_down", 0) >= 1  # type: ignore[union-attr]
             and info.get("frozen")
+            and info.get("frame_dropped")
             and info.get("frozen_picked")
             and not any((info.get("frozen_game_saw") or {}).get(k) for k in quiet)  # type: ignore[union-attr]
             and info.get("unfrozen")

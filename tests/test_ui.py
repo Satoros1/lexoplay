@@ -242,6 +242,9 @@ def test_word_layer_hover_picks_and_saves_without_clicks(qapp):
     assert added == []
     QTest.qWait(700)
     assert added == [1]
+    layer.hover(QPointF(b.x() + 1, b.y()))  # курсор чуть сдвинулся, но всё ещё на «+»
+    QTest.qWait(1100)
+    assert added == [1]  # второй раз то же слово не сохраняется
     layer.hover_pick = False  # выключено в настройках: только клики и клавиши
     layer.hover(center(v[4]))
     QTest.qWait(600)
@@ -249,6 +252,30 @@ def test_word_layer_hover_picks_and_saves_without_clicks(qapp):
     layer.close()
     layer.deleteLater()
     qapp.processEvents()
+
+
+def test_freeze_frame_shows_moves_and_closes_on_click(qapp):
+    from PySide6.QtGui import QColor, QImage
+
+    from lexoplay.ui.freeze_frame import FreezeFrame
+
+    img = QImage(64, 36, QImage.Format.Format_RGB32)
+    img.fill(QColor("#b0281e"))
+    frame = FreezeFrame()
+    clicks = []
+    frame.clicked.connect(lambda: clicks.append(1))
+    frame.show_image(img, Rect(10, 10, 640, 360))
+    qapp.processEvents()
+    assert frame.showing and frame.rect_shown == Rect(10, 10, 640, 360)
+    shot = frame.grab().toImage()
+    assert shot.pixelColor(shot.width() // 2, shot.height() // 2).red() > 150  # снимок растянут на окно
+    frame.move_to(Rect(0, 0, 800, 450))  # полноэкранная свернулась: монитор вернул разрешение
+    assert frame.rect_shown == Rect(0, 0, 800, 450)
+    QTest.mouseClick(frame, Qt.MouseButton.LeftButton, pos=QPoint(20, 20))
+    assert clicks == [1]
+    frame.clear()
+    assert not frame.showing
+    frame.close()
 
 
 class FakeCtl:

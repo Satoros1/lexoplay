@@ -49,12 +49,12 @@ from lexoplay.config import (
     set_api_key,
     set_token,
 )
+from lexoplay.cursorguard import CursorGuard
 from lexoplay.debugdump import DebugDump
 from lexoplay.dedupe import LineMemory, LineRecord, normalize_text
 from lexoplay.games import NOT_GAMES, WindowInfo, clean_title, is_game_exe
 from lexoplay.geometry import Rect
 from lexoplay.history import LineCache
-from lexoplay.cursorguard import CursorGuard
 from lexoplay.hotkeys import MOD_NOREPEAT, MOD_SHIFT, Hotkey, HotkeyError, parse
 from lexoplay.lexo import Account, Deck, GameRef, LexoClient, LexoError, LexoOffline, Sense, Usage
 from lexoplay.lookup import (
@@ -72,7 +72,7 @@ from lexoplay.outbox import Outbox
 from lexoplay.pipeline import CaptureError, F2Outcome, Pipeline, ScanOutcome, Target
 from lexoplay.preprocess import MODE_NAMES, is_black, thumbnail
 from lexoplay.session import GameSession, Sessions
-from lexoplay.store import Game, SavedWord, StoredLine, Store, Task
+from lexoplay.store import Game, SavedWord, Store, StoredLine, Task
 from lexoplay.textproc import Utterance, to_utterance
 from lexoplay.translate import (
     AnthropicTranslator,
@@ -84,12 +84,13 @@ from lexoplay.translate import (
     check_key,
     pick_source,
 )
+from lexoplay.ui.freeze_frame import FreezeFrame
 from lexoplay.ui.main_window import AccountStatus, MainWindow, UpdateState
-from lexoplay.usage import OwnUsage
 from lexoplay.ui.overlay import Overlay
 from lexoplay.ui.region_picker import RegionPicker
 from lexoplay.ui.theme import app_icon
 from lexoplay.ui.word_layer import WordLayer
+from lexoplay.usage import OwnUsage
 from lexoplay.vocab import Vocab
 from lexoplay.watch import LineWatcher
 from lexoplay.win import capture, winapi
@@ -97,7 +98,15 @@ from lexoplay.win.hooks import HotkeyManager, WindowEvents
 from lexoplay.win.input import InputWatch
 from lexoplay.win.llhooks import InputShield, to_local
 from lexoplay.win.ocr import INSTALL_HINT, OcrUnavailable, WinOcr
-from lexoplay.wordmode import CardState, ExplainRow, ExplainState, WordView, match_phrase, reader_views, selected_text
+from lexoplay.wordmode import (
+    CardState,
+    ExplainRow,
+    ExplainState,
+    WordView,
+    match_phrase,
+    reader_views,
+    selected_text,
+)
 
 log = logging.getLogger(__name__)
 
@@ -261,6 +270,9 @@ class App(QObject):
         self.overlay = Overlay(placer=native_place, on_native=overlay_native)
         self.picker: RegionPicker | None = None
         self.word_layer = WordLayer(placer=native_place, on_native=overlay_native)
+        # снимок игры, пока она свёрнута на время режима слов (и пока разворачивается после)
+        self.freeze_frame = FreezeFrame(placer=native_place, on_native=overlay_native)
+        self.freeze_frame.clicked.connect(lambda: self._close_words("outside"))
         self._apply_overlay_settings()
         self.word_layer.selected.connect(self._on_word_selected)
         self.word_layer.add_clicked.connect(self._on_word_add)
@@ -323,7 +335,13 @@ class App(QObject):
         self._cursor_timer.timeout.connect(self._cursor_tick)
         self._took_focus = False  # слой слов забрал фокус у игры, чтобы она отпустила курсор
         self._last_words_click = 0.0  # когда хук последний раз отдал нам клик в режиме слов
+        self._closing = False  # LexoPlay выходит
         self._frozen = False  # игра свёрнута на время режима слов, на её месте снимок
+        self._freeze_full = False  # свернули полноэкранную: после разворота ей нужна секунда-другая
+        self._freeze_warned = False
+        self._thaw_until = 0.0  # до этих пор игра разворачивается: захват подождёт
+        self._thaw_t0 = 0.0
+        self._thaw_waiting: set[str] = set()  # что отложено до разворота (F2, F3, выделение): по разу
         self._took_focus_at = 0.0
         # игры, которые от потери фокуса свернулись: фокус у них больше не берём (помним и после перезапуска)
         self._focus_bad: set[str] = set(settings.no_focus_games)
@@ -420,6 +438,7 @@ class App(QObject):
         self.tray.hide()
         self.overlay.close()
         self.word_layer.close()
+        self.freeze_frame.close()
         if self.window is not None:
             self.window.deleteLater()
         self.bg.stop()
@@ -1444,6 +1463,10 @@ class App(QObject):
         """Снять стоп-кадр игры и открыть поверх него выделение окна диалога."""
         if not self.active or self.state == "picking":
             return
+        if self.word_layer.is_open:
+            self._close_words("closed")  # и развернуть игру, если режим слов её сворачивал
+        if self._after_thaw("picker", self.open_picker):
+            return
         display = self._sync_geometry()
         game = self.store.get_game(self.active.exe)
         if display is None or game is None:
@@ -1581,6 +1604,8 @@ class App(QObject):
 
     def f2(self, *, auto: bool = False) -> None:
         if self.state != "idle" or not self.active:
+            return
+        if self._after_thaw("f2", lambda: self.f2(auto=auto)):
             return
         if self.overlay.strip_visible and not auto:
             if self.watcher is None or not self.watcher.acted:
@@ -1839,8 +1864,8 @@ class App(QObject):
             self._watch_soon()
 
     def _watch_tick(self) -> None:
-        if self._frozen:
-            return  # игра свёрнута: смотреть не на что, реплика та же
+        if self._frozen or time.monotonic() < self._thaw_until:
+            return  # игра свёрнута или разворачивается: смотреть не на что, реплика та же
         watcher = self.watcher
         watching = self.overlay.strip_visible or self.word_layer.is_open or bool(watcher and watcher.waiting)
         if not watching or watcher is None or self.state != "idle" or self._watch_pending or not self.active:
@@ -1915,6 +1940,8 @@ class App(QObject):
         """Режим слов. explain: сразу открыть разбор реплики (F7)."""
         if self.state != "idle" or not self.active:
             return
+        if self._after_thaw("f3", lambda: self.f3(explain=explain)):
+            return
         game = self.store.get_game(self.active.exe)
         if game is None:
             return
@@ -1983,19 +2010,33 @@ class App(QObject):
 
         self.run_bg(pipeline.scan(grab, target), finished)
 
-    def _should_freeze(self, exe: str) -> bool:
-        """Сворачивать ли игру на время режима слов (и показывать её снимок)."""
-        mode = self.settings.words_freeze
-        if mode == "never" or self.active is None or self._magpie_scaling():
-            return False  # под Magpie свёрнутая игра перестала бы растягиваться
-        return mode == "always" or exe in KNOWN_CLICK_GRABBERS or exe in self.settings.freeze_games
+    def _wants_freeze(self, exe: str) -> bool:
+        """Сворачивать ли игру на время режима слов (на её месте её снимок).
 
-    def _backdrop(self, game: Game) -> QImage | None:
-        """Снимок игры, который встанет на её место, пока она свёрнута."""
+        «Только где нужно»: игры, которые ловят клик и без фокуса (Danganronpa и те, что поймали
+        клик при открытом F3), и полноэкранные: те и так сворачиваются без фокуса, а поверх
+        эксклюзивного экрана наша панель может быть не видна вовсе."""
+        mode = self.settings.words_freeze
+        if mode == "never" or self.active is None:
+            return False
+        if mode == "always":
+            return True
+        return exe in KNOWN_CLICK_GRABBERS or exe in self.settings.freeze_games or winapi.exclusive_fullscreen()
+
+    def _freeze_shot(self, game: Game) -> tuple[QImage, Rect] | None:
+        """Снимок игры и где его показать: в окне вместе с рамкой и заголовком, иначе там, где игра видна."""
         if self.active is None or self.display is None:
             return None
+        hwnd = self.active.hwnd
+        full = self._game_fullscreen()
         try:
-            return pil_to_qimage(self._make_grab(self.active, game, self.display)())
+            if game.capture != "window":
+                rect = self.display if full else winapi.visible_rect(hwnd)
+                img = capture.grab_screen(rect)
+                if not is_black(img):
+                    return pil_to_qimage(img), rect
+            # снимок экрана чёрный (так бывает у старых DirectX): окно игры через PrintWindow
+            return pil_to_qimage(self._make_grab(self.active, game, self.display)()), self.display
         except Exception as exc:
             log.info("снимок для режима слов не снялся, игру не сворачиваем: %s", exc)
             return None
@@ -2005,22 +2046,91 @@ class App(QObject):
         if self.active is None or self._frozen:
             return
         self._frozen = True
+        self._freeze_full = self._game_fullscreen()
+        self._freeze_warned = False
         winapi.minimize_window(self.active.hwnd)
-        log.info("режим слов: %s свёрнута, на её месте снимок", self.active.exe)
+        for ms in (250, 1000, 2000):
+            QTimer.singleShot(ms, self._check_frozen)
+        log.info("режим слов: %s свёрнута, на её месте снимок%s", self.active.exe, " (полноэкранная)" if self._freeze_full else "")
+
+    def _check_frozen(self) -> None:
+        """Свернулась ли игра. Полноэкранная, свернувшись, может вернуть монитору его разрешение:
+        тогда снимок и панель растягиваем на весь монитор."""
+        if not self._frozen or self.active is None or not self.word_layer.is_open:
+            return
+        hwnd = self.active.hwnd
+        if not winapi.is_minimized(hwnd):
+            if not self._freeze_warned:
+                self._freeze_warned = True
+                log.info("режим слов: %s не свернулась (или развернулась сама), снимок просто лежит поверх", self.active.exe)
+            return
+        if not self._freeze_full or self.display is None:
+            return
+        mon = winapi.monitor_rect(hwnd)
+        d = self.display
+        if mon.empty or (abs(mon.x - d.x) <= 2 and abs(mon.y - d.y) <= 2 and abs(mon.w - d.w) <= 2 and abs(mon.h - d.h) <= 2):
+            return
+        if self.freeze_frame.rect_shown == mon:
+            return
+        log.info("монитор после сворачивания %s (было %s): снимок и панель на весь монитор", mon.to_dict(), d.to_dict())
+        self.freeze_frame.move_to(mon)
+        self.word_layer.set_display_rect(mon)  # после снимка: слой снова поверх него
 
     def _unfreeze(self, reason: str) -> None:
-        """Режим закрыт: развернуть игру. Ушёл в другое окно: развернуть, но фокус ей не давать."""
+        """Режим закрыт: развернуть игру. Ушёл в другое окно: развернуть, но фокус ей не давать.
+
+        Снимок держится, пока игра разворачивается, чтобы между ними не мелькал рабочий стол."""
         if not self._frozen:
             return
         self._frozen = False
-        if self.active is None or not winapi.is_window(self.active.hwnd):
+        active = self.active
+        if active is None or not winapi.is_window(active.hwnd):
+            self.freeze_frame.clear()
             return
         activate = reason not in ("focus", "switch")
-        winapi.restore_window(self.active.hwnd, activate=activate)
+        winapi.restore_window(active.hwnd, activate=activate)
         if activate:
-            winapi.force_foreground(self.active.hwnd)
-        for ms in (300, 1200):  # полноэкранная игра разворачивается не сразу
+            winapi.force_foreground(active.hwnd)
+        if not activate or self._closing:
+            self.freeze_frame.clear()  # игрок в другом окне: снимок поверх него не нужен
+            self._thaw_until = time.monotonic() + 0.3
+        else:
+            self._thaw_t0 = time.monotonic()
+            self._thaw_until = self._thaw_t0 + (3.0 if self._freeze_full else 1.0)
+            QTimer.singleShot(40, self._thaw_tick)
+        for ms in (300, 1200):
             QTimer.singleShot(ms, self._sync_geometry)
+
+    def _thaw_tick(self) -> None:
+        """Игра разворачивается: убрать снимок, как только она снова на экране (или по времени)."""
+        if self._frozen or not self.freeze_frame.showing:
+            return
+        now = time.monotonic()
+        hwnd = self.active.hwnd if self.active else 0
+        back = bool(hwnd) and winapi.is_window(hwnd) and not winapi.is_minimized(hwnd)
+        settle = 0.7 if self._freeze_full else 0.15  # полноэкранной ещё нужно сменить режим экрана
+        if (back and now - self._thaw_t0 >= settle) or now >= self._thaw_until:
+            self.freeze_frame.clear()
+            self._thaw_until = now + 0.15  # пара кадров на перерисовку, потом можно снимать
+            self._sync_geometry()
+            return
+        QTimer.singleShot(50, self._thaw_tick)
+
+    def _after_thaw(self, key: str, fn: Callable[[], None]) -> bool:
+        """Игра ещё разворачивается после режима слов: сделать fn потом (снимок сейчас был бы
+        переходным, чёрным или с рабочим столом). Нажали дважды: сделаем один раз. True: отложили."""
+        left = self._thaw_until - time.monotonic()
+        if self._frozen or left <= 0:
+            return False
+        if key not in self._thaw_waiting:
+            self._thaw_waiting.add(key)
+
+            def later() -> None:
+                self._thaw_waiting.discard(key)
+                fn()
+
+            QTimer.singleShot(int(left * 1000) + 30, later)
+        return True
 
     def _line_views(self, line: CurrentLine) -> list[WordView]:
         """Слова реплики для панели: текст, исправленный моделью при переводе, иначе прочитанный с экрана."""
@@ -2050,17 +2160,25 @@ class App(QObject):
         # перевода нет: панель сразу оставит под него место (_translate_words_line ниже)
         self.word_layer.translating = line.record is None and self.translator is not None
         translation = line.record.translation if line.record is not None else None
-        freeze = self._should_freeze(game.exe)
-        self.word_layer.backdrop = self._backdrop(game) if freeze else None
+        self._retranslate_token = None  # перевод прошлой реплики, если ещё пишется, в эту панель не попадёт
+        magpie = self._magpie_scaling()
+        want = self._wants_freeze(game.exe)
+        # игра уже свёрнута (режим открыли заново): снимок прежний, со свёрнутой игры снимать нечего
+        shot = self._freeze_shot(game) if want and not magpie and not self._frozen else None
+        if shot is not None:
+            self.freeze_frame.show_image(*shot)  # сначала снимок: слой слов откроется поверх него
         self.word_layer.open(
             self.display, game.region, views, strip=self.overlay.strip_rect(),
             speaker=self._line_speaker(line), translation=translation,
         )  # fmt: skip
         self.hotkeys.set_group("words", not self._hotkeys_paused)
         self._shield_on()
-        self._words_focus()
-        if self.word_layer.backdrop is not None:
+        self._words_focus(force=shot is not None or self._frozen, magpie=magpie)
+        if shot is not None:
             self._freeze_game()
+        elif want and magpie and not self._frozen:
+            self.word_layer.focus_warning = True
+            self.word_layer.warning_text = "Magpie: игра не свёрнута, клик может дойти до неё. Наводи на слово, не кликай"
         self._sync_ignored_keys()
         self._cursor_guard.reset()
         self._cursor_timer.start()
@@ -2111,7 +2229,7 @@ class App(QObject):
         self._retranslate_token = token
 
         def partial(t: str) -> None:
-            self.bridge.call.emit(lambda: self._retranslate_partial(token, region, t, text, again))
+            self.bridge.call.emit(lambda: self._retranslate_partial(token, ctx, region, t, text, again))
 
         req = TranslateRequest(
             text=text,
@@ -2136,19 +2254,20 @@ class App(QObject):
         model = (self._better_model if again else self.settings.model) if own else ""
 
         def done(res: Any, err: BaseException | None) -> None:
-            if self._retranslate_token is not token:
-                return
-            self._retranslate_token = None
-            self.word_layer.retranslating = False
-            self.word_layer.translating = False
-            self.word_layer.update()
+            current = self._retranslate_token is token
+            if current:
+                self._retranslate_token = None
+                self.word_layer.retranslating = False
+                self.word_layer.translating = False
+                self.word_layer.update()
+            here = current and self.word_ctx is ctx  # на экране всё ещё эта реплика
             if err is not None:
                 if not isinstance(err, TranslationError):
                     log.error("перевод в режиме слов: упало", exc_info=err)
-                self.overlay.toast(str(err) if isinstance(err, TranslationError) else "Не получилось перевести", 4000)
-                if record is not None:
-                    self.overlay.show_text(region, record.translation, original=text)
-                if self.word_ctx is ctx:
+                if here:
+                    self.overlay.toast(str(err) if isinstance(err, TranslationError) else "Не получилось перевести", 4000)
+                    if record is not None and (again or self.overlay.strip_visible):
+                        self.overlay.show_text(region, record.translation, original=text)
                     self.word_layer.set_translation(record.translation if record else None)
                 return
             rec = LineRecord(req.line_id, speaker, pick_source(text, res.source), res.translation, normalize_text(text))
@@ -2160,9 +2279,14 @@ class App(QObject):
             ctx.explain = None
             if model:
                 self.own_usage.add("line", res.usage, model)
+            if not again:  # новая переведённая реплика: в сессию и в «Прогресс», как от F2
+                self.sessions.line_translated(ctx.exe)
+                self._stat(ctx.exe, lines=1)
+            if not here:
+                return  # перевод сохранён, а на экране уже другая реплика или режим закрыт
             if self.overlay.strip_visible or again:
                 self.overlay.show_text(region, res.translation, original=text)
-            if self.word_ctx is ctx:
+            if self.word_layer.is_open:
                 self.word_layer.set_explain(None, show=False)
                 self.word_layer.set_translation(res.translation)
                 if not self.word_layer.selection and rec.source != text:
@@ -2176,9 +2300,9 @@ class App(QObject):
         return True
 
     def _retranslate_partial(
-        self, token: object, region: Rect, text: str, original: str | None = None, again: bool = True
+        self, token: object, ctx: WordCtx, region: Rect, text: str, original: str | None = None, again: bool = True
     ) -> None:
-        if token is not self._retranslate_token or not text:
+        if token is not self._retranslate_token or self.word_ctx is not ctx or not text:
             return
         if again or self.overlay.strip_visible:
             self.overlay.show_text(region, text, original=original)
@@ -2638,7 +2762,7 @@ class App(QObject):
         elif not self._words_focus():  # игра без фокуса обычно отпускает курсор
             log.info("курсор держит игра %s: слова стрелками, фокус не забираем", exe)
 
-    def _words_focus(self) -> bool:
+    def _words_focus(self, *, force: bool = False, magpie: bool | None = None) -> bool:
         """Режим слов открыт: фокус на это время у слоя, а не у игры.
 
         Многие игры читают мышь и клавиатуру через Raw Input или DirectInput. Это хук не
@@ -2651,10 +2775,12 @@ class App(QObject):
             return False
         exe = self.active.exe
         why = ""
-        if exe in self._focus_bad and self._game_fullscreen():
-            why = "она сворачивалась без фокуса"  # в окне не свернётся: там фокус берём
-        elif self._magpie_scaling():
-            why = "игру растягивает Magpie"
+        if magpie is None:
+            magpie = self._magpie_scaling()
+        if exe in self._focus_bad and self._game_fullscreen() and not force:
+            why = "она сворачивалась без фокуса"  # в окне не свернётся; сворачиваем сами: тоже берём
+        elif magpie and not winapi.magpie_modern():
+            why = "игру растягивает Magpie старше 0.12: без фокуса он перестал бы растягивать"
         if why:
             log.info("режим слов без фокуса у %s: %s", exe, why)
             self.word_layer.focus_warning = True

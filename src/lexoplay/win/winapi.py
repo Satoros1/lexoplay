@@ -19,6 +19,8 @@ HWND = wintypes.HWND
 
 # --- сигнатуры: на 64-битах без них HWND обрезается до int32 ---
 user32.GetForegroundWindow.restype = HWND
+user32.FindWindowW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR]
+user32.FindWindowW.restype = HWND
 user32.GetWindowThreadProcessId.argtypes = [HWND, ctypes.POINTER(wintypes.DWORD)]
 user32.GetWindowThreadProcessId.restype = wintypes.DWORD
 user32.GetClientRect.argtypes = [HWND, ctypes.POINTER(wintypes.RECT)]
@@ -71,6 +73,10 @@ GWL_EXSTYLE = -20
 WS_EX_TOOLWINDOW = 0x00000080
 WS_EX_NOACTIVATE = 0x08000000
 DWMWA_CLOAKED = 14
+DWMWA_EXTENDED_FRAME_BOUNDS = 9
+# окно, в котором Magpie 0.12+ показывает растянутую игру: у таких версий растягивание не
+# прерывается, когда фокус уходит в другое окно (у старых прерывается)
+MAGPIE_CLASS = "Window_Magpie_967EB565-6F73-4E94-AE53-00CC42592A22"
 
 
 class MONITORINFO(ctypes.Structure):
@@ -327,6 +333,22 @@ def restore_window(hwnd: int, *, activate: bool = True) -> None:
     activate=False: игрок ушёл в другое окно, игру разворачиваем, но фокус ей не отдаём."""
     if is_window(hwnd) and is_minimized(hwnd):
         user32.ShowWindow(hwnd, SW_RESTORE if activate else SW_SHOWNOACTIVATE)
+
+
+def visible_rect(hwnd: int) -> Rect:
+    """Видимая рамка окна (без невидимых полей для растягивания, которые есть у window_rect)."""
+    if dwmapi is not None:
+        r = wintypes.RECT()
+        if dwmapi.DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, ctypes.byref(r), ctypes.sizeof(r)) == 0:
+            rect = _rect(r)
+            if not rect.empty:
+                return rect
+    return window_rect(hwnd)
+
+
+def magpie_modern() -> bool:
+    """Растягивает новый Magpie (0.12+), у которого растягивание переживает смену фокуса."""
+    return bool(user32.FindWindowW(MAGPIE_CLASS, None))
 
 
 def minimize_window(hwnd: int) -> None:

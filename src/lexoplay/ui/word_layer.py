@@ -29,7 +29,6 @@ from PySide6.QtGui import (
     QFont,
     QFontMetricsF,
     QGuiApplication,
-    QImage,
     QKeyEvent,
     QMouseEvent,
     QPainter,
@@ -139,14 +138,15 @@ class WordLayer(QWidget):
         self.deck_label = ""
         self.explain_key = "F7"
         self.cursor_locked = False  # игра держит курсор: подсказка про стрелки
-        self.focus_warning = False  # фокус у игры: клик может дойти до неё, подсказка про стрелки
-        self.backdrop: QImage | None = None  # игра свёрнута на время режима: её снимок на её месте
+        self.focus_warning = False  # клик может дойти до игры: подсказка не кликать, а наводить
+        self.warning_text = ""  # почему (пусто: игра не отдала фокус)
         self._focus: int | None = None  # куда двигают стрелки
         self._close_armed = False  # нажали мимо слов (или правой): закроемся, когда кнопку отпустят
         # выбор наведением: некоторые игры ловят клик, даже когда фокус у LexoPlay, а движение мыши
         # реплику не листает. Задержал курсор на слове: оно выбрано; на «+»: сохранено
         self.hover_pick = True
         self._dwell_on: tuple[str, int] | None = None  # ("word", индекс) или ("add", 0)
+        self._dwell_used: tuple[str, int] | None = None  # уже сработало: снова, только когда курсор уйдёт
         self._dwell_t0 = 0.0
         self._dwell = QTimer(self)
         self._dwell.setSingleShot(True)
@@ -201,8 +201,10 @@ class WordLayer(QWidget):
         self._explain, self._explain_open = None, False
         self.cursor_locked = False
         self.focus_warning = False
+        self.warning_text = ""
         self._close_armed = False
         self._dwell_stop()
+        self._dwell_used = None
         self._pick.stop()
         self._open = True
         self._placer(self, display)
@@ -339,7 +341,6 @@ class WordLayer(QWidget):
         self.repaint()
         self.hide()
         self._blank = False
-        self.backdrop = None
         self.finished.emit(reason)
 
     # ------------------------------------------------------------------ геометрия
@@ -479,6 +480,10 @@ class WordLayer(QWidget):
             target = ("add", 0)
         elif hover is not None and not (self._sel == [hover] and not self._shift_down()):
             target = ("word", hover)
+        if target != self._dwell_used:
+            self._dwell_used = None
+        elif target is not None:
+            return  # «+» уже нажат удержанием: второй раз то же слово не сохраняем
         if target != self._dwell_on:
             self._dwell_stop()
             if target is not None:
@@ -501,6 +506,7 @@ class WordLayer(QWidget):
         if not self._open or target is None:
             return
         if target[0] == "add":
+            self._dwell_used = target
             if self._card and self._card.button_enabled:
                 self.add_clicked.emit()
         else:
@@ -610,8 +616,6 @@ class WordLayer(QWidget):
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
         bounds = self._bounds()
-        if self.backdrop is not None:  # игра свёрнута: на её месте снимок, как будто она стоит на паузе
-            p.drawImage(QRectF(self.rect()), self.backdrop)
         p.fillRect(self.rect(), QColor(0, 0, 0, 46))  # ловим все клики над игрой и чуть затемняем её
         avoid = self._avoid()
 
@@ -771,7 +775,7 @@ class WordLayer(QWidget):
         if self.cursor_locked:
             text = "Курсор держит игра: слова стрелками ←→, Shift+→ фраза, Enter сохранить, Esc выйти"
         elif self.focus_warning:
-            text = "Игра не отдала фокус: не кликай, наводи на слово и держи курсор на «+»"
+            text = self.warning_text or "Игра не отдала фокус: не кликай, наводи на слово и держи курсор на «+»"
         else:
             text = ("Наведи на слово" if self.hover_pick else "Клик или ←→ по слову") + " · Shift фраза · Esc выйти"
         x = max(4.0, region.x)
