@@ -214,6 +214,43 @@ def test_word_layer_clicks_from_hook(qapp):
     qapp.processEvents()
 
 
+def test_word_layer_hover_picks_and_saves_without_clicks(qapp):
+    """Игры, которые ловят клик и без фокуса: слово выбирается наведением, «+» тоже держат курсором."""
+    from lexoplay.wordmode import reader_views
+
+    layer = WordLayer()
+    picked, added = [], []
+    layer.selected.connect(picked.append)
+    layer.add_clicked.connect(lambda: added.append(1))
+    layer.open(Rect(0, 0, 1000, 700), Rect(0.05, 0.8, 0.9, 0.15), reader_views("This place feels eerie after dark."))
+    qapp.processEvents()
+    v = layer.views
+
+    def center(w):  # type: ignore[no-untyped-def]
+        return QPointF((w.rect.x + w.rect.w / 2) * layer.width(), (w.rect.y + w.rect.h / 2) * layer.height())
+
+    layer.hover(center(v[1]))
+    layer.hover(center(v[3]))  # проскочил «place»: его не выбираем
+    QTest.qWait(600)
+    assert picked == [[3]]
+    layer.set_card(CardState("ready", "eerie", "ˈɪəri", "adj", ["жуткий"]))
+    layer.grab()  # кнопка «+» нарисована
+    b = layer._button_rect.center()  # noqa: SLF001
+    layer.hover(QPointF(b.x(), b.y()))
+    QTest.qWait(400)
+    layer.grab()  # кнопка заполняется
+    assert added == []
+    QTest.qWait(700)
+    assert added == [1]
+    layer.hover_pick = False  # выключено в настройках: только клики и клавиши
+    layer.hover(center(v[4]))
+    QTest.qWait(600)
+    assert picked == [[3]]
+    layer.close()
+    layer.deleteLater()
+    qapp.processEvents()
+
+
 class FakeCtl:
     """Контроллер для окна LexoPlay без Windows и сервера."""
 

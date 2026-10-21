@@ -905,6 +905,7 @@ class App(QObject):
         self.overlay.font_bold = self.settings.strip_bold
         self.word_layer.font_scale = self.settings.font_scale
         self.word_layer.font_family = self.settings.strip_font
+        self.word_layer.hover_pick = self.settings.hover_pick
 
     def _rebuild_translator(self) -> None:
         """Переводчик под привязку или свой ключ. Пересобирается, только когда сменились

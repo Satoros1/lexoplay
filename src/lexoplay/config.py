@@ -85,6 +85,7 @@ class Settings:
     strip_font: str = ""  # шрифт перевода; пусто = как в окне LexoPlay (Segoe UI)
     strip_bold: bool = False
     daily_goal: int = 10  # цель на день: столько новых слов
+    hover_pick: bool = True  # режим слов: слово выбирается наведением, «+» удержанием курсора (без кликов)
     translate_think: bool = True  # свой ключ: модель немного думает перед переводом (точнее, на 1–2 с дольше)
     no_focus_games: list[str] = field(default_factory=list)  # свернулись, когда режим слов брал фокус: больше не берём
     hotkeys: Hotkeys = field(default_factory=Hotkeys)

@@ -19,6 +19,7 @@ click() и release(), а App на время режима забирает у и
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 
@@ -27,6 +28,7 @@ from PySide6.QtGui import (
     QColor,
     QFont,
     QFontMetricsF,
+    QGuiApplication,
     QKeyEvent,
     QMouseEvent,
     QPainter,
@@ -57,6 +59,8 @@ KNOWN = QColor("#F2C94C")
 TRANSLATION = QColor("#C3CBD8")
 IDLE_MS = 30_000
 PICK_MS = 350  # стрелками: значение слова запрашиваем, когда выбор остановился
+HOVER_WORD_MS = 450  # наведением: курсор задержался на слове, выбираем его без клика
+HOVER_ADD_MS = 900  # курсор держат на «+ в мои слова»: сохраняем без клика
 
 
 def _qt_placer(widget: QWidget, rect: Rect) -> None:
@@ -137,6 +141,17 @@ class WordLayer(QWidget):
         self.focus_warning = False  # фокус у игры: клик может дойти до неё, подсказка про стрелки
         self._focus: int | None = None  # куда двигают стрелки
         self._close_armed = False  # нажали мимо слов (или правой): закроемся, когда кнопку отпустят
+        # выбор наведением: некоторые игры ловят клик, даже когда фокус у LexoPlay, а движение мыши
+        # реплику не листает. Задержал курсор на слове: оно выбрано; на «+»: сохранено
+        self.hover_pick = True
+        self._dwell_on: tuple[str, int] | None = None  # ("word", индекс) или ("add", 0)
+        self._dwell_t0 = 0.0
+        self._dwell = QTimer(self)
+        self._dwell.setSingleShot(True)
+        self._dwell.timeout.connect(self._dwell_done)
+        self._dwell_anim = QTimer(self)  # заполнение «+», пока курсор на нём
+        self._dwell_anim.setInterval(30)
+        self._dwell_anim.timeout.connect(self.update)
         self._blank = False
         self._pick = QTimer(self)
         self._pick.setSingleShot(True)
@@ -185,6 +200,7 @@ class WordLayer(QWidget):
         self.cursor_locked = False
         self.focus_warning = False
         self._close_armed = False
+        self._dwell_stop()
         self._pick.stop()
         self._open = True
         self._placer(self, display)
@@ -315,6 +331,7 @@ class WordLayer(QWidget):
         self._open = False
         self._idle.stop()
         self._pick.stop()
+        self._dwell_stop()
         # пустой кадр перед скрытием: иначе при следующем показе мелькнёт этот (с разбором, карточкой)
         self._blank = True
         self.repaint()
@@ -439,13 +456,56 @@ class WordLayer(QWidget):
 
     # ------------------------------------------------------------------ события
     def mouseMoveEvent(self, e: QMouseEvent) -> None:  # noqa: N802
+        self.hover(e.position())
+
+    def hover(self, pos: QPointF) -> None:
+        """Курсор над слоем (движение мыши до окна доходит: его хук не забирает)."""
+        if not self._open:
+            return
         self._idle.start()
-        hover = self._hit_word(e.position())
-        over_button = bool(self._button_rect and self._button_rect.contains(e.position()))
+        hover = self._hit_word(pos)
+        over_button = bool(self._button_rect and self._button_rect.contains(pos))
         self.setCursor(Qt.CursorShape.PointingHandCursor if hover is not None or over_button else Qt.CursorShape.ArrowCursor)
         if hover != self._hover:
             self._hover = hover
             self.update()
+        if not self.hover_pick:
+            return
+        target: tuple[str, int] | None = None
+        if over_button and self._card is not None and self._card.button_enabled:
+            target = ("add", 0)
+        elif hover is not None and not (self._sel == [hover] and not self._shift_down()):
+            target = ("word", hover)
+        if target != self._dwell_on:
+            self._dwell_stop()
+            if target is not None:
+                self._dwell_on = target
+                self._dwell_t0 = time.monotonic()
+                self._dwell.start(HOVER_ADD_MS if target[0] == "add" else HOVER_WORD_MS)
+                if target[0] == "add":
+                    self._dwell_anim.start()
+
+    def _dwell_stop(self) -> None:
+        self._dwell.stop()
+        self._dwell_anim.stop()
+        if self._dwell_on is not None and self._dwell_on[0] == "add":
+            self.update()
+        self._dwell_on = None
+
+    def _dwell_done(self) -> None:
+        target = self._dwell_on
+        self._dwell_stop()
+        if not self._open or target is None:
+            return
+        if target[0] == "add":
+            if self._card and self._card.button_enabled:
+                self.add_clicked.emit()
+        else:
+            self._pick_word(target[1], shift=self._shift_down())
+
+    @staticmethod
+    def _shift_down() -> bool:
+        return bool(QGuiApplication.queryKeyboardModifiers() & Qt.KeyboardModifier.ShiftModifier)
 
     def mousePressEvent(self, e: QMouseEvent) -> None:  # noqa: N802
         e.accept()  # клик дальше в игру не идёт (если хук не стоит: см. click)
@@ -496,6 +556,11 @@ class WordLayer(QWidget):
                 return  # между словами: промахнулся, режим не закрываем
             self._close_armed = True  # мимо панели: закрыть режим, в игру клик не попадёт
             return
+        self._pick_word(idx, shift=shift)
+
+    def _pick_word(self, idx: int, *, shift: bool) -> None:
+        """Выбрать слово (кликом или наведением); с Shift фраза от прошлого слова до этого."""
+        self._dwell_stop()
         self._explain_open = False  # слово важнее: разбор спрячется, F7 вернёт
         self._pick.stop()
         sel = selection_range(self._anchor, idx) if shift else [idx]
@@ -701,9 +766,9 @@ class WordLayer(QWidget):
         if self.cursor_locked:
             text = "Курсор держит игра: слова стрелками ←→, Shift+→ фраза, Enter сохранить, Esc выйти"
         elif self.focus_warning:
-            text = "Игра не отдала фокус: клик может пролистать реплику. Слова стрелками ←→, Enter сохранить"
+            text = "Игра не отдала фокус: не кликай, наводи на слово и держи курсор на «+»"
         else:
-            text = "Клик или ←→ по слову · Shift фраза · Esc выйти"
+            text = ("Наведи на слово" if self.hover_pick else "Клик или ←→ по слову") + " · Shift фраза · Esc выйти"
         x = max(4.0, region.x)
         room = right - x - px * 0.6
         if room < px * 8:
@@ -913,6 +978,13 @@ class WordLayer(QWidget):
                 p.setPen(Qt.PenStyle.NoPen)
                 p.setBrush(fill)
                 p.drawRoundedRect(btn, btn_h / 2, btn_h / 2)
+                if self._dwell_on == ("add", 0):  # курсор держат на кнопке: заполняется до сохранения
+                    k = min(1.0, (time.monotonic() - self._dwell_t0) * 1000 / HOVER_ADD_MS)
+                    p.save()
+                    p.setClipRect(QRectF(btn.x(), btn.y(), btn.width() * k, btn.height()))
+                    p.setBrush(QColor(255, 255, 255, 90))
+                    p.drawRoundedRect(btn, btn_h / 2, btn_h / 2)
+                    p.restore()
                 p.setFont(f_btn)
                 p.setPen(QColor("#06261F"))
                 p.drawText(btn, int(Qt.AlignmentFlag.AlignCenter), label)
@@ -921,6 +993,6 @@ class WordLayer(QWidget):
                 p.drawText(
                     QRectF(btn.right() + px * 0.6, btn.y(), inner - bw - px * 0.6, btn_h),
                     int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
-                    "Enter",
+                    "наведи и подержи или Enter" if self.hover_pick else "Enter",
                 )
             y += h + gap

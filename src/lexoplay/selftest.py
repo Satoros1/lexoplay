@@ -716,6 +716,12 @@ def _app_vs_game(out_dir: Path) -> Callable[[], tuple[str, object]]:
             v = app.word_layer.views[3] if app.word_layer.views else None
             lr = _wa.window_rect(lh)
             s0 = game_state()
+            hv = app.word_layer.views[2] if app.word_layer.views else None  # «feels»: выбираем наведением, без клика
+            if hv is not None:
+                u32.SetCursorPos(int(lr.x + (hv.rect.x + hv.rect.w / 2) * lr.w) - 2, int(lr.y + (hv.rect.y + hv.rect.h / 2) * lr.h))
+                pump(lambda: False, 0.05)
+                u32.mouse_event(0x0001, 2, 0, 0, 0)  # движение, как от мыши
+            info["hover_picked"] = pump(lambda: app.word_layer.selection == [2], 3)
             if v is not None:
                 click(int(lr.x + (v.rect.x + v.rect.w / 2) * lr.w), int(lr.y + (v.rect.y + v.rect.h / 2) * lr.h))
             info["picked"] = pump(lambda: app.word_layer.selection == [3], 3)
@@ -769,6 +775,7 @@ def _app_vs_game(out_dir: Path) -> Callable[[], tuple[str, object]]:
             and info.get("took_focus")
             and info.get("layer_foreground")
             and info.get("focus_warning") is False
+            and info.get("hover_picked")
             and info.get("picked")
             and info.get("card_ready")
             and info.get("card_saved")

@@ -914,6 +914,21 @@ class ViewPage(QWidget):
         self.original.toggled.connect(self._original)
         lay.addWidget(box)
 
+        lay.addWidget(label("РЕЖИМ СЛОВ", "section"))
+        hover_box, hl_ = card_list()
+        self.hover = Toggle(s.hover_pick)
+        self.hover.toggled.connect(self._hover)
+        hl_.addWidget(
+            setting_row(
+                "Выбирать слово наведением",
+                "Задержи курсор на слове, и откроется его карточка. Подержи курсор на «+», и слово сохранится. "
+                "Кликать не нужно: так реплика не пролистается даже в играх, которые ловят клик мимо LexoPlay.",
+                self.hover,
+                last=True,
+            )
+        )
+        lay.addWidget(hover_box)
+
         lay.addWidget(label("ПЕРЕВОД", "section"))
         auto_box, al = card_list()
         self.think = Toggle(s.translate_think)
@@ -1004,6 +1019,11 @@ class ViewPage(QWidget):
         self.ctl.settings.show_original = on
         self.preview.update()
         self.ctl.settings_changed()
+
+    def _hover(self, on: bool) -> None:
+        if self.ctl.settings.hover_pick != on:
+            self.ctl.settings.hover_pick = on
+            self.ctl.settings_changed()
 
     def _think(self, on: bool) -> None:
         if self.ctl.settings.translate_think != on:
