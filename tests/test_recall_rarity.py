@@ -1,7 +1,7 @@
 """Трудные слова (частотный список) и напоминание о сохранённых словах."""
 
 from lexoplay.rarity import LEVELS, bases, rank, tier
-from lexoplay.recall import FRESH_S, MAX_CHIPS, RecallIndex, Recaller, short_translation
+from lexoplay.recall import FRESH_S, MAX_CHIPS, Recaller, RecallIndex, short_translation
 from lexoplay.store import SavedWord, Store
 from lexoplay.wordmode import game_names, reader_views
 

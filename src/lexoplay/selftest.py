@@ -936,6 +936,7 @@ def _own_key_flow(out_dir: Path) -> Callable[[], tuple[str, object]]:
             chips = app._recall_for("It gets so eerie here after dark.", commit=True)
             info["recall"] = [(c.word, c.translation) for c in chips]
             info["seen"] = sorted(w.seen for w in store.words_list())
+            app.overlay.fade = False  # снимок сразу, без плавного появления
             app.overlay.show_text(game.region, "Здесь после темноты так жутко.", recall=chips)
             for _ in range(10):
                 app_q.processEvents()
