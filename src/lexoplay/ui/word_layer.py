@@ -29,6 +29,7 @@ from PySide6.QtGui import (
     QFont,
     QFontMetricsF,
     QGuiApplication,
+    QImage,
     QKeyEvent,
     QMouseEvent,
     QPainter,
@@ -139,6 +140,7 @@ class WordLayer(QWidget):
         self.explain_key = "F7"
         self.cursor_locked = False  # игра держит курсор: подсказка про стрелки
         self.focus_warning = False  # фокус у игры: клик может дойти до неё, подсказка про стрелки
+        self.backdrop: QImage | None = None  # игра свёрнута на время режима: её снимок на её месте
         self._focus: int | None = None  # куда двигают стрелки
         self._close_armed = False  # нажали мимо слов (или правой): закроемся, когда кнопку отпустят
         # выбор наведением: некоторые игры ловят клик, даже когда фокус у LexoPlay, а движение мыши
@@ -337,6 +339,7 @@ class WordLayer(QWidget):
         self.repaint()
         self.hide()
         self._blank = False
+        self.backdrop = None
         self.finished.emit(reason)
 
     # ------------------------------------------------------------------ геометрия
@@ -607,6 +610,8 @@ class WordLayer(QWidget):
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
         bounds = self._bounds()
+        if self.backdrop is not None:  # игра свёрнута: на её месте снимок, как будто она стоит на паузе
+            p.drawImage(QRectF(self.rect()), self.backdrop)
         p.fillRect(self.rect(), QColor(0, 0, 0, 46))  # ловим все клики над игрой и чуть затемняем её
         avoid = self._avoid()
 

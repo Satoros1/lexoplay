@@ -745,6 +745,25 @@ def _app_vs_game(out_dir: Path) -> Callable[[], tuple[str, object]]:
             pump(lambda: False, 0.4)
             s3 = game_state()
             info["game_saw_after"] = delta(s2, s3)
+            # «Сворачивать игру на время F3»: игра свёрнута, на её месте снимок; после Esc снова развёрнута
+            app.settings.words_freeze = "always"
+            _wa.force_foreground(ghwnd)
+            pump(lambda: _wa.foreground_window() == ghwnd, 2)
+            app._open_words(game, session, line)
+            pump(lambda: False, 0.4)
+            info["frozen"] = app._frozen and _wa.is_minimized(ghwnd) and app.word_layer.backdrop is not None
+            s_f = game_state()
+            fv = app.word_layer.views[4] if app.word_layer.views else None
+            if fv is not None:
+                click(int(lr.x + (fv.rect.x + fv.rect.w / 2) * lr.w), int(lr.y + (fv.rect.y + fv.rect.h / 2) * lr.h))
+            info["frozen_picked"] = pump(lambda: app.word_layer.selection == [4], 3)
+            pump(lambda: False, 0.3)
+            info["frozen_game_saw"] = delta(s_f, game_state())
+            app._close_words("esc")
+            info["unfrozen"] = pump(lambda: not _wa.is_minimized(ghwnd) and _wa.foreground_window() == ghwnd, 3)
+            app.settings.words_freeze = "never"
+            pump(lambda: False, 0.3)
+            s3 = game_state()
             # для отчёта: без фокуса у слоя (Magpie, эксклюзивный экран) Raw Input игры клик видит
             app._focus_bad.add(game.exe)
             _wa.force_foreground(ghwnd)
@@ -786,6 +805,10 @@ def _app_vs_game(out_dir: Path) -> Callable[[], tuple[str, object]]:
             and info.get("shield_off")
             and after.get("raw_down", 0) >= 1  # type: ignore[union-attr]
             and after.get("msg_down", 0) >= 1  # type: ignore[union-attr]
+            and info.get("frozen")
+            and info.get("frozen_picked")
+            and not any((info.get("frozen_game_saw") or {}).get(k) for k in quiet)  # type: ignore[union-attr]
+            and info.get("unfrozen")
         )
         return ("ok" if ok else "fail"), info
 

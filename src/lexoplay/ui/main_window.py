@@ -916,6 +916,20 @@ class ViewPage(QWidget):
 
         lay.addWidget(label("РЕЖИМ СЛОВ", "section"))
         hover_box, hl_ = card_list()
+        self.freeze = QComboBox()
+        for code, text in (("auto", "Только где нужно"), ("always", "Всегда"), ("never", "Никогда")):
+            self.freeze.addItem(text, code)
+        self.freeze.setCurrentIndex(max(0, self.freeze.findData(s.words_freeze)))
+        self.freeze.setMinimumWidth(200)
+        self.freeze.activated.connect(self._freeze)
+        hl_.addWidget(
+            setting_row(
+                "Сворачивать игру на время F3",
+                "Пока открыт режим слов, игра свёрнута, а на её месте её снимок: так она точно не поймает клик. "
+                "«Только где нужно»: Danganronpa и игры, которые однажды поймали клик при открытом F3.",
+                self.freeze,
+            )
+        )
         self.hover = Toggle(s.hover_pick)
         self.hover.toggled.connect(self._hover)
         hl_.addWidget(
@@ -1018,6 +1032,10 @@ class ViewPage(QWidget):
     def _original(self, on: bool) -> None:
         self.ctl.settings.show_original = on
         self.preview.update()
+        self.ctl.settings_changed()
+
+    def _freeze(self) -> None:
+        self.ctl.settings.words_freeze = self.freeze.currentData()
         self.ctl.settings_changed()
 
     def _hover(self, on: bool) -> None:

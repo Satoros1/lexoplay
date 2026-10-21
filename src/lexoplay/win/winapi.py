@@ -64,6 +64,8 @@ SWP_NOOWNERZORDER = 0x0200
 GA_ROOT = 2
 WDA_EXCLUDEFROMCAPTURE = 0x00000011
 SW_RESTORE = 9
+SW_SHOWNOACTIVATE = 4
+SW_SHOWMINNOACTIVE = 7
 GW_OWNER = 4
 GWL_EXSTYLE = -20
 WS_EX_TOOLWINDOW = 0x00000080
@@ -319,10 +321,18 @@ def own_pid() -> int:
     return os.getpid()
 
 
-def restore_window(hwnd: int) -> None:
-    """Развернуть свёрнутую игру (полноэкранные игры сворачиваются, когда теряют фокус)."""
+def restore_window(hwnd: int, *, activate: bool = True) -> None:
+    """Развернуть свёрнутую игру (полноэкранные игры сворачиваются, когда теряют фокус).
+
+    activate=False: игрок ушёл в другое окно, игру разворачиваем, но фокус ей не отдаём."""
     if is_window(hwnd) and is_minimized(hwnd):
-        user32.ShowWindow(hwnd, SW_RESTORE)
+        user32.ShowWindow(hwnd, SW_RESTORE if activate else SW_SHOWNOACTIVATE)
+
+
+def minimize_window(hwnd: int) -> None:
+    """Свернуть игру, не активируя другое окно (фокус уже у нашего окна)."""
+    if is_window(hwnd) and not is_minimized(hwnd):
+        user32.ShowWindow(hwnd, SW_SHOWMINNOACTIVE)
 
 
 def set_no_activate(hwnd: int, on: bool = True) -> None:
