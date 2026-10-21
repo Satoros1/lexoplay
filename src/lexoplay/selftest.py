@@ -954,15 +954,21 @@ def _qt_checks(out_dir: Path) -> None:
         ov.set_display_rect(Rect(40, 40, 960, 720))
         ov.show_text(Rect(0.04, 0.78, 0.92, 0.18), "Знаешь, мне совсем не хотелось сюда сегодня приходить. После заката здесь как-то жутко.")
         ov.toast("eerie сохранено в Lexo")
-        end = time.monotonic() + 0.4  # плашка появляется плавно: ждём, пока проявится
+        def painted_now() -> tuple[int, object]:
+            shot = ov.grab().toImage()
+            n = sum(1 for y in range(0, shot.height(), 6) for x in range(0, shot.width(), 6) if shot.pixelColor(x, y).alpha() > 0)
+            return n, shot
+
+        # плашка появляется плавно: ждём, пока проявится (первая отрисовка в exe бывает медленной)
+        end = time.monotonic() + 5
+        painted, img = 0, None
         while time.monotonic() < end:
             app.processEvents()
-            time.sleep(0.02)
-        img = ov.grab().toImage()
-        img.save(str(out_dir / "overlay.png"))
-        painted = sum(
-            1 for y in range(0, img.height(), 6) for x in range(0, img.width(), 6) if img.pixelColor(x, y).alpha() > 0
-        )
+            time.sleep(0.05)
+            painted, img = painted_now()
+            if painted > 50:
+                break
+        img.save(str(out_dir / "overlay.png"))  # type: ignore[union-attr]
         ov.hide_strip()
         end = time.monotonic() + 0.4
         while time.monotonic() < end:
