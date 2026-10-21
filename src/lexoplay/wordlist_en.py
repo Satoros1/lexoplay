@@ -3,7 +3,8 @@
 Сгенерировано один раз скриптом, руками не править.
 """
 
-WORDS = frozenset(
+# по частоте: первое слово самое частое (ранг 0)
+RANKED: tuple[str, ...] = tuple(
     """
 the to and of a in i is for that you it on with this was be as are have at he not by but from my or we an your
 all so his they me if one can will just like about up out what has when more do no were who had it's their
@@ -1093,3 +1094,5 @@ irritated jackpot javascript jurassic kangaroo ke klaus knowingly kuala legged l
 lithuania litre locomotive longing lsu mailed manny mantra mapped marcel mating mckay mesa microscope milky
 """.split()
 )
+
+WORDS = frozenset(RANKED)

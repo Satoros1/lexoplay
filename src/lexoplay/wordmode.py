@@ -7,12 +7,15 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import re
+from collections.abc import Callable, Collection
 from dataclasses import dataclass, field
 from typing import Literal
 
 from lexoplay.geometry import Rect
 from lexoplay.ocr_model import OcrResult
+from lexoplay.rarity import rank
+from lexoplay.rarity import tier as rarity_tier
 from lexoplay.words import clean, is_stopword, is_word
 
 MAX_PHRASE = 5
@@ -26,6 +29,7 @@ class WordView:
     known: bool = False  # уже есть в Lexo: жёлтое подчёркивание
     stop: bool = False  # служебное слово: не подчёркиваем, но кликнуть можно
     clickable: bool = True
+    tier: str = ""  # 'rare' трудное, 'common' из самых частых, 'name' имя; '' обычное (или подсветка выключена)
 
 
 def build_views(ocr: OcrResult, known: Callable[[str], bool] = lambda _w: False) -> list[WordView]:
@@ -46,12 +50,75 @@ def build_views(ocr: OcrResult, known: Callable[[str], bool] = lambda _w: False)
     return out
 
 
-def reader_views(text: str, known: Callable[[str], bool] = lambda _w: False) -> list[WordView]:
-    """Слова реплики для панели режима слов. Рамки им ставит сама панель, когда раскладывает текст."""
+_SENTENCE_END = re.compile(r"[.!?…:;\"“”«»(\[-]$")
+
+
+def _name_like(tokens: list[str], i: int, caps_line: bool) -> bool:
+    """С большой буквы посреди предложения: скорее всего имя или название, а не трудное слово."""
+    core = clean(tokens[i])
+    if caps_line or not core or not core[0].isupper() or core.isupper() or core in ("I", "I'm", "I'll", "I've", "I'd"):
+        return False
+    if i == 0:
+        return False
+    prev = tokens[i - 1].rstrip("'’")
+    return not _SENTENCE_END.search(prev)
+
+
+def _caps_line(tokens: list[str]) -> bool:
+    letters = [ch for t in tokens for ch in t if ch.isalpha()]
+    return bool(letters) and sum(ch.isupper() for ch in letters) > len(letters) * 0.6
+
+
+def game_names(texts: Collection[str], speakers: Collection[str] = (), terms: Collection[str] = ()) -> set[str]:
+    """Имена и названия игры: говорящие и слова из глоссария (не из словаря), и то, что в репликах посреди предложения
+    пишется с большой буквы и ни разу не встретилось с маленькой (Hope's Peak да, Hope в «hope» нет)."""
+    upper: set[str] = set()
+    lower: set[str] = set()
+    for text in texts:
+        tokens = text.split()
+        caps = _caps_line(tokens)
+        for i, token in enumerate(tokens):
+            core = clean(token).replace("’", "'").split("'")[0]
+            if not core or not core.isalpha():
+                continue
+            if core.islower():
+                lower.add(core)
+            elif not caps and _name_like(tokens, i, caps):
+                upper.add(core)
+    out = {w for w in upper if w.casefold() not in lower}
+    for value in (*speakers, *terms):  # из составных берём только слова не из словаря: «Ultimate Lucky Student» не имя
+        out.update(w for w in (clean(x) for x in value.split()) if len(w) > 1 and rank(w) is None)
+    return out
+
+
+def reader_views(
+    text: str,
+    known: Callable[[str], bool] = lambda _w: False,
+    *,
+    level: str | None = None,
+    names: Collection[str] = (),
+) -> list[WordView]:
+    """Слова реплики для панели режима слов. Рамки им ставит сама панель, когда раскладывает текст.
+
+    level: с какого уровня подсвечивать трудные слова (rarity.LEVELS), None: не подсвечивать.
+    names: имена и названия игры (говорящий, глоссарий, что в репликах пишется с большой буквы):
+    они не «трудные», даже если их нет в словаре.
+    """
+    tokens = text.split()
+    caps = _caps_line(tokens)
+    lowered = {n.casefold() for n in names}
     out: list[WordView] = []
-    for i, token in enumerate(text.split()):
+    for i, token in enumerate(tokens):
         word = is_word(token)
         stop = word and is_stopword(token)
+        tier = ""
+        if word and not stop and level:
+            core = clean(token).replace("’", "'")
+            base = core.split("'")[0]
+            if core.casefold() in lowered or base.casefold() in lowered or _name_like(tokens, i, caps):
+                tier = "name"
+            else:
+                tier = rarity_tier(token, level)
         out.append(
             WordView(
                 index=i,
@@ -60,6 +127,7 @@ def reader_views(text: str, known: Callable[[str], bool] = lambda _w: False) -> 
                 known=bool(word and not stop and known(token)),
                 stop=stop,
                 clickable=word,
+                tier=tier,
             )
         )
     return out

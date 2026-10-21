@@ -22,6 +22,8 @@ STRIP_BG = QColor(10, 12, 16)
 TEXT = QColor("#FFFFFF")
 TEXT_MUTED = QColor("#9A988F")
 NAME = QColor("#A59BEA")
+KNOWN = QColor("#F2C94C")  # твои слова: из Lexo и сохранённые
+RARE = QColor("#FF7A9C")  # трудные (редкие) слова в режиме слов
 
 # --- окно приложения ---
 BG = "#F6F5F1"

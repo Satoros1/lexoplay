@@ -177,6 +177,8 @@ class SavedWord:
     created_at: float = 0.0
     lexo: bool = False  # ушло (или стоит в очереди) в карточки Lexo
     id: int = 0
+    seen: int = 0  # сколько раз снова встретилось в репликах после сохранения
+    seen_at: float = 0.0
 
     @property
     def word(self) -> str:
@@ -224,6 +226,10 @@ class Store:
             self._db.execute("ALTER TABLE lines ADD COLUMN ver INTEGER NOT NULL DEFAULT 0")
         if "star" not in line_cols:  # до 0.6.2: избранного не было
             self._db.execute("ALTER TABLE lines ADD COLUMN star INTEGER NOT NULL DEFAULT 0")
+        word_cols = {r[1] for r in self._db.execute("PRAGMA table_info(words)").fetchall()}
+        if "seen" not in word_cols:  # до 0.6.13: сколько раз слово снова встречалось в играх
+            self._db.execute("ALTER TABLE words ADD COLUMN seen INTEGER NOT NULL DEFAULT 0")
+            self._db.execute("ALTER TABLE words ADD COLUMN seen_at REAL NOT NULL DEFAULT 0")
         self._db.execute("CREATE INDEX IF NOT EXISTS words_exe_time ON words (exe, created_at)")
         cols = {r[1] for r in self._db.execute("PRAGMA table_info(games)").fetchall()}
         for col, ddl in (
@@ -577,7 +583,7 @@ class Store:
                 "ORDER BY created_at",
                 (exe.lower(), start, end),
             ).fetchall()
-        return [SavedWord(*r[1:11], lexo=bool(r[11]), id=r[0]) for r in rows]
+        return [self._word(r) for r in rows]
 
     def line_times(self) -> list[float]:
         """Когда реплики переводились впервые: для «когда ты играешь»."""
@@ -615,8 +621,13 @@ class Store:
 
     # ------------------------------------------------------------------ words: сохранённые слова
     _WORD_COLS = (
-        "id, exe, game, selection, lemma, translation, ipa, pos, sentence, sentence_translation, created_at, lexo"
+        "id, exe, game, selection, lemma, translation, ipa, pos, sentence, sentence_translation, created_at, lexo, "
+        "seen, seen_at"
     )
+
+    @staticmethod
+    def _word(r: tuple) -> SavedWord:
+        return SavedWord(*r[1:11], lexo=bool(r[11]), id=r[0], seen=int(r[12] or 0), seen_at=float(r[13] or 0))
 
     def word_add(self, w: SavedWord) -> int:
         with self._lock:
@@ -647,7 +658,29 @@ class Store:
         sql += " ORDER BY id DESC LIMIT ?"
         with self._lock:
             rows = self._db.execute(sql, (limit,)).fetchall()
-        return [SavedWord(*r[1:11], lexo=bool(r[11]), id=r[0]) for r in rows]
+        return [self._word(r) for r in rows]
+
+    def words_stamp(self) -> tuple[int, int]:
+        """(сколько слов, последний id): поменялось ли что-то в словах с прошлого раза."""
+        with self._lock:
+            n, last = self._db.execute("SELECT COUNT(*), COALESCE(MAX(id), 0) FROM words").fetchone()
+        return int(n), int(last)
+
+    def words_seen(self, ids: list[int], when: float) -> None:
+        """Слово снова встретилось в реплике."""
+        if not ids:
+            return
+        with self._lock:
+            self._db.executemany("UPDATE words SET seen = seen + 1, seen_at = ? WHERE id = ?", [(when, i) for i in ids])
+            self._db.commit()
+
+    def line_texts(self, exe: str, limit: int = 20000) -> list[str]:
+        """Последние реплики игры как прочитаны: по ним видно, какие слова в этой игре имена."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT source FROM lines WHERE exe = ? ORDER BY id DESC LIMIT ?", (exe.lower(), limit)
+            ).fetchall()
+        return [r[0] for r in rows]
 
     def words_mark_lexo(self, ids: list[int]) -> None:
         with self._lock:

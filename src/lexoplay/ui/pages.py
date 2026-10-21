@@ -83,6 +83,12 @@ def copy_text(text: str) -> None:
 
 
 # ------------------------------------------------------------------ Слова
+def times(n: int) -> str:
+    """3 -> «3 раза», 5 -> «5 раз», 21 -> «21 раз»."""
+    tail = "раза" if n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14) else "раз"
+    return f"{n} {tail}"
+
+
 class WordsPage(QWidget):
     def __init__(self, ctl: Ctl, linked: Callable[[], bool], hotkey: Callable[[], str]) -> None:
         super().__init__()
@@ -155,7 +161,10 @@ class WordsPage(QWidget):
             col.addWidget(selectable(label(w.translation, wrap=True)))
         if w.sentence:
             col.addWidget(selectable(label(w.sentence, "muted", wrap=True)))
-        col.addWidget(label(" · ".join(p for p in (w.game or "", when(w.created_at) if w.created_at else "") if p), "version"))
+        meta = [w.game or "", when(w.created_at) if w.created_at else ""]
+        if w.seen:
+            meta.append(f"снова встретилось {times(w.seen)}")
+        col.addWidget(label(" · ".join(p for p in meta if p), "version"))
         lay.addLayout(col, 1)
         tools = QVBoxLayout()
         tools.addWidget(tool("copy", "Скопировать слово и перевод", lambda: copy_text(f"{w.word} - {w.translation or ''}")))

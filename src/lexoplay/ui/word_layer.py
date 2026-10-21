@@ -40,7 +40,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import QWidget
 
 from lexoplay.geometry import Rect, denormalize, font_px_for
-from lexoplay.ui.theme import ACCENT, FONT_FAMILY, NAME, STRIP_BG, TEXT, TEXT_MUTED
+from lexoplay.ui.theme import ACCENT, FONT_FAMILY, KNOWN, NAME, RARE, STRIP_BG, TEXT, TEXT_MUTED
 from lexoplay.wordmode import (
     CardState,
     ExplainState,
@@ -55,7 +55,6 @@ from lexoplay.words import clean
 
 Placer = Callable[[QWidget, Rect], None]
 
-KNOWN = QColor("#F2C94C")
 TRANSLATION = QColor("#C3CBD8")
 IDLE_MS = 30_000
 PICK_MS = 350  # стрелками: значение слова запрашиваем, когда выбор остановился
@@ -140,6 +139,7 @@ class WordLayer(QWidget):
         self.cursor_locked = False  # игра держит курсор: подсказка про стрелки
         self.focus_warning = False  # клик может дойти до игры: подсказка не кликать, а наводить
         self.warning_text = ""  # почему (пусто: игра не отдала фокус)
+        self.rare_label = ""  # «B2+»: с какого уровня подсвечены трудные слова, для подсказки
         self._focus: int | None = None  # куда двигают стрелки
         self._close_armed = False  # нажали мимо слов (или правой): закроемся, когда кнопку отпустят
         # выбор наведением: некоторые игры ловят клик, даже когда фокус у LexoPlay, а движение мыши
@@ -662,6 +662,13 @@ class WordLayer(QWidget):
                 p.setPen(Qt.PenStyle.NoPen)
                 p.setBrush(QColor(255, 255, 255, 34))
                 p.drawRoundedRect(r.adjusted(-3, -2, 3, 2), 4, 4)
+            elif self._rare(v) and v.index not in explained:  # трудное слово: как маркером
+                x0, x1 = self._core_span(v.text, r, fm)
+                fill = QColor(RARE)
+                fill.setAlphaF(0.16)
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(fill)
+                p.drawRoundedRect(QRectF(x0 - 1.5, r.y() - 1, x1 - x0 + 3, r.height() + 2), 3, 3)  # соседние не сливаются
             p.setFont(f_text)
             p.setPen(TEXT)
             p.drawText(QPointF(r.x(), r.y() + fm.ascent()), v.text)
@@ -673,9 +680,11 @@ class WordLayer(QWidget):
             x0, x1 = self._core_span(v.text, r, fm)  # под самим словом, без запятой и кавычек
             if v.known:
                 pen = QPen(KNOWN, line_w * 1.2)
+            elif self._rare(v):
+                pen = QPen(RARE, line_w * 1.3)
             else:
                 c = QColor(ACCENT)
-                c.setAlphaF(0.85)
+                c.setAlphaF(0.35 if v.tier in ("common", "name") else 0.85)  # частое и имена еле видно
                 pen = QPen(c, line_w)
                 pen.setStyle(Qt.PenStyle.DotLine)
             pen.setCapStyle(Qt.PenCapStyle.RoundCap)
@@ -696,6 +705,10 @@ class WordLayer(QWidget):
         if not self._explain_open:
             self._paint_explain_button(p, avoid, bounds, px)
         p.end()
+
+    @staticmethod
+    def _rare(v: WordView) -> bool:
+        return v.tier == "rare" and v.clickable and not v.stop and not v.known
 
     @staticmethod
     def _core_span(text: str, r: QRectF, fm: QFontMetricsF) -> tuple[float, float]:
@@ -782,8 +795,20 @@ class WordLayer(QWidget):
         room = right - x - px * 0.6
         if room < px * 8:
             return
-        text = fm.elidedText(text, Qt.TextElideMode.ElideRight, room - px * 1.4)
-        w = fm.horizontalAdvance(text) + px * 1.4
+        # что значат цвета: только те, что есть в этой реплике
+        legend: list[tuple[QColor, str]] = []
+        if not (self.cursor_locked or self.focus_warning):
+            if any(v.known and v.clickable and not v.stop for v in self._views):
+                legend.append((KNOWN, "твои"))
+            if any(self._rare(v) for v in self._views):
+                legend.append((RARE, f"редкие {self.rare_label}".strip()))
+        swatch, gap = px * 0.9, px * 0.35
+        legend_w = sum(swatch + gap + fm.horizontalAdvance(label) + px * 0.8 for _c, label in legend)
+        if legend and room - legend_w < px * 10:
+            legend, legend_w = [], 0.0  # не влезает: подсказка важнее
+        text = fm.elidedText(text, Qt.TextElideMode.ElideRight, room - px * 1.4 - legend_w)
+        text_w = fm.horizontalAdvance(text)
+        w = text_w + px * 1.4 + legend_w
         rect = QRectF(x, y, w, h)
         bg = QColor(STRIP_BG)
         bg.setAlphaF(0.88)
@@ -792,7 +817,22 @@ class WordLayer(QWidget):
         p.drawRoundedRect(rect, h / 2, h / 2)
         p.setFont(f)
         p.setPen(QColor("#F2C94C") if self.cursor_locked or self.focus_warning else TEXT_MUTED)
-        p.drawText(rect, int(Qt.AlignmentFlag.AlignCenter), text)
+        mid = int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        tx = x + px * 0.7
+        p.drawText(QRectF(tx, y, text_w + 1, h), mid, text)
+        tx += text_w
+        for color, label in legend:
+            tx += px * 0.8
+            pen = QPen(color, max(2.0, px / 9))
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            p.setPen(pen)
+            ly = y + h / 2 + fm.ascent() * 0.38
+            p.drawLine(QPointF(tx, ly), QPointF(tx + swatch, ly))
+            tx += swatch + gap
+            p.setPen(color)
+            lw = fm.horizontalAdvance(label)
+            p.drawText(QRectF(tx, y, lw + 1, h), mid, label)
+            tx += lw
 
     def _paint_explain(self, p: QPainter, st: ExplainState, region: Rect, bounds: Rect, px: float) -> None:
         """Разбор реплики над панелью. region: панель (и строка перевода), её разбор не закрывает."""

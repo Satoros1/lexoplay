@@ -850,3 +850,86 @@ def test_word_layer_explain_panel_and_clicks_stay_out_of_the_game(qapp):
     layer.close()
     layer.deleteLater()
     qapp.processEvents()
+
+
+def _count(img, pred, rect=None):  # type: ignore[no-untyped-def]
+    from PySide6.QtCore import QRect
+
+    r = rect or QRect(0, 0, img.width(), img.height())
+    n = 0
+    for y in range(max(0, r.top()), min(img.height(), r.bottom()), 2):
+        for x in range(max(0, r.left()), min(img.width(), r.right()), 2):
+            if pred(img.pixelColor(x, y)):
+                n += 1
+    return n
+
+
+def test_overlay_recall_chips_under_translation(qapp):
+    from lexoplay.recall import RecallChip
+
+    ov = Overlay()
+    ov.fade = False  # снимок сразу, без плавного появления
+    ov.set_display_rect(Rect(0, 0, 960, 720))
+    region = Rect(0.05, 0.78, 0.9, 0.18)
+    ov.show_text(region, "Здесь как-то жутковато.")
+    plain = ov.strip_rect()
+    chips = [RecallChip("eerie", "жуткий", 1), RecallChip("dread", "страх", 3)]
+    ov.show_text(region, "Здесь как-то жутковато, и этот страх.", recall=chips)
+    assert ov.recall == tuple(chips)
+    tall = ov.strip_rect()
+    assert tall.h > plain.h + 10  # строка подсказок под переводом
+    box, _f, text_rect, _s, _o, row = ov._strip_geometry(ov._shown())  # noqa: SLF001
+    assert row is not None and row.label is not None and len(row.chips) == 2
+    assert all(c.rect.top() >= text_rect.bottom() and box.contains(c.rect) for c in row.chips)
+    assert row.chips[0].count == "" and row.chips[1].count == "×3"
+    img = ov.grab().toImage()
+    chip = row.chips[0].rect.toRect()
+    yellow = _count(img, lambda c: c.red() > 180 and c.green() > 150 and c.blue() < 120, chip)
+    assert yellow > 5  # слово жёлтое, как твои слова в режиме слов
+    ov.show_busy(region, original="So eerie.", recall=chips[:1])  # подсказка видна уже с точками
+    assert ov._strip_geometry(ov._shown())[5] is not None  # noqa: SLF001
+    ov.show_text(region, "Другая реплика.")  # без recall подсказки уходят
+    assert ov.recall == ()
+    # узкая плашка: длинный перевод обрезается, чипы переносятся и не вылезают
+    ov.strip_custom = Rect(0.3, 0.6, 0.22, 0.1)
+    ov.show_text(region, "Перевод", recall=[RecallChip("overwhelming", "ошеломляющий, подавляющий весь", 2)] * 3)
+    box, _f, _t, _s, _o, row = ov._strip_geometry(ov._shown())  # noqa: SLF001
+    assert len({round(c.rect.top()) for c in row.chips}) >= 2
+    assert all(c.rect.right() <= box.right() + 0.5 for c in row.chips)
+    ov.close()
+
+
+def test_word_layer_highlights_rare_words_with_legend(qapp):
+    from lexoplay.ui.theme import RARE
+    from lexoplay.wordmode import reader_views
+
+    layer = WordLayer()
+    layer.rare_label = "B2+"
+    views = reader_views("Kyoko felt the eerie dread of the school.", lambda w: w == "school.", level="b2", names={"Kyoko"})
+    by = {v.text.strip("."): v for v in views}
+    assert by["eerie"].tier == "rare" and by["dread"].tier == "rare" and by["Kyoko"].tier == "name"
+    assert by["school"].known and by["the"].stop
+    layer.open(Rect(0, 0, 1000, 700), Rect(0.05, 0.8, 0.9, 0.15), views)
+    qapp.processEvents()
+    img = layer.grab().toImage()
+
+    def rose(c):  # type: ignore[no-untyped-def]
+        return c.red() > 140 and c.blue() > 70 and c.green() < c.red() - 50
+
+    def word_box(v):  # type: ignore[no-untyped-def]
+        from PySide6.QtCore import QRect
+
+        r = layer.views[v.index].rect
+        return QRect(int(r.x * img.width()) - 4, int(r.y * img.height()) - 4, int(r.w * img.width()) + 8, int(r.h * img.height()) + 10)
+
+    assert _count(img, rose, word_box(by["eerie"])) > 5
+    assert _count(img, rose, word_box(by["Kyoko"])) == 0
+    panel = layer.panel
+    from PySide6.QtCore import QRect
+
+    above = QRect(0, max(0, int(panel.y()) - 80), img.width(), 80)
+    assert _count(img, rose, above) > 0  # «редкие B2+» в подсказке над панелью
+    assert RARE.name().lower() == "#ff7a9c"
+    layer.close()
+    layer.deleteLater()
+    qapp.processEvents()

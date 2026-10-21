@@ -52,8 +52,8 @@ from lexoplay.hotkeys import HotkeyError, parse, risk
 from lexoplay.lexo import Deck
 from lexoplay.store import Game, SavedWord, Store, StoredLine
 from lexoplay.ui import theme
-from lexoplay.ui.hotkey_edit import HotkeyEdit
 from lexoplay.ui.history_page import HistoryPage
+from lexoplay.ui.hotkey_edit import HotkeyEdit
 from lexoplay.ui.pages import GlossaryDialog, WordsPage
 from lexoplay.ui.progress_page import ProgressPage
 from lexoplay.ui.theme import app_icon, draw_logo, icon
@@ -939,6 +939,20 @@ class ViewPage(QWidget):
                 "Задержи курсор на слове, и откроется его карточка. Подержи курсор на «+», и слово сохранится. "
                 "Кликать не нужно: так реплика не пролистается даже в играх, которые ловят клик мимо LexoPlay.",
                 self.hover,
+            )
+        )
+        self.rare = QComboBox()
+        for code, text in (("b1", "От B1"), ("b2", "От B2"), ("c1", "От C1"), ("off", "Не выделять")):
+            self.rare.addItem(text, code)
+        self.rare.setCurrentIndex(max(0, self.rare.findData(s.rare_level)))
+        self.rare.setMinimumWidth(200)
+        self.rare.activated.connect(self._rare)
+        hl_.addWidget(
+            setting_row(
+                "Выделять трудные слова",
+                "Редкие слова в реплике подсвечены розовым, их стоит открыть в первую очередь. Самые частые слова "
+                "и имена подчёркнуты еле заметно, твои слова жёлтым. Уровень примерный, по частоте слова в английском.",
+                self.rare,
                 last=True,
             )
         )
@@ -946,6 +960,16 @@ class ViewPage(QWidget):
 
         lay.addWidget(label("ПЕРЕВОД", "section"))
         auto_box, al = card_list()
+        self.recall = Toggle(s.recall_words)
+        self.recall.toggled.connect(self._recall)
+        al.addWidget(
+            setting_row(
+                "Напоминать сохранённые слова",
+                "Встретилось в реплике слово, которое ты уже сохранял: под переводом мелко будет «eerie · жуткий». "
+                "Одно слово не чаще раза в 15 минут. Сколько раз слово встречалось, видно во вкладке «Слова».",
+                self.recall,
+            )
+        )
         self.think = Toggle(s.translate_think)
         self.think.toggled.connect(self._think)
         al.addWidget(
@@ -1042,6 +1066,15 @@ class ViewPage(QWidget):
     def _hover(self, on: bool) -> None:
         if self.ctl.settings.hover_pick != on:
             self.ctl.settings.hover_pick = on
+            self.ctl.settings_changed()
+
+    def _rare(self) -> None:
+        self.ctl.settings.rare_level = self.rare.currentData()
+        self.ctl.settings_changed()
+
+    def _recall(self, on: bool) -> None:
+        if self.ctl.settings.recall_words != on:
+            self.ctl.settings.recall_words = on
             self.ctl.settings_changed()
 
     def _think(self, on: bool) -> None:

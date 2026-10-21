@@ -90,6 +90,8 @@ class Settings:
     words_freeze: str = "auto"  # auto | always | never
     freeze_games: list[str] = field(default_factory=list)
     hover_pick: bool = True  # режим слов: слово выбирается наведением, «+» удержанием курсора (без кликов)
+    rare_level: str = "b2"  # режим слов: подсвечивать трудные слова с этого уровня (b1 | b2 | c1 | off)
+    recall_words: bool = True  # под переводом напоминать сохранённые слова, которые снова встретились
     translate_think: bool = True  # свой ключ: модель немного думает перед переводом (точнее, на 1–2 с дольше)
     no_focus_games: list[str] = field(default_factory=list)  # свернулись, когда режим слов брал фокус: больше не берём
     hotkeys: Hotkeys = field(default_factory=Hotkeys)

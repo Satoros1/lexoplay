@@ -71,6 +71,8 @@ from lexoplay.ocrscore import Quality
 from lexoplay.outbox import Outbox
 from lexoplay.pipeline import CaptureError, F2Outcome, Pipeline, ScanOutcome, Target
 from lexoplay.preprocess import MODE_NAMES, is_black, thumbnail
+from lexoplay.rarity import LEVEL_NAMES, LEVELS
+from lexoplay.recall import RecallChip, Recaller, RecallIndex
 from lexoplay.session import GameSession, Sessions
 from lexoplay.store import Game, SavedWord, Store, StoredLine, Task
 from lexoplay.textproc import Utterance, to_utterance
@@ -103,6 +105,7 @@ from lexoplay.wordmode import (
     ExplainRow,
     ExplainState,
     WordView,
+    game_names,
     match_phrase,
     reader_views,
     selected_text,
@@ -123,6 +126,7 @@ WORDS_REPEAT = {"words_left", "words_right", "words_up", "words_down", "words_sh
 WORDS_VKS = {0x1B, 0x0D, 0x25, 0x26, 0x27, 0x28, 0x52, 0x31, 0x32, 0x33, 0x34, 0x35, 0x10, 0xA0, 0xA1}
 # игры, которые ловят клик мыши даже без фокуса: на время режима слов их сворачиваем (настройка «Сам решает»)
 KNOWN_CLICK_GRABBERS = {"dr1_us.exe", "dr2_us.exe"}
+NAMES_TTL_S = 600.0  # имена игры пересобираем раз в 10 минут: новые реплики могли добавить новые
 CURSOR_TICK_MS = 150  # режим слов: как часто смотреть, не держит ли курсор игра
 BUSY_LIMIT_MS = 40_000  # перевод или чтение не вернулись за это время: снять «занято», чтобы F2 снова работал
 UPDATE_EVERY_MS = 6 * 3600 * 1000
@@ -245,6 +249,11 @@ class App(QObject):
         self.auto_live = False  # автоперевод идёт: игрок нажал F2, пока не нажмёт F4
         self._auto_hint = False
         self._busy_source: str | None = None  # реплика, которая сейчас переводится (для оригинала над переводом)
+        self._busy_recall: list[RecallChip] = []  # сохранённые слова из неё: подсказки видны уже с точками
+        self.recaller = Recaller()
+        self._recall_index: RecallIndex | None = None
+        self._recall_stamp: tuple[int, int] = (-1, -1)
+        self._names: dict[str, tuple[float, set[str]]] = {}  # exe -> (когда собрали, имена игры)
         self._last_input = 0.0  # когда игрок последний раз кликал или жал клавишу (monotonic)
         self._busy_since = 0.0  # когда начался текущий перевод
 
@@ -928,6 +937,7 @@ class App(QObject):
         self.word_layer.font_scale = self.settings.font_scale
         self.word_layer.font_family = self.settings.strip_font
         self.word_layer.hover_pick = self.settings.hover_pick
+        self.word_layer.rare_label = LEVEL_NAMES.get(self.settings.rare_level, "")
 
     def _rebuild_translator(self) -> None:
         """Переводчик под привязку или свой ключ. Пересобирается, только когда сменились
@@ -1646,6 +1656,7 @@ class App(QObject):
         region = game.region
 
         self._busy_source = None
+        self._busy_recall = []
 
         def partial(text: str, t: int = token) -> None:
             # из фонового потока: перевод дописывается, показываем как есть
@@ -1668,12 +1679,13 @@ class App(QObject):
         """Реплика прочитана, перевод в пути: оригинал (если включён) виден сразу, плашка потом не прыгает."""
         if token == self.token and self.state == "busy":
             self._busy_source = text
+            self._busy_recall = self._recall_for(text, commit=False)
             if self.overlay.text is None:
-                self.overlay.show_busy(region, original=text)
+                self.overlay.show_busy(region, original=text, recall=self._busy_recall)
 
     def _show_partial(self, token: int, region: Rect, text: str) -> None:
         if token == self.token and self.state == "busy" and text:
-            self.overlay.show_text(region, text, original=self._busy_source)
+            self.overlay.show_text(region, text, original=self._busy_source, recall=self._busy_recall)
 
     def _remember_reading(
         self,
@@ -1748,7 +1760,8 @@ class App(QObject):
             if out.ocr is not None:
                 self.current = CurrentLine(game.exe, out.ocr, out.utterance, out.record, time.time(), out.thumb)
             source = out.utterance.text if out.utterance else out.record.source
-            self.overlay.show_text(game.region, out.record.translation, original=source)
+            recall = self._recall_for(out.record.source or source, commit=True)
+            self.overlay.show_text(game.region, out.record.translation, original=source, recall=recall)
             self._watch_line(source, out.thumb, settle=True)
             if self.settings.auto_translate:
                 self.auto_live = True
@@ -2134,7 +2147,47 @@ class App(QObject):
 
     def _line_views(self, line: CurrentLine) -> list[WordView]:
         """Слова реплики для панели: текст, исправленный моделью при переводе, иначе прочитанный с экрана."""
-        return reader_views(line.sentence, self.vocab.known)
+        level = self.settings.rare_level if self.settings.rare_level in LEVELS else None
+        names: set[str] = set()
+        if level:
+            names = set(self._game_names(line.exe))
+            speaker = self._line_speaker(line)
+            if speaker:
+                names.update(speaker.split())
+        return reader_views(line.sentence, self.vocab.known, level=level, names=names)
+
+    def _game_names(self, exe: str) -> set[str]:
+        """Имена и названия игры (из её реплик, говорящих и глоссария): их не подсвечиваем как трудные слова."""
+        now = time.monotonic()
+        cached = self._names.get(exe)
+        if cached is not None and now - cached[0] < NAMES_TTL_S:
+            return cached[1]
+        try:
+            names = game_names(self.store.line_texts(exe, 5000), self.store.line_speakers(exe, 200), self.store.glossary(exe))
+        except Exception:
+            log.exception("имена игры: не получилось собрать")
+            names = cached[1] if cached else set()
+        self._names[exe] = (now, names)
+        return names
+
+    def _recall_for(self, text: str, *, commit: bool) -> list[RecallChip]:
+        """Сохранённые слова, которые есть в реплике, для подсказки под переводом. commit: засчитать встречу."""
+        if not self.settings.recall_words or not text or not text.strip():
+            return []
+        try:
+            stamp = self.store.words_stamp()
+            if self._recall_index is None or stamp != self._recall_stamp:
+                self._recall_index = RecallIndex(self.store.words_list(limit=5000))
+                self._recall_stamp = stamp
+            if not len(self._recall_index):
+                return []
+            chips, ids = self.recaller.pick(self._recall_index, text, commit=commit)
+            if commit and ids:
+                self.store.words_seen(ids, time.time())
+            return chips
+        except Exception:
+            log.exception("напоминание о сохранённых словах: упало")
+            return []
 
     @staticmethod
     def _line_speaker(line: CurrentLine) -> str | None:
@@ -2267,7 +2320,7 @@ class App(QObject):
                 if here:
                     self.overlay.toast(str(err) if isinstance(err, TranslationError) else "Не получилось перевести", 4000)
                     if record is not None and (again or self.overlay.strip_visible):
-                        self.overlay.show_text(region, record.translation, original=text)
+                        self.overlay.show_text(region, record.translation, original=text, recall=self.overlay.recall)
                     self.word_layer.set_translation(record.translation if record else None)
                 return
             rec = LineRecord(req.line_id, speaker, pick_source(text, res.source), res.translation, normalize_text(text))
@@ -2285,7 +2338,7 @@ class App(QObject):
             if not here:
                 return  # перевод сохранён, а на экране уже другая реплика или режим закрыт
             if self.overlay.strip_visible or again:
-                self.overlay.show_text(region, res.translation, original=text)
+                self.overlay.show_text(region, res.translation, original=text, recall=self.overlay.recall)
             if self.word_layer.is_open:
                 self.word_layer.set_explain(None, show=False)
                 self.word_layer.set_translation(res.translation)
@@ -2305,7 +2358,7 @@ class App(QObject):
         if token is not self._retranslate_token or self.word_ctx is not ctx or not text:
             return
         if again or self.overlay.strip_visible:
-            self.overlay.show_text(region, text, original=original)
+            self.overlay.show_text(region, text, original=original, recall=self.overlay.recall)
         if self.word_layer.is_open:
             self.word_layer.set_translation(text, partial=True)
 

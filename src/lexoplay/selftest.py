@@ -928,6 +928,19 @@ def _own_key_flow(out_dir: Path) -> Callable[[], tuple[str, object]]:
             app.word_layer.grab().save(str(out_dir / "explain-panel.png"))
             app._on_explain_save(1)
             info["explain_saved"] = [w.word for w in store.words_list()][:1]
+            # трудные слова в панели и напоминание о сохранённых в следующей реплике
+            info["tiers"] = {v.text: v.tier for v in app._line_views(line) if v.tier}
+            from lexoplay.recall import Recaller
+
+            app.recaller = Recaller(clock=lambda: time.time() + 600)  # «только что сохранили» уже прошло
+            chips = app._recall_for("It gets so eerie here after dark.", commit=True)
+            info["recall"] = [(c.word, c.translation) for c in chips]
+            info["seen"] = sorted(w.seen for w in store.words_list())
+            app.overlay.show_text(game.region, "Здесь после темноты так жутко.", recall=chips)
+            for _ in range(10):
+                app_q.processEvents()
+            app.overlay.grab().save(str(out_dir / "strip-recall.png"))
+            app.overlay.hide_strip()
             info["outbox_before_link"] = app.outbox.counts()
             info["usage_words"] = app.own_usage.today().words
             from datetime import date as _date
@@ -965,6 +978,9 @@ def _own_key_flow(out_dir: Path) -> Callable[[], tuple[str, object]]:
             and info["stats_words_today"] == 2
             and card.get("lemma") == "eerie"
             and card.get("sentence") == "This place feels eerie after dark."
+            and info["tiers"].get("eerie") == "rare"
+            and info["recall"] == [("eerie", "жуткий"), ("after dark", "после наступления темноты")]
+            and info["seen"] == [1, 1]
         )
         return ("ok" if ok else "fail"), info
 
@@ -1663,6 +1679,8 @@ def run(report: str) -> int:
             "lexoplay.timeline",
             "lexoplay.progress",
             "lexoplay.shield",
+            "lexoplay.rarity",
+            "lexoplay.recall",
         ]
         if sys.platform == "win32":
             mods += ["lexoplay.win.input", "lexoplay.win.llhooks", "lexoplay.app", "lexoplay.win.winapi", "lexoplay.win.capture", "lexoplay.win.hooks", "lexoplay.win.ocr"]
