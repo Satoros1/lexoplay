@@ -26,7 +26,7 @@ from lexoplay.ocr_model import OcrResult
 from lexoplay.ocrfuse import fuse
 from lexoplay.ocrscore import Quality, quality
 from lexoplay.preprocess import MODES, Prepared, changed, prepare, preview, thumbnail
-from lexoplay.textproc import Utterance, has_text, to_utterance
+from lexoplay.textproc import Utterance, has_text, name_from, to_utterance
 from lexoplay.translate import ContextLine, TranslateRequest, TranslationError, Translator
 
 log = logging.getLogger(__name__)
@@ -246,7 +246,7 @@ class Pipeline:
                 log.info("OCR: способы %s, выбран %s, добавлено слов из других: %s", reading.tried, mode, added)
         if target.name_region is not None:
             name_res = await self._read(frame, target.name_region, reading.mode, slot=slot)
-            reading.name_text = name_res.raw_text
+            reading.name_text = name_from(name_res)
         return reading
 
     def context_for(self, target: Target, text: str) -> list[LineRecord]:

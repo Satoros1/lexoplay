@@ -11,7 +11,7 @@ import re
 from dataclasses import dataclass
 
 from lexoplay.dedupe import normalize_text, similarity
-from lexoplay.ocr_model import OcrResult
+from lexoplay.ocr_model import Line, OcrResult, Word
 
 REPEAT_SAME = 0.85  # так похожи две копии текста (OCR читает их чуть по-разному)
 REPEAT_MIN_CHARS = 15  # короче не трогаем: «No! No!» и «Wait. Wait.» повторяют нарочно
@@ -166,6 +166,33 @@ def _without_labels(result: OcrResult, *, keep_first: bool) -> list[str]:
     return out or [line.text for line in raw]
 
 
+def _segments(line: Line) -> list[list[Word]]:
+    """Куски строки, разделённые большим промежутком (надпись интерфейса поодаль от текста)."""
+    words = list(line.words)
+    if not words:
+        return []
+    out = [[words[0]]]
+    for prev, w in zip(words, words[1:], strict=False):
+        if w.rect.x - prev.rect.right > 1.5 * max(w.rect.h, prev.rect.h):
+            out.append([w])
+        else:
+            out[-1].append(w)
+    return out
+
+
+def name_from(result: OcrResult) -> str:
+    """Текст из рамки для имени: само имя, без надписей рядом.
+
+    У Danganronpa на плашке имени справа написано «SPEAKING»: «Celeste      SPEAKING» это
+    «Celeste». Имя капсом («MONOKUMA») остаётся: из двух кусков капсом берём левый."""
+    texts = [" ".join(w.text for w in seg) for line in result.lines for seg in _segments(line)]
+    texts = [t for t in texts if t.strip()]
+    if not texts:
+        return ""
+    keep = [t for t in texts if not _caps_only(t.split())] or texts
+    return keep[0]
+
+
 def _letters(s: str) -> str:
     return re.sub(r"[^\w]+", "", s).lower()
 
@@ -180,8 +207,11 @@ def _without_name(lines: list[str], speaker: str) -> list[str]:
     if not name or not lines:
         return lines
     first = lines[0]
-    if SequenceMatcher(None, _letters(first), name).ratio() >= 0.75:
+    head = _letters(first)
+    if SequenceMatcher(None, head, name).ratio() >= 0.75:
         return lines[1:]
+    if len(head) >= 4 and (name.startswith(head) or head.startswith(name)) and len(lines) > 1:
+        return lines[1:]  # «Celeste» при имени из рамки «Celeste SPEAKING» (или наоборот)
     m = _NAME_COLON.match(first)  # «Sakura Ogami: Indeed...»
     if m and SequenceMatcher(None, _letters(m.group(1)), name).ratio() >= 0.75:
         return [m.group(2), *lines[1:]]

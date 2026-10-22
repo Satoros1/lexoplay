@@ -143,3 +143,27 @@ def test_strip_speaker_from_saved_examples():
     assert strip_speaker("Celeste...? Where are you?", sp) == "Celeste...? Where are you?"
     assert strip_speaker("Note: Keep out.") == "Note: Keep out."
     assert strip_speaker("An insult, obviously...", sp) == "An insult, obviously..."
+
+
+def test_name_frame_drops_interface_label():
+    """Плашка имени Danganronpa: справа «SPEAKING». Имя без неё, и из текста реплики оно уходит."""
+    from lexoplay.textproc import name_from
+
+    def line(*parts):  # type: ignore[no-untyped-def]
+        words, x = [], 0.05
+        for part in parts:
+            if part == "|":
+                x += 0.5  # большой промежуток
+                continue
+            words.append(Word(part, Rect(x, 0.64, 0.06, 0.04)))
+            x += 0.07
+        return Line(tuple(words))
+
+    assert name_from(OcrResult((line("Celeste", "|", "SPEAKING"),))) == "Celeste"
+    assert name_from(OcrResult((line("Kyoko", "Kirigiri", "|", "SPEA"),))) == "Kyoko Kirigiri"
+    assert name_from(OcrResult((line("MONOKUMA", "|", "SPEAKING"),))) == "MONOKUMA"
+    assert name_from(OcrResult((line("Celeste"), line("SPEAKING")))) == "Celeste"
+    assert name_from(OcrResult(())) == ""
+    # имя из рамки с хвостом всё равно убирает имя из текста реплики
+    u = to_utterance(ocr("Celeste", "To captivate even insignificant little creatures", "like yourself..."), "Celeste SPEAKING")
+    assert u.text.startswith("To captivate")
