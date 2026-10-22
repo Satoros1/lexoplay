@@ -228,12 +228,12 @@ def to_utterance(result: OcrResult, name_text: str | None = None, *, guess_speak
     name_text: текст из отдельной рамки для имени, если игрок её задал. Иначе пробуем угадать:
     «Mira: Hello», «[Mira] Hello» или короткая первая строка из имени без знаков в конце.
     """
+    if name_text is not None and not has_text(join_lines([name_text])):
+        name_text = None  # рамка имени пустая (никто не говорит или не прочиталась): угадываем по тексту
     lines = _without_labels(result, keep_first=name_text is None)
     if name_text is not None:
-        speaker = join_lines([name_text]) or None
-        if speaker and has_text(speaker):
-            lines = _without_name(lines, speaker)
-        return Utterance(speaker if speaker and has_text(speaker) else None, drop_repeats(lines))
+        speaker = join_lines([name_text])
+        return Utterance(speaker, drop_repeats(_without_name(lines, speaker)))
     if not lines:
         return Utterance(None, "")
     if guess_speaker:

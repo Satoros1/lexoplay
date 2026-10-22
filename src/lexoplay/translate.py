@@ -42,7 +42,9 @@ LATIN_TARGETS = frozenset({"en", "nl", "de", "es", "fr", "it", "pt", "pl"})  # �
 # реплик со старой версией не используется, они переведутся заново уже по-новому.
 # 4: модель думает перед переводом и чинит оригинал после «@@»
 # 5: рассуждения модели, попавшие в ответ, и подпись имени вырезаются (в 4 они бывали в переводе)
-TRANSLATION_VERSION = 5
+# 6: имя говорящего больше не попадает в текст реплики (в 5 из-за «SPEAKING» на плашке имени попадало,
+#    а похожая реплика без имени потом находилась в кеше вместе со старым переводом с именем)
+TRANSLATION_VERSION = 6
 
 SYSTEM_PROMPT = """You are the localizer of the video game "{game}". The player reads its dialogue in {target}: you translate it line by line while they play.
 
@@ -341,6 +343,9 @@ def drop_speaker_name(translation: str, speaker: str | None) -> str:
     if not speaker:
         return translation
     names = speaker.split()
+    if any(not w.isupper() for w in names):
+        names = [w for w in names if not w.isupper() or len(w) < 3]  # «Toko Fukawa SPEAKING» -> Toko Fukawa
+    speaker = " ".join(names)
     if not 1 <= len(names) <= 3:
         return translation
     words = translation.split(" ")

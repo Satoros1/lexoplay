@@ -167,3 +167,9 @@ def test_name_frame_drops_interface_label():
     # имя из рамки с хвостом всё равно убирает имя из текста реплики
     u = to_utterance(ocr("Celeste", "To captivate even insignificant little creatures", "like yourself..."), "Celeste SPEAKING")
     assert u.text.startswith("To captivate")
+
+
+def test_empty_name_frame_falls_back_to_guess():
+    """Рамка имени не прочиталась: имя всё равно не уходит в текст реплики, если оно отдельной строкой."""
+    u = to_utterance(ocr("Toko Fukawa", "The world has a front and a back, a top inning and a"), "")
+    assert u.speaker == "Toko Fukawa" and u.text.startswith("The world")

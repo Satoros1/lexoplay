@@ -1792,7 +1792,8 @@ class App(QObject):
             source = out.utterance.text if out.utterance else out.record.source
             recall = self._recall_for(out.record.source or source, commit=True)
             # старые переводы из кеша бывали с именем говорящего впереди («Байякуя Тогами Судить...»)
-            shown = drop_speaker_name(out.record.translation, out.record.speaker)
+            speaker = out.utterance.speaker if out.utterance else None
+            shown = drop_speaker_name(drop_speaker_name(out.record.translation, speaker), out.record.speaker)
             self.overlay.show_text(game.region, shown, original=source, recall=recall)
             self._watch_line(source, out.thumb, settle=True)
             if self.settings.auto_translate:

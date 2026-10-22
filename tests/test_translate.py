@@ -305,3 +305,21 @@ def test_speaker_name_without_colon_is_cut():
     assert drop_speaker_name("Макото, Кёко Сказала...", "Makoto Naegi") == "Макото, Кёко Сказала..."
     assert drop_speaker_name("Селеста Людденберг здесь.", "Monokuma") == "Селеста Людденберг здесь."
     assert drop_speaker_name("Я не могу.", "Makoto Naegi") == "Я не могу."
+
+
+def test_old_translations_with_speaker_name_are_not_reused(tmp_path):
+    """0.6.16: реплика читалась с именем, и перевод был с именем. Та же реплика без имени похожа
+    на неё больше чем на 92%, и кеш отдавал старый перевод с «Токо Фукава» впереди."""
+    from lexoplay.dedupe import normalize_text
+    from lexoplay.history import LineCache
+    from lexoplay.store import Store
+    from lexoplay.translate import TRANSLATION_VERSION
+
+    st = Store(tmp_path / "s.db")
+    old_src = "Toko Fukawa The world has a front and a back, a top inning and a bottom, a sea of truth and a web of lies!"
+    st.line_add("dr1_us.exe", "ru", normalize_text(old_src), "Toko Fukawa SPEAKING", old_src,
+                "Токо Фукава У мира есть лицевая и изнаночная сторона!", TRANSLATION_VERSION - 1)
+    cache = LineCache(st)
+    new_src = "The world has a front and a back, a top inning and a bottom, a sea of truth and a web of lies!"
+    assert cache.find("dr1_us.exe", "ru", new_src) is None  # переведётся заново, уже без имени
+    st.close()

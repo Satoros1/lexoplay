@@ -44,6 +44,7 @@ from lexoplay.timeline import (
     split_sessions,
     time_range,
 )
+from lexoplay.translate import drop_speaker_name
 from lexoplay.ui import theme
 from lexoplay.ui.explainbox import HIGHLIGHT, explain_box, row_tool
 from lexoplay.ui.pages import copy_text
@@ -292,7 +293,7 @@ class SessionCard(QFrame):
         if line.id in page.busy:
             lay.addWidget(label("Перевожу заново…", "muted"))
         else:
-            lay.addWidget(text_label(line.translation, "title", query))
+            lay.addWidget(text_label(drop_speaker_name(line.translation, line.speaker), "title", query))
         note = page.notes.get(line.id)
         if note:
             lay.addWidget(label(note[1], "ok" if note[0] else "error", wrap=True))
