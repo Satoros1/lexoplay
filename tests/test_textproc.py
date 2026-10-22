@@ -106,3 +106,25 @@ def test_name_frame_name_is_not_part_of_the_line():
     assert u.text == "But no matter"
     u = to_utterance(ocr("Sakura is strong."), "Sakura Ogami")  # имя внутри фразы не трогаем
     assert u.text == "Sakura is strong."
+
+
+def test_interface_labels_are_not_part_of_the_line():
+    """Danganronpa: «SPEAKING» в окне диалога, пока персонаж говорит."""
+    u = to_utterance(ocr("Monokuma", "It's just a little present.", "SPEAKING"), "Monokuma")
+    assert u.text == "It's just a little present."
+    u = to_utterance(ocr("Monokuma", "It's just a little present.", "SPE ING"), "Monokuma")
+    assert u.text == "It's just a little present."
+    # на той же строке, но далеко справа
+    words = [Word(w, Rect(0.05 + 0.07 * j, 0.8, 0.06, 0.04)) for j, w in enumerate("It's just a".split())]
+    words.append(Word("SPEAKING", Rect(0.85, 0.8, 0.1, 0.04)))
+    u = to_utterance(OcrResult((Line(tuple(words)),)))
+    assert u.text == "It's just a"
+    # рядом с текстом капс это часть реплики
+    assert to_utterance(ocr("I love NYC")).text == "I love NYC"
+    # имя капсом в первой строке остаётся именем
+    u = to_utterance(ocr("MIRA", "I was reluctant to come here"))
+    assert u.speaker == "MIRA"
+    # реплика вся капсом: ничего не выкидываем
+    assert to_utterance(ocr("YOU'RE NOT LEAVING", "THIS ROOM ALIVE")).text == "YOU'RE NOT LEAVING THIS ROOM ALIVE"
+    # крик с восклицанием: это реплика
+    assert to_utterance(ocr("Mira", "And then I said", "WHAT?!")).text == "And then I said WHAT?!"

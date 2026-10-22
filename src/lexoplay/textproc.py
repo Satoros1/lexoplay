@@ -134,6 +134,38 @@ def _looks_like_name(line: str, rest: list[str] | None = None) -> bool:
     return all(w[:1].isupper() for w in words) and not any(ch.isdigit() for ch in line)
 
 
+_CAPS_WORD = re.compile(r"^[A-Z]{3,}$")
+
+
+def _caps_only(words: list[str]) -> bool:
+    return 1 <= len(words) <= 2 and all(_CAPS_WORD.match(w) for w in words)
+
+
+def _without_labels(result: OcrResult, *, keep_first: bool) -> list[str]:
+    """Надписи интерфейса в окне диалога, а не реплика: «SPEAKING» у Danganronpa, «HELP».
+
+    Это одно-два слова капсом без знаков: отдельной строкой (кроме первой, там бывает имя) или
+    в конце строки, но далеко справа от текста. Трогаем, только если сама реплика не капсом."""
+    raw = [line for line in result.lines if line.text.strip()]
+    if not any(re.search(r"[a-z]", line.text) for line in raw):
+        return [line.text for line in raw]
+    out: list[str] = []
+    for i, line in enumerate(raw):
+        words = list(line.words)
+        texts = [w.text for w in words]
+        if _caps_only(texts) and (i > 0 or not keep_first):
+            continue
+        for n in (2, 1):  # «It's just      SPEAKING»: надпись на той же высоте, но поодаль
+            if len(words) > n and _caps_only(texts[-n:]):
+                prev, label = words[-n - 1].rect, words[-n].rect
+                if label.x - prev.right > 1.5 * max(label.h, prev.h):
+                    words, texts = words[:-n], texts[:-n]
+                    break
+        if texts:
+            out.append(" ".join(texts))
+    return out or [line.text for line in raw]
+
+
 def _letters(s: str) -> str:
     return re.sub(r"[^\w]+", "", s).lower()
 
@@ -166,7 +198,7 @@ def to_utterance(result: OcrResult, name_text: str | None = None, *, guess_speak
     name_text: текст из отдельной рамки для имени, если игрок её задал. Иначе пробуем угадать:
     «Mira: Hello», «[Mira] Hello» или короткая первая строка из имени без знаков в конце.
     """
-    lines = [line.text for line in result.lines if line.text.strip()]
+    lines = _without_labels(result, keep_first=name_text is None)
     if name_text is not None:
         speaker = join_lines([name_text]) or None
         if speaker and has_text(speaker):
