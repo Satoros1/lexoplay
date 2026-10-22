@@ -56,6 +56,7 @@ from lexoplay.words import clean
 Placer = Callable[[QWidget, Rect], None]
 
 TRANSLATION = QColor("#C3CBD8")
+FIT_STEPS = (1.0, 0.9, 0.8, 0.72)  # во сколько раз мельче карточка, если иначе закрыла бы реплику
 IDLE_MS = 30_000
 PICK_MS = 350  # стрелками: значение слова запрашиваем, когда выбор остановился
 HOVER_WORD_MS = 450  # наведением: курсор задержался на слове, выбираем его без клика
@@ -79,6 +80,10 @@ class _Plan:
     tr_y: float  # где начинается перевод (0: перевода нет)
     tr_h: float
     height: float
+
+
+def _qrect(r: Rect) -> QRectF:
+    return QRectF(r.x, r.y, r.w, r.h)
 
 
 def _rect(r: QRectF) -> Rect:
@@ -236,6 +241,13 @@ class WordLayer(QWidget):
         self._idle.start()
         self.repaint()  # сразу свежий кадр
 
+    def _fade_card_in(self) -> None:
+        self._card_fade.stop()
+        self._card_alpha = 0.0
+        self._card_fade.setStartValue(0.0)
+        self._card_fade.setEndValue(1.0)
+        self._card_fade.start()
+
     def _on_fade(self, value: object) -> None:
         self._alpha = float(value)  # type: ignore[arg-type]
         self.update()
@@ -287,11 +299,7 @@ class WordLayer(QWidget):
     def set_card(self, card: CardState | None) -> None:
         word = card.title if card is not None else None
         if self.animate and word is not None and word != self._card_word:
-            self._card_fade.stop()  # новое слово: карточка проявляется, а не выскакивает
-            self._card_alpha = 0.0
-            self._card_fade.setStartValue(0.0)
-            self._card_fade.setEndValue(1.0)
-            self._card_fade.start()
+            self._fade_card_in()  # новое слово: карточка проявляется, а не выскакивает
         self._card_word = word
         self._card = card
         self.update()
@@ -302,10 +310,13 @@ class WordLayer(QWidget):
 
     def set_explain(self, state: ExplainState | None, *, show: bool = True) -> None:
         """Разбор реплики: показать панель (карточка слова при этом прячется)."""
+        opening = show and state is not None and (not self._explain_open or self._explain is None)
         self._explain = state
         if show and state is not None:
             self._explain_open = True
             self._sel, self._card = [], None
+            if opening and self.animate:
+                self._fade_card_in()  # разбор проявляется так же, как карточка слова
         self._idle.start()
         self.update()
 
@@ -734,24 +745,60 @@ class WordLayer(QWidget):
         self._button_rect = None
         self._card_rect = None
         self._explain_rect = None
+        self._hint_rect: QRectF | None = None
         self._explain_saves = []
         self._explain_btn = None
         self._retranslate_btn = None
         if self._explain_open and self._explain is not None:
-            self._paint_explain(p, self._explain, avoid, bounds, px)
+            st = self._explain
+            ex_px, _av = self._fit(lambda q: self._paint_explain(p, st, avoid, bounds, q, measure=True), avoid, bounds, px, [avoid])
+            if self._card_alpha < 1.0:
+                p.save()
+                p.setOpacity(p.opacity() * max(0.0, self._card_alpha))
+                p.translate(0, (1.0 - self._card_alpha) * 8)
+                self._paint_explain(p, st, avoid, bounds, ex_px)
+                p.restore()
+            else:
+                self._paint_explain(p, st, avoid, bounds, ex_px)
         elif self._card and self._sel:
             sel = union([denormalize(self._views[i].rect, bounds) for i in self._sel if i < len(self._views)])
+            card = self._card
+            # не влезает ни над панелью, ни под ней: сначала разрешаем закрыть ряд кнопок, потом мельче шрифт
+            card_px, card_avoid = self._fit(
+                lambda q: self._paint_card(p, card, sel, bounds, q, avoid, measure=True),
+                sel, bounds, px, [self._card_avoid(avoid, bounds, px), avoid],
+            )  # fmt: skip
             if self._card_alpha < 1.0:
                 p.save()
                 p.setOpacity(p.opacity() * max(0.0, self._card_alpha))
                 p.translate(0, (1.0 - self._card_alpha) * 8)  # и чуть всплывает
-                self._paint_card(p, self._card, sel, bounds, px, avoid)
+                self._paint_card(p, card, sel, bounds, card_px, card_avoid)
                 p.restore()
             else:
-                self._paint_card(p, self._card, sel, bounds, px, avoid)
+                self._paint_card(p, card, sel, bounds, card_px, card_avoid)
         if not self._explain_open:
             self._paint_explain_button(p, avoid, bounds, px)
         p.end()
+
+    def _fit(
+        self, measure: Callable[[float], tuple[float, float] | None], sel: Rect, bounds: Rect, px: float, avoids: list[Rect]
+    ) -> tuple[float, Rect]:
+        """Размер шрифта и что обходить, чтобы карточка (или разбор) не закрыла панель с репликой.
+
+        Маленький экран или крупный шрифт: карточка не влезает ни над панелью, ни под ней. Тогда
+        сначала разрешаем ей закрыть ряд кнопок, потом уменьшаем шрифт карточки (до 72 %)."""
+        panel = self._panel if self._panel is not None else _qrect(self._avoid())
+        inner = panel.adjusted(1, 1, -1, -1)
+        for k in FIT_STEPS:
+            size = measure(px * k)
+            if size is None:
+                break
+            w, h = size
+            for av in avoids:
+                box = place_card(sel, w, h, bounds, gap=max(8.0, px * k * 0.6), avoid=av)
+                if not QRectF(box.x, box.y, box.w, box.h).intersects(inner):
+                    return px * k, av
+        return px * FIT_STEPS[-1], avoids[-1]
 
     @staticmethod
     def _rare(v: WordView) -> bool:
@@ -786,32 +833,46 @@ class WordLayer(QWidget):
                 if r is not None:
                     run.append(r)
 
+    @staticmethod
+    def _controls_y(region: Rect, bounds: Rect, px: float) -> tuple[float, float]:
+        """(высота, y) ряда кнопок «Перевести иначе» и «Разбор реплики»: над панелью, а если не влезает, под ней."""
+        h = px * 1.75
+        y = region.y - h - px * 0.4
+        if y < 4:
+            y = region.bottom + px * 0.4
+        if y + h > bounds.h - 4:
+            y = 4.0
+        return h, y
+
+    def _card_avoid(self, avoid: Rect, bounds: Rect, px: float) -> Rect:
+        """Карточка слова не закрывает ни панель, ни ряд кнопок над ней (раньше налезала на них)."""
+        h, y = self._controls_y(avoid, bounds, px)
+        return union([avoid, Rect(avoid.x, y - px * 0.2, avoid.w, h + px * 0.4)])
+
     def _paint_explain_button(self, p: QPainter, region: Rect, bounds: Rect, px: float) -> None:
         """Кнопки над панелью справа: «Перевести иначе» и «Разбор реплики». region: панель (и строка перевода)."""
         f = QFont(FONT_FAMILY)
         f.setPixelSize(max(12, round(px * 0.82)))
         f.setWeight(QFont.Weight.DemiBold)
         fm = QFontMetricsF(f)
-        h = px * 1.75
+        h, y = self._controls_y(region, bounds, px)
         explain = f"Разбор реплики · {self.explain_key}" if self.explain_key else "Разбор реплики"
         buttons = [("explain", explain)]
         if self.can_retranslate:
             buttons.insert(0, ("retranslate", "Перевожу заново…" if self.retranslating else "Перевести иначе · R"))
         widths = [fm.horizontalAdvance(text) + px * 1.6 for _key, text in buttons]
         total = sum(widths) + px * 0.5 * (len(buttons) - 1)
-        top, bottom = region.y, region.bottom
-        y = top - h - px * 0.4
-        if y < 4:
-            y = bottom + px * 0.4
-        if y + h > bounds.h - 4:
-            y = 4.0
         x = max(4.0, min(region.right - total, bounds.w - total - 6))
         if not self._sel and self._card is None:
             self._paint_hint(p, region, x, y, h, px)
         self._explain_btn = None
         self._retranslate_btn = None
+        card = self._card_rect
         for (key, text), w in zip(buttons, widths, strict=True):
             rect = QRectF(x, y, w, h)
+            if card is not None and rect.intersects(card):
+                x += w + px * 0.5
+                continue  # тесно, и карточка встала на место кнопок: кнопку не рисуем поверх неё (R и F7 работают)
             busy = key == "retranslate" and self.retranslating
             if key == "explain":
                 self._explain_btn = rect
@@ -857,6 +918,7 @@ class WordLayer(QWidget):
         text_w = fm.horizontalAdvance(text)
         w = text_w + px * 1.4 + legend_w
         rect = QRectF(x, y, w, h)
+        self._hint_rect = rect
         bg = QColor(STRIP_BG)
         bg.setAlphaF(0.88)
         p.setPen(Qt.PenStyle.NoPen)
@@ -881,7 +943,9 @@ class WordLayer(QWidget):
             p.drawText(QRectF(tx, y, lw + 1, h), mid, label)
             tx += lw
 
-    def _paint_explain(self, p: QPainter, st: ExplainState, region: Rect, bounds: Rect, px: float) -> None:
+    def _paint_explain(
+        self, p: QPainter, st: ExplainState, region: Rect, bounds: Rect, px: float, *, measure: bool = False
+    ) -> tuple[float, float] | None:
         """Разбор реплики над панелью. region: панель (и строка перевода), её разбор не закрывает."""
         pad = px * 0.95
         card_w = min(max(px * 26, 340.0), bounds.w * 0.55, bounds.w - 16)
@@ -943,7 +1007,13 @@ class WordLayer(QWidget):
                 heights.append(px * 0.35)
         card_h = sum(heights) + gap * (len(blocks) - 1) + 2 * pad
         card_h = min(card_h, bounds.h - 16)
-        box = place_card(region, card_w, card_h, bounds, gap=max(8.0, px * 0.6), avoid=region)
+        if measure:
+            return card_w, card_h
+        gap_y = max(8.0, px * 0.6)
+        room = max(region.y - gap_y - 8, bounds.h - region.bottom - gap_y - 8)
+        if card_h > room >= px * 8:
+            card_h = room  # совсем тесно: разбор ниже обрезается, зато реплика не закрыта
+        box = place_card(region, card_w, card_h, bounds, gap=gap_y, avoid=region)
         rect = QRectF(box.x, box.y, box.w, box.h)
         self._explain_rect = rect
         bg = QColor(STRIP_BG)
@@ -966,7 +1036,8 @@ class WordLayer(QWidget):
                 p.setPen(b[3])
                 p.drawText(QRectF(x, y, inner - btn - px * 0.5, h + 1), flags, b[2])
                 r = QRectF(x + inner - btn, y, btn, btn)
-                saves.append(r)
+                if r.bottom() <= rect.bottom():
+                    saves.append(r)  # обрезанный пункт не нажимается вслепую
                 saved = bool(row and row.saved)
                 fill = QColor(ACCENT)
                 fill.setAlphaF(0.25 if saved else 0.95)
@@ -992,10 +1063,10 @@ class WordLayer(QWidget):
         p.restore()
         self._explain_saves = saves
 
-    def _paint_card(self, p: QPainter, card: CardState, sel: Rect, bounds: Rect, px: float, avoid: Rect) -> None:
+    def _paint_card(
+        self, p: QPainter, card: CardState, sel: Rect, bounds: Rect, px: float, avoid: Rect, *, measure: bool = False
+    ) -> tuple[float, float] | None:
         pad = px * 0.95
-        card_w = min(max(px * 20, 280.0), bounds.w - 16)
-        inner = card_w - 2 * pad
 
         def font(size: float, weight: QFont.Weight = QFont.Weight.Normal) -> QFont:
             f = QFont(FONT_FAMILY)
@@ -1009,6 +1080,12 @@ class WordLayer(QWidget):
         f_more = font(px * 0.9)
         f_note = font(px * 0.78)
         f_btn = font(px * 0.9, QFont.Weight.DemiBold)
+        # карточка шире, если подсказка у кнопки «+» иначе не влезает (раньше обрезалась: «или Ent»)
+        btn_w = QFontMetricsF(f_btn).horizontalAdvance(card.button or "") + px * 2.2
+        hint_full = "наведи и подержи или Enter" if self.hover_pick else "Enter"
+        need = btn_w + px * 0.6 + QFontMetricsF(f_note).horizontalAdvance(hint_full) + 2 * pad + px * 0.3
+        card_w = min(max(px * 20, 280.0, need if card.button else 0.0), bounds.w - 16)
+        inner = card_w - 2 * pad
         flags = int(Qt.TextFlag.TextWordWrap)
 
         def height(f: QFont, text: str) -> float:
@@ -1041,6 +1118,8 @@ class WordLayer(QWidget):
             else:
                 heights.append(btn_h + px * 0.25)
         card_h = sum(heights) + gap * (len(blocks) - 1) + 2 * pad
+        if measure:
+            return card_w, card_h
         box = place_card(sel, card_w, card_h, bounds, gap=max(8.0, px * 0.6), avoid=avoid)
         rect = QRectF(box.x, box.y, box.w, box.h)
         self._card_rect = rect
@@ -1086,9 +1165,14 @@ class WordLayer(QWidget):
                 p.drawText(btn, int(Qt.AlignmentFlag.AlignCenter), label)
                 p.setFont(f_note)
                 p.setPen(TEXT_MUTED)
+                room = inner - bw - px * 0.6
+                fm_note = QFontMetricsF(f_note)
+                hint = next(
+                    (t for t in (hint_full, "подержи или Enter", "Enter") if fm_note.horizontalAdvance(t) <= room), ""
+                )  # узкий экран: короче, но целиком, а не обрезанное слово
                 p.drawText(
-                    QRectF(btn.right() + px * 0.6, btn.y(), inner - bw - px * 0.6, btn_h),
+                    QRectF(btn.right() + px * 0.6, btn.y(), room, btn_h),
                     int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
-                    "наведи и подержи или Enter" if self.hover_pick else "Enter",
+                    hint,
                 )
             y += h + gap

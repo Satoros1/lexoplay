@@ -1117,3 +1117,40 @@ def test_overlay_streamed_text_reveals_smoothly(qapp):
     ov.show_text(region, "Совсем другой перевод.")  # перевели заново: без печатания
     assert ov._reveal == len("Совсем другой перевод.")  # noqa: SLF001
     ov.close()
+
+
+@pytest.mark.parametrize(
+    "size,region,scale",
+    [
+        ((1707, 1067), Rect(0.0, 0.6348, 1.0, 0.3155), 1.0),  # Danganronpa на 2560×1600 с масштабом 150 %
+        ((1280, 720), Rect(0.05, 0.75, 0.9, 0.2), 1.6),
+        ((800, 600), Rect(0.0, 0.63, 1.0, 0.32), 1.3),
+        ((1707, 1067), Rect(0.0, 0.4, 1.0, 0.3), 1.6),  # окно диалога посередине, места мало и сверху, и снизу
+    ],
+)
+def test_word_card_never_covers_buttons_or_panel(qapp, size, region, scale):
+    """Карточка слова налезала на кнопки «Перевести иначе» и «Разбор реплики», подсказка у «+» обрезалась."""
+    from PySide6.QtCore import QRectF
+
+    from lexoplay.wordmode import CardState, reader_views
+
+    w, h = size
+    layer = WordLayer()
+    layer.can_retranslate = True
+    layer.hover_pick = True
+    layer.deck_label = "Сохранится во вкладку «Слова» в LexoPlay"
+    layer.font_scale = scale
+    layer.resize(w, h)
+    text = "That's why I'm still alive, because I don't know what will happen next. That's why I desperately"
+    layer.open(Rect(0, 0, w, h), region, reader_views(text), speaker="Monokuma", translation="Вот почему я ещё жив.")
+    qapp.processEvents()
+    last = [v.index for v in layer.views if v.text == "desperately"][0]
+    layer._sel = [last]  # noqa: SLF001
+    layer.set_card(CardState("ready", "desperately", "ˈdɛspərətli", "adv", ["отчаянно", "изо всех сил"], local=True))
+    layer.grab()
+    card = layer._card_rect  # noqa: SLF001
+    assert card is not None and QRectF(0, 0, w, h).contains(card)
+    assert not card.intersects(layer.panel.adjusted(1, 1, -1, -1))
+    for btn in (layer._explain_btn, layer._retranslate_btn):  # noqa: SLF001
+        assert btn is None or not card.intersects(btn)  # кнопка либо в стороне, либо не нарисована под карточкой
+    layer.close()
