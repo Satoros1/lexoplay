@@ -85,6 +85,7 @@ from lexoplay.translate import (
     Translator,
     check_key,
     drop_label,
+    drop_speaker_name,
     pick_source,
 )
 from lexoplay.ui.freeze_frame import FreezeFrame
@@ -1790,7 +1791,9 @@ class App(QObject):
                 self.current = CurrentLine(game.exe, out.ocr, out.utterance, out.record, time.time(), out.thumb)
             source = out.utterance.text if out.utterance else out.record.source
             recall = self._recall_for(out.record.source or source, commit=True)
-            self.overlay.show_text(game.region, out.record.translation, original=source, recall=recall)
+            # старые переводы из кеша бывали с именем говорящего впереди («Байякуя Тогами Судить...»)
+            shown = drop_speaker_name(out.record.translation, out.record.speaker)
+            self.overlay.show_text(game.region, shown, original=source, recall=recall)
             self._watch_line(source, out.thumb, settle=True)
             if self.settings.auto_translate:
                 self.auto_live = True
@@ -2263,7 +2266,7 @@ class App(QObject):
         self.word_layer.retranslating = False
         # перевода нет: панель сразу оставит под него место (_translate_words_line ниже)
         self.word_layer.translating = line.record is None and self.translator is not None
-        translation = line.record.translation if line.record is not None else None
+        translation = drop_speaker_name(line.record.translation, line.record.speaker) if line.record is not None else None
         self._retranslate_token = None  # перевод прошлой реплики, если ещё пишется, в эту панель не попадёт
         magpie = self._magpie_scaling()
         want = self._wants_freeze(game.exe)

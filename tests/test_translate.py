@@ -289,3 +289,19 @@ def test_thinking_out_loud_and_name_label_are_cut():
 def test_prompt_forbids_reasoning_in_reply():
     system = build_system(TranslateRequest(text="x", speaker=None, game="G"))
     assert "never contains your reasoning" in system
+
+
+def test_speaker_name_without_colon_is_cut():
+    """«Байякуя Тогами Судить о чужих ценностях...»: модель написала имя перед репликой без двоеточия."""
+    from lexoplay.translate import drop_speaker_name
+
+    src = "To judge someone else's values based on your own outlook... Do you realize how dangerous that is?"
+    raw = "Байякуя Тогами Судить о чужих ценностях по своим взглядам... Ты хоть понимаешь, насколько это опасно?"
+    assert clean_translation(raw, "Byakuya Togami", source=src).startswith("Судить")
+    assert drop_speaker_name("Селеста Чтобы очаровать даже таких...", "Celeste") == "Чтобы очаровать даже таких..."
+    assert drop_speaker_name("Макото Наэги Я не могу сказать.", "Makoto Naegi") == "Я не могу сказать."
+    # обращение к другому, имя внутри фразы, другой говорящий: не трогаем
+    assert drop_speaker_name("Макото Наэги, ты слышишь?", "Monokuma") == "Макото Наэги, ты слышишь?"
+    assert drop_speaker_name("Макото, Кёко Сказала...", "Makoto Naegi") == "Макото, Кёко Сказала..."
+    assert drop_speaker_name("Селеста Людденберг здесь.", "Monokuma") == "Селеста Людденберг здесь."
+    assert drop_speaker_name("Я не могу.", "Makoto Naegi") == "Я не могу."

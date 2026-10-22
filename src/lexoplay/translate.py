@@ -318,6 +318,48 @@ def drop_label(translation: str, source: str) -> str:
     return translation
 
 
+_CYR = dict(zip("абвгдеёжзийклмнопрстуфхцчшщъыьэюяіїєґ", [
+    "a", "b", "v", "g", "d", "e", "e", "zh", "z", "i", "y", "k", "l", "m", "n", "o", "p", "r", "s", "t", "u", "f",
+    "h", "ts", "ch", "sh", "sch", "", "y", "", "e", "yu", "ya", "i", "yi", "ye", "g",
+], strict=True))
+
+
+def _latin(word: str) -> str:
+    """Грубая латиница для сравнения имён: «Байякуя» -> bayyakuya, «Тогами» -> togami."""
+    out = "".join(_CYR.get(ch, ch) for ch in word.lower())
+    return re.sub(r"[^a-z]", "", out)
+
+
+def drop_speaker_name(translation: str, speaker: str | None) -> str:
+    """«Байякуя Тогами Судить о чужих ценностях...» -> без имени говорящего в начале.
+
+    Модель иногда пишет имя перед репликой, даже без двоеточия. Убираем первые слова, если это
+    имя говорящего (сравниваем по звучанию: Byakuya Togami ≈ Байякуя Тогами) и после них
+    начинается фраза с заглавной."""
+    from difflib import SequenceMatcher
+
+    if not speaker:
+        return translation
+    names = speaker.split()
+    if not 1 <= len(names) <= 3:
+        return translation
+    words = translation.split(" ")
+    n = len(names)
+    if len(words) <= n:
+        return translation
+    head = words[:n]
+    nxt = words[n].lstrip("\"'«“(")
+    if not nxt or not (nxt[0].isupper() or nxt.startswith(("...", "…"))):
+        return translation
+    if not all(w[:1].isupper() and re.fullmatch(r"[^\W\d_]+(?:-[^\W\d_]+)*", w) for w in head):
+        return translation  # «Макото, Кёко...»: с запятой это обращение, а не подпись
+    a = "".join(_latin(w) for w in head)
+    b = re.sub(r"[^a-z]", "", speaker.lower())
+    if a and b and SequenceMatcher(None, a, b).ratio() >= 0.6:
+        return " ".join(words[n:])
+    return translation
+
+
 def split_reply(raw: str) -> tuple[str, str | None]:
     """Ответ модели → (перевод, исправленный оригинал после «@@» или None)."""
     if SOURCE_MARK not in raw:
@@ -377,6 +419,7 @@ def clean_translation(
         for prefix in (f"{speaker}:", f"{speaker.upper()}:"):
             if t.startswith(prefix):
                 t = t[len(prefix) :].lstrip()
+        t = drop_speaker_name(t, speaker)
     if not partial:
         t = t.strip(_QUOTES).strip()
     else:
