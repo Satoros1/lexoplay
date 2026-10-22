@@ -933,3 +933,25 @@ def test_word_layer_highlights_rare_words_with_legend(qapp):
     layer.close()
     layer.deleteLater()
     qapp.processEvents()
+
+
+def test_overlay_strip_muted_under_word_mode(qapp):
+    ov = Overlay()
+    ov.fade = False
+    ov.set_display_rect(Rect(0, 0, 960, 720))
+    ov.show_text(Rect(0.05, 0.78, 0.9, 0.18), "Перевод")
+    assert ov.isVisible()
+    ov.mute_strip(True)  # режим слов открыт: плашки нет, окно не спорит с панелью, кто выше
+    assert ov.strip_visible and not ov.isVisible() and ov.strip_rect() is not None
+    ov.toast("тост")  # тосты по-прежнему видны
+    assert ov.isVisible()
+    ov._clear_toast()  # noqa: SLF001
+    assert not ov.isVisible()
+    ov.hide_strip()
+    ov.mute_strip(False)
+    assert not ov.isVisible()  # убрали, пока была спрятана: не возвращается
+    ov.show_text(Rect(0.05, 0.78, 0.9, 0.18), "Ещё")
+    ov.mute_strip(True)
+    ov.mute_strip(False)
+    assert ov.isVisible()
+    ov.close()

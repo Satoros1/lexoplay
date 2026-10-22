@@ -36,10 +36,13 @@ LANGS = {
     "pt": "Portuguese",
     "pl": "Polish",
 }
+LATIN_TARGETS = frozenset({"en", "nl", "de", "es", "fr", "it", "pt", "pl"})  # перевод латиницей
 
 # Версия промпта и обработки перевода. Меняется, когда перевод заметно меняется: кеш
 # реплик со старой версией не используется, они переведутся заново уже по-новому.
-TRANSLATION_VERSION = 4  # 4: модель думает перед переводом и чинит оригинал после «@@»
+# 4: модель думает перед переводом и чинит оригинал после «@@»
+# 5: рассуждения модели, попавшие в ответ, и подпись имени вырезаются (в 4 они бывали в переводе)
+TRANSLATION_VERSION = 5
 
 SYSTEM_PROMPT = """You are the localizer of the video game "{game}". The player reads its dialogue in {target}: you translate it line by line while they play.
 
@@ -55,6 +58,7 @@ Write the translation a professional {target} game localizer would ship:
 - Punctuation: keep ? ! and three dots (...) as in the original, and a period where it has one. If the original ends with a comma or breaks off because the sentence continues in the next text box, end with "..." and never with a comma.
 {examples}
 Reply with the translation of the line after "Translate this line". Then on a new line write "@@" and that line in {source} as the game really shows it: the OCR mistakes fixed, the same words and punctuation, normal capitalization, no speaker name. Nothing else: no quotes, no notes.
+Work out the garbled words silently, before you answer: the reply is shown to the player as is, so it never contains your reasoning, guesses about the OCR, alternatives or a second version. If you can't be sure of a word, choose the most likely one and translate.
 Never use the em dash character; use a comma, a colon or a new sentence instead."""
 
 SOURCE_MARK = "@@"
@@ -255,6 +259,59 @@ _LABEL = re.compile(r"^(translation|перевод)\s*:\s*", re.I)
 
 _TAG = re.compile(r"</?(?:translation|line)[^>]*>", re.I)
 
+# модель «думает вслух» прямо в ответе: такие строки в перевод не идут
+_THINKING = re.compile(
+    r"^\W*(?:wait\b|hmm+\b|actually\b|let me\b|i need\b|i'll\b|i will\b|i think\b|i'm not sure\b|"
+    r"note\b|the ocr\b|probably\b|likely\b|maybe\b|best (?:reconstruction|guess)|reconstruct|alternatively\b|"
+    r"here(?:'s| is)\b)",
+    re.I,
+)
+_LATIN = re.compile(r"[A-Za-z]")
+_LABEL_NAME = re.compile(r"^([^\W\d_][^\s:,.!?]{0,19}(?: [^\W\d_][^\s:,.!?]{0,19}){0,2}):\s+(?=\S)")
+_SOURCE_LABEL = re.compile(r"^([A-Z][\w'.-]{0,19}(?: [A-Z][\w'.-]{0,19}){0,2}):\s+(?=\S)")
+
+
+def _thinking_line(line: str, target_lang: str) -> bool:
+    if "OCR" in line or _THINKING.match(line):
+        return True
+    if target_lang in LATIN_TARGETS:
+        return False
+    # перевод не латиницей (русский, японский...), а строка почти вся латиницей: это не перевод
+    latin = len(_LATIN.findall(line))
+    native = sum(1 for ch in line if ch.isalpha() and not ch.isascii())
+    return latin >= 12 and latin > native * 1.5
+
+
+def drop_thinking(text: str, target_lang: str = "ru", *, partial: bool = False) -> str:
+    """Строки, где модель рассуждает (про OCR, варианты), вырезаем. Если они были, перевод
+    обычно стоит в конце, после рассуждений: берём последний абзац, который остался.
+    Ответ из одной строки не трогаем: это и есть перевод (хоть бы и с именами латиницей)."""
+    lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
+    if partial and len(lines) > 1 and target_lang not in LATIN_TARGETS:
+        last = lines[-1]
+        if not any(ch.isalpha() and not ch.isascii() for ch in last):
+            lines = lines[:-1]  # дописывается строка латиницей: может оказаться рассуждением
+    if len(lines) < 2:
+        return lines[0] if partial and lines else text
+    flags = [_thinking_line(ln, target_lang) for ln in lines]
+    if not any(flags) or all(flags):
+        return "\n".join(lines) if partial else text
+    rest = [ln for ln, f in zip(lines, flags, strict=True) if not f]
+    return rest[-1]
+
+
+def drop_label(translation: str, source: str) -> str:
+    """«Сакура Огами: Это все действия...» -> без подписи, если в оригинале её не было."""
+    m = _LABEL_NAME.match(translation)
+    if not m or ":" in source[: len(m.group(1)) + 12]:
+        return translation
+    words = m.group(1).split()
+    if len(words) == 1 and not words[0][:1].isupper():
+        return translation  # «смотри: ...» обычная речь, а не имя
+    if all(w[:1].isupper() for w in words):
+        return translation[m.end() :]
+    return translation
+
 
 def split_reply(raw: str) -> tuple[str, str | None]:
     """Ответ модели → (перевод, исправленный оригинал после «@@» или None)."""
@@ -271,6 +328,9 @@ def pick_source(ocr_text: str, fixed: str | None) -> str:
 
     if not fixed:
         return ocr_text
+    m = _SOURCE_LABEL.match(fixed)
+    if m and ":" not in ocr_text[: len(m.group(1)) + 12]:
+        fixed = fixed[m.end() :]  # «Narrator: But no matter...»: имя модель дописала сама
     a = re.sub(r"\W+", "", ocr_text.lower())
     b = re.sub(r"\W+", "", fixed.lower())
     if not a or not b or not 0.6 <= len(b) / len(a) <= 1.6:
@@ -278,7 +338,9 @@ def pick_source(ocr_text: str, fixed: str | None) -> str:
     return fixed if SequenceMatcher(None, a, b).ratio() >= 0.6 else ocr_text
 
 
-def clean_translation(text: str, speaker: str | None = None, *, partial: bool = False) -> str:
+def clean_translation(
+    text: str, speaker: str | None = None, *, partial: bool = False, target_lang: str = "ru", source: str | None = None
+) -> str:
     """Ответ модели → строка для показа: без кавычек, подписи «Перевод:», имени говорящего.
 
     Если модель по привычке всё же ответила JSON или обернула ответ в теги, достаём перевод.
@@ -300,7 +362,12 @@ def clean_translation(text: str, speaker: str | None = None, *, partial: bool = 
             return parse_reply(t, "").translation
         except (ValueError, json.JSONDecodeError):
             return ""
+    t = drop_thinking(t, target_lang, partial=partial).strip()
     t = _LABEL.sub("", t)
+    if source is not None and (speaker or _SOURCE_LABEL.match(source) is None):
+        if partial and len(t) < 34 and ":" not in t and ":" not in source[:40] and "\n" not in t:
+            return ""  # может оказаться подписью «Имя:»: покажем, когда станет ясно
+        t = drop_label(t, source)
     if speaker:
         for prefix in (f"{speaker}:", f"{speaker.upper()}:"):
             if t.startswith(prefix):
@@ -376,7 +443,7 @@ class AnthropicTranslator:
             async for chunk in stream.text_stream:
                 buf += chunk
                 if req.on_partial:
-                    part = clean_translation(buf, req.speaker, partial=True)
+                    part = clean_translation(buf, req.speaker, partial=True, target_lang=req.target_lang, source=req.text)
                     if part and part != shown:
                         shown = part
                         try:
@@ -405,7 +472,9 @@ class AnthropicTranslator:
                 raise friendly_error(a, exc, self._model) from exc
             except Exception as exc:
                 raise friendly_error(a, exc, self._model) from exc
-            translation = fix_punctuation(req.text, clean_translation(raw, req.speaker))
+            translation = fix_punctuation(
+                req.text, clean_translation(raw, req.speaker, target_lang=req.target_lang, source=req.text)
+            )
             if translation:
                 source = pick_source(req.text, split_reply(raw)[1])
                 return TranslateResult(source=source, translation=translation, usage=usage)

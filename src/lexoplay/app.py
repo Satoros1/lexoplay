@@ -126,6 +126,8 @@ WORDS_REPEAT = {"words_left", "words_right", "words_up", "words_down", "words_sh
 WORDS_VKS = {0x1B, 0x0D, 0x25, 0x26, 0x27, 0x28, 0x52, 0x31, 0x32, 0x33, 0x34, 0x35, 0x10, 0xA0, 0xA1}
 # игры, которые ловят клик мыши даже без фокуса: на время режима слов их сворачиваем (настройка «Сам решает»)
 KNOWN_CLICK_GRABBERS = {"dr1_us.exe", "dr2_us.exe"}
+FREEZE_GRACE_S = 1.5  # сколько после сворачивания игры фокус может прыгать сам (в окне)
+FREEZE_GRACE_FULL_S = 3.5  # полноэкранной: она ещё меняет режим экрана
 NAMES_TTL_S = 600.0  # имена игры пересобираем раз в 10 минут: новые реплики могли добавить новые
 CURSOR_TICK_MS = 150  # режим слов: как часто смотреть, не держит ли курсор игра
 BUSY_LIMIT_MS = 40_000  # перевод или чтение не вернулись за это время: снять «занято», чтобы F2 снова работал
@@ -350,6 +352,8 @@ class App(QObject):
         self._freeze_warned = False
         self._thaw_until = 0.0  # до этих пор игра разворачивается: захват подождёт
         self._thaw_t0 = 0.0
+        self._freeze_at = 0.0  # когда свернули: пока игра сворачивается, фокус может прыгнуть куда угодно
+        self._refocus_left = 0  # сколько раз ещё вернуть фокус слою, если его увела не игрок
         self._thaw_waiting: set[str] = set()  # что отложено до разворота (F2, F3, выделение): по разу
         self._took_focus_at = 0.0
         # игры, которые от потери фокуса свернулись: фокус у них больше не берём (помним и после перезапуска)
@@ -1308,6 +1312,11 @@ class App(QObject):
             return
         exe = winapi.process_exe(pid)
         game = self.store.get_game(exe) if exe and is_game_exe(exe) else None
+        if self._freezing() and (game is None or (self.active is not None and root == self.active.hwnd)):
+            # игру только что свернули: Windows сам отдаёт фокус то ей, то следующему окну
+            # (проводнику, другой программе). Это не игрок ушёл: фокус обратно слою, режим не закрываем
+            self._refocus_layer(f"{exe or '?'} забрал фокус, пока игра сворачивалась")
+            return
         if game is not None:
             if not self.active or self.active.hwnd != root:
                 self._hide_strip()
@@ -1326,6 +1335,23 @@ class App(QObject):
             self.hotkeys.set_group("game", False)
             self._hide_strip()
             self._close_words("focus")
+
+    def _freezing(self) -> bool:
+        """Режим слов только что свернул игру (первые секунды)."""
+        if not self._frozen or not self.word_layer.is_open:
+            return False
+        return time.monotonic() - self._freeze_at < (FREEZE_GRACE_FULL_S if self._freeze_full else FREEZE_GRACE_S)
+
+    def _refocus_layer(self, why: str) -> None:
+        if self._refocus_left <= 0:
+            log.info("режим слов: %s, фокус уже возвращали, больше не трогаю", why)
+            return
+        self._refocus_left -= 1
+        log.info("режим слов: %s, возвращаю фокус слою", why)
+        layer = int(self.word_layer.winId())
+        winapi.set_no_activate(layer, False)
+        winapi.force_foreground(layer)
+        self._took_focus = True
 
     def _on_minimized(self, hwnd: int, minimized: bool) -> None:
         if self._frozen:
@@ -1926,6 +1952,8 @@ class App(QObject):
             return
         if not verdict:
             return
+        if self._frozen or time.monotonic() < self._thaw_until:
+            return  # кадр снят, пока игру сворачивали или разворачивали: он ничего не говорит о реплике
         last = self.watcher.norm if self.watcher else ""
         auto = self.auto_live and self.settings.auto_translate and self._game_in_focus()
         # реплика сменилась (игрок кликнул в игру): старый перевод и подчёркивания убираем
@@ -2061,6 +2089,8 @@ class App(QObject):
         self._frozen = True
         self._freeze_full = self._game_fullscreen()
         self._freeze_warned = False
+        self._freeze_at = time.monotonic()
+        self._refocus_left = 4
         winapi.minimize_window(self.active.hwnd)
         for ms in (250, 1000, 2000):
             QTimer.singleShot(ms, self._check_frozen)
@@ -2072,6 +2102,9 @@ class App(QObject):
         if not self._frozen or self.active is None or not self.word_layer.is_open:
             return
         hwnd = self.active.hwnd
+        layer = int(self.word_layer.winId())
+        if winapi.root_window(winapi.foreground_window()) != layer and self._freezing():
+            self._refocus_layer("фокус не у слоя")
         if not winapi.is_minimized(hwnd):
             if not self._freeze_warned:
                 self._freeze_warned = True
@@ -2101,9 +2134,14 @@ class App(QObject):
             self.freeze_frame.clear()
             return
         activate = reason not in ("focus", "switch")
-        winapi.restore_window(active.hwnd, activate=activate)
+        if activate or not self._freeze_full:
+            winapi.restore_window(active.hwnd, activate=activate)
+        # игрок ушёл в другую программу, а игра полноэкранная: пусть ждёт на панели задач.
+        # Развёрнутая без фокуса, она всё равно свернулась бы обратно (или осталась чёрной)
         if activate:
             winapi.force_foreground(active.hwnd)
+            for ms in (700, 1600):
+                QTimer.singleShot(ms, lambda h=active.hwnd: self._ensure_restored(h))
         if not activate or self._closing:
             self.freeze_frame.clear()  # игрок в другом окне: снимок поверх него не нужен
             self._thaw_until = time.monotonic() + 0.3
@@ -2113,6 +2151,16 @@ class App(QObject):
             QTimer.singleShot(40, self._thaw_tick)
         for ms in (300, 1200):
             QTimer.singleShot(ms, self._sync_geometry)
+
+    def _ensure_restored(self, hwnd: int) -> None:
+        """Игру разворачивали с фокусом после режима слов: если она всё ещё свёрнута, ещё раз."""
+        if self._frozen or self._closing or not winapi.is_window(hwnd) or not winapi.is_minimized(hwnd):
+            return
+        if self.active is None or self.active.hwnd != hwnd:
+            return
+        log.warning("игра после режима слов всё ещё свёрнута: разворачиваю ещё раз")
+        winapi.restore_window(hwnd, activate=True)
+        winapi.force_foreground(hwnd)
 
     def _thaw_tick(self) -> None:
         """Игра разворачивается: убрать снимок, как только она снова на экране (или по времени)."""
@@ -2224,6 +2272,7 @@ class App(QObject):
             self.display, game.region, views, strip=self.overlay.strip_rect(),
             speaker=self._line_speaker(line), translation=translation,
         )  # fmt: skip
+        self.overlay.mute_strip(True)  # перевод теперь в панели: плашка под ней не мигает поверх
         self.hotkeys.set_group("words", not self._hotkeys_paused)
         self._shield_on()
         self._words_focus(force=shot is not None or self._frozen, magpie=magpie)
@@ -2860,6 +2909,13 @@ class App(QObject):
             log.info("режим слов: фокус у слоя, игра ввод не получает")
             return
         who = winapi.process_exe(winapi.window_pid(fg)) if fg else None
+        if self._frozen:
+            # игра свёрнута: клик до неё не дойдёт, пугать подсказкой незачем. Фокус всё равно возвращаем
+            # (клавиши режима нужны слою), пока игра сворачивается
+            if retry or self._freezing():
+                self._refocus_layer(f"фокус у {who}")
+                QTimer.singleShot(300, lambda: self._check_words_focus(retry=False))
+            return
         if retry:
             log.info("режим слов: фокус не взялся (в фокусе %s), пробую ещё раз", who)
             winapi.force_foreground(layer)
@@ -2938,6 +2994,8 @@ class App(QObject):
                 self.overlay.toast("Игра поймала клик. Дальше на время F3 LexoPlay будет сворачивать её", 5000)
         self.word_ctx = None
         self._unfreeze(reason)
+        # плашку возвращаем чуть позже: если реплика сменилась, её уберут раньше, и старая не мелькнёт
+        QTimer.singleShot(0, lambda: None if self.word_layer.is_open else self.overlay.mute_strip(False))
         self.shield.stop()
         self.hotkeys.set_group("words", False)
         self._sync_ignored_keys()

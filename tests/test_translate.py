@@ -133,7 +133,8 @@ def test_streams_translation_with_medium_effort_and_fixed_source():
     res = asyncio.run(_sdk_translator(handler).translate(req))
     assert res.translation == "Подозреваемые утверждают, что им угрожали…"
     assert res.source == "...Suspects claim to have been threatened into..."  # оригинал без ошибок OCR, для режима слов
-    assert parts[0] == "Подозреваемые" and not any("@" in x or "Suspects" in x for x in parts)
+    # первые слова ждут, пока не станет ясно, что это не подпись «Имя:»
+    assert parts[0].startswith("Подозреваемые утверждают") and not any("@" in x or "Suspects" in x for x in parts)
     body = seen[0]
     assert body["output_config"] == {"effort": "medium"} and "thinking" not in body  # немного думает перед ответом
     assert body["stream"] is True and body["max_tokens"] >= 4096  # thinking тратит те же max_tokens
@@ -254,3 +255,37 @@ def test_translation_ending_follows_the_original():
     for source, translation, expected in cases:
         assert fix_punctuation(source, translation) == expected, (source, translation)
     assert "never with a comma" in build_system(TranslateRequest(text="x", speaker=None, game="g"))
+
+
+def test_thinking_out_loud_and_name_label_are_cut():
+    """Danganronpa, 0.6.13: модель рассуждала про OCR прямо в ответе и подписала реплику именем."""
+    from lexoplay.translate import drop_thinking, pick_source
+
+    raw = (
+        "Сакура Огами: Все её действия... были ничем иным, как...\n\n"
+        'Wait, I need to carefully reconstruct the OCR text. "Sakura Ogani are all tip actbns of an", '
+        'likely "Sakura Ogami: Are all of those actions an". I\'ll reconstruct as "That\'s all the actions of an".\n\n'
+        "Сакура Огами: Это все действия...\n@@ These are all the actions of an..."
+    )
+    src = "are all tip actbns of an"
+    assert clean_translation(raw, "Sakura Ogami", source=src) == "Это все действия..."
+    # пока пишется: рассуждение на экран не попадает ни на миг
+    for n in range(20, len(raw.split("@@")[0]), 7):
+        part = clean_translation(raw[:n], "Sakura Ogami", partial=True, source=src)
+        assert "OCR" not in part and "Wait" not in part and "Сакура" not in part, part
+    # одна строка с именами латиницей: это перевод, не рассуждение
+    assert drop_thinking("Monokuma, Junko Enoshima и Mukuro Ikusaba здесь.") == "Monokuma, Junko Enoshima и Mukuro Ikusaba здесь."
+    assert clean_translation("OK, я понял.", None, source="OK, I got it.") == "OK, я понял."
+    assert clean_translation("Ich weiß es nicht.\nWait, the OCR says...\nIch weiß nicht.", None, target_lang="de", source="x") == "Ich weiß nicht."
+    # подпись «Имя:» убираем, только если в оригинале её не было
+    assert clean_translation("Рассказчик: Но слабых мест много.", "Narrator", source="But there are many weak spots.") == "Но слабых мест много."
+    assert clean_translation("Смотри: вот тут.", None, source="Look: right here.") == "Смотри: вот тут."
+    assert clean_translation("смотри, вот тут.", "Mira", source="Look here.") == "смотри, вот тут."
+    # и в исправленном оригинале тоже
+    assert pick_source("But no matter how many weak spots", "Narrator: But no matter how many weak spots.").startswith("But no")
+    assert pick_source("Note: keep out", "Note: Keep out.") == "Note: Keep out."
+
+
+def test_prompt_forbids_reasoning_in_reply():
+    system = build_system(TranslateRequest(text="x", speaker=None, game="G"))
+    assert "never contains your reasoning" in system

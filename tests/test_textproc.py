@@ -94,3 +94,15 @@ def test_same_text_twice_on_screen_is_read_once():
     assert drop_repeats(["Before we go any farther, I guess I should", "introduce myself."]) == (
         "Before we go any farther, I guess I should introduce myself."
     )
+
+
+def test_name_frame_name_is_not_part_of_the_line():
+    """Окно диалога захватило плашку с именем, а имя уже читается из своей рамки."""
+    u = to_utterance(ocr("Sakura Ogani", "Indeed... these are all the actions of an assailant."), "Sakura Ogami")
+    assert u.speaker == "Sakura Ogami" and u.text.startswith("Indeed")
+    u = to_utterance(ocr("Narrator But no matter how many weak spots,"), "Narrator")
+    assert u.text == "But no matter how many weak spots,"
+    u = to_utterance(ocr("Narrator: But no matter"), "Narrator")
+    assert u.text == "But no matter"
+    u = to_utterance(ocr("Sakura is strong."), "Sakura Ogami")  # имя внутри фразы не трогаем
+    assert u.text == "Sakura is strong."

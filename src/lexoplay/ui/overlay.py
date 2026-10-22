@@ -83,6 +83,9 @@ class Overlay(QWidget):
         self._text: str | None = None
         self._original: str | None = None  # английский оригинал над переводом (по желанию)
         self._recall: tuple[RecallChip, ...] = ()
+        # режим слов открыт: его панель сама показывает перевод, а плашка под ней только мешала бы
+        # (два окна поверх всех спорят, кто выше, и плашка мигала поверх панели)
+        self._muted = False
         self._busy = False
         self._toast: str | None = None
         self.font_scale = 1.0
@@ -147,8 +150,23 @@ class Overlay(QWidget):
         self._appear(appearing)
         self._refresh()
 
+    @property
+    def muted(self) -> bool:
+        return self._muted
+
+    def mute_strip(self, on: bool) -> None:
+        """Спрятать плашку, не забывая её: после режима слов она вернётся, если ещё нужна."""
+        if self._muted == on:
+            return
+        self._muted = on
+        if on:
+            self._anim.stop()
+            self._ghost = None
+            self._alpha = 1.0
+        self._refresh()
+
     def hide_strip(self) -> None:
-        if self.strip_visible and self.isVisible() and self.fade:
+        if self.strip_visible and self.isVisible() and self.fade and not self._muted:
             self._ghost = _Strip(self._region, self._text, self._original, self._recall)
             self._fade_to(0.0, FADE_OUT_MS)
         self._text, self._busy, self._original, self._recall = None, False, None, ()
@@ -219,7 +237,7 @@ class Overlay(QWidget):
         self._refresh()
 
     def _refresh(self) -> None:
-        need = self.strip_visible or self._ghost is not None or self._toast is not None
+        need = (not self._muted and (self.strip_visible or self._ghost is not None)) or self._toast is not None
         if need:
             if not self.isVisible():
                 self._placer(self, self._display)
@@ -367,7 +385,7 @@ class Overlay(QWidget):
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
         strip = self._shown() if self.strip_visible else self._ghost
-        if strip is not None and self._alpha > 0.0:
+        if strip is not None and self._alpha > 0.0 and not self._muted:
             p.setOpacity(max(0.0, min(1.0, self._alpha)))
             self._paint_strip(p, strip)
             p.setOpacity(1.0)

@@ -134,6 +134,32 @@ def _looks_like_name(line: str, rest: list[str] | None = None) -> bool:
     return all(w[:1].isupper() for w in words) and not any(ch.isdigit() for ch in line)
 
 
+def _letters(s: str) -> str:
+    return re.sub(r"[^\w]+", "", s).lower()
+
+
+def _without_name(lines: list[str], speaker: str) -> list[str]:
+    """Окно диалога захватило и плашку с именем: имя из рамки для имени в тексте реплики не нужно.
+
+    «Sakura Ogani» (OCR ошибся в букве) в первой строке при имени «Sakura Ogami» тоже имя."""
+    from difflib import SequenceMatcher
+
+    name = _letters(speaker)
+    if not name or not lines:
+        return lines
+    first = lines[0]
+    if SequenceMatcher(None, _letters(first), name).ratio() >= 0.75:
+        return lines[1:]
+    m = _NAME_COLON.match(first)  # «Sakura Ogami: Indeed...»
+    if m and SequenceMatcher(None, _letters(m.group(1)), name).ratio() >= 0.75:
+        return [m.group(2), *lines[1:]]
+    words = first.split()
+    for n in (len(speaker.split()), len(speaker.split()) + 1):  # имя и текст OCR склеил в одну строку
+        if 0 < n < len(words) and SequenceMatcher(None, _letters(" ".join(words[:n])), name).ratio() >= 0.8:
+            return [" ".join(words[n:]), *lines[1:]]
+    return lines
+
+
 def to_utterance(result: OcrResult, name_text: str | None = None, *, guess_speaker: bool = True) -> Utterance:
     """OcrResult области диалога -> (говорящий, текст).
 
@@ -143,6 +169,8 @@ def to_utterance(result: OcrResult, name_text: str | None = None, *, guess_speak
     lines = [line.text for line in result.lines if line.text.strip()]
     if name_text is not None:
         speaker = join_lines([name_text]) or None
+        if speaker and has_text(speaker):
+            lines = _without_name(lines, speaker)
         return Utterance(speaker if speaker and has_text(speaker) else None, drop_repeats(lines))
     if not lines:
         return Utterance(None, "")

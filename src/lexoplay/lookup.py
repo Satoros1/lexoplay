@@ -25,7 +25,7 @@ Clicked: "{selection}"
 {{"lemma": "<dictionary form of the clicked word or phrase; for a phrasal verb or idiom the whole expression, e.g. \\"make amends\\">",
  "pos": "<part of speech in English: noun, verb, adj, adv, phrase...>",
  "ipa": "<IPA transcription of the lemma, without slashes>",
- "senses": ["<meaning in {tgt} exactly as used in this sentence>", "<another common meaning, optional>"],
+ "senses": ["<meaning in {tgt} exactly as used in this sentence: the word a good translator would put in this very sentence>", "<another common meaning, optional>"],
  "marked_translation": "<the sentence translation above with the clicked word's translation wrapped in **double asterisks**, or empty if no translation was given>"}}
 Short meanings, a word or a short phrase each, at most 3. No em dash characters."""
 
