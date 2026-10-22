@@ -147,6 +147,7 @@ from lexoplay.ui.widgets import (  # noqa: E402,F401
     card,
     card_list,
     clear,
+    crossfade,
     keycap,
     label,
     page_shell,
@@ -1502,6 +1503,9 @@ class MainWindow(QWidget):
     # --- навигация
     def show_page(self, key: str) -> None:
         self.keys.cancel_capture()
+        previous = self.stack.currentWidget()
+        if self.pages[key] is not previous:
+            crossfade(self.stack, previous)  # вкладки сменяются плавно, а не щелчком
         self.stack.setCurrentWidget(self.pages[key])
         self.nav_buttons[key].setChecked(True)
         if key == "games":

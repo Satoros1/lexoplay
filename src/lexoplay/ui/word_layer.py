@@ -23,7 +23,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 
-from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
+from PySide6.QtCore import QEasingCurve, QPointF, QRectF, Qt, QTimer, QVariantAnimation, Signal
 from PySide6.QtGui import (
     QColor,
     QFont,
@@ -155,6 +155,19 @@ class WordLayer(QWidget):
         self._dwell_anim.setInterval(30)
         self._dwell_anim.timeout.connect(self.update)
         self._blank = False
+        # плавность: панель проявляется за доли секунды, карточка слова тоже
+        self.animate = False  # App включает; в тестах кадр нужен сразу
+        self._alpha = 1.0
+        self._card_alpha = 1.0
+        self._card_word: str | None = None
+        self._fade = QVariantAnimation(self)
+        self._fade.setDuration(150)
+        self._fade.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._fade.valueChanged.connect(self._on_fade)
+        self._card_fade = QVariantAnimation(self)
+        self._card_fade.setDuration(170)
+        self._card_fade.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._card_fade.valueChanged.connect(self._on_card_fade)
         self._pick = QTimer(self)
         self._pick.setSingleShot(True)
         self._pick.setInterval(PICK_MS)
@@ -207,12 +220,29 @@ class WordLayer(QWidget):
         self._dwell_used = None
         self._pick.stop()
         self._open = True
+        self._card_word = None
+        if self.animate:
+            self._alpha = 0.0
+            self._fade.stop()
+            self._fade.setStartValue(0.0)
+            self._fade.setEndValue(1.0)
+            self._fade.start()
+        else:
+            self._alpha = 1.0
         self._placer(self, display)
         self.show()
         self._placer(self, display)
         self._relayout()
         self._idle.start()
         self.repaint()  # сразу свежий кадр
+
+    def _on_fade(self, value: object) -> None:
+        self._alpha = float(value)  # type: ignore[arg-type]
+        self.update()
+
+    def _on_card_fade(self, value: object) -> None:
+        self._card_alpha = float(value)  # type: ignore[arg-type]
+        self.update()
 
     def press_enter(self) -> None:
         """Enter с клавиатуры (через глобальную клавишу App, фокуса у окна нет)."""
@@ -255,6 +285,14 @@ class WordLayer(QWidget):
         self._relayout()
 
     def set_card(self, card: CardState | None) -> None:
+        word = card.title if card is not None else None
+        if self.animate and word is not None and word != self._card_word:
+            self._card_fade.stop()  # новое слово: карточка проявляется, а не выскакивает
+            self._card_alpha = 0.0
+            self._card_fade.setStartValue(0.0)
+            self._card_fade.setEndValue(1.0)
+            self._card_fade.start()
+        self._card_word = word
         self._card = card
         self.update()
 
@@ -617,6 +655,8 @@ class WordLayer(QWidget):
         p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
         bounds = self._bounds()
         p.fillRect(self.rect(), QColor(0, 0, 0, 46))  # ловим все клики над игрой и чуть затемняем её
+        if self._alpha < 1.0:
+            p.setOpacity(max(0.0, self._alpha))
         avoid = self._avoid()
 
         px = self._px()
@@ -701,7 +741,14 @@ class WordLayer(QWidget):
             self._paint_explain(p, self._explain, avoid, bounds, px)
         elif self._card and self._sel:
             sel = union([denormalize(self._views[i].rect, bounds) for i in self._sel if i < len(self._views)])
-            self._paint_card(p, self._card, sel, bounds, px, avoid)
+            if self._card_alpha < 1.0:
+                p.save()
+                p.setOpacity(p.opacity() * max(0.0, self._card_alpha))
+                p.translate(0, (1.0 - self._card_alpha) * 8)  # и чуть всплывает
+                self._paint_card(p, self._card, sel, bounds, px, avoid)
+                p.restore()
+            else:
+                self._paint_card(p, self._card, sel, bounds, px, avoid)
         if not self._explain_open:
             self._paint_explain_button(p, avoid, bounds, px)
         p.end()

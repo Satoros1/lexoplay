@@ -25,6 +25,8 @@ Placer = Callable[[QWidget, Rect], None]
 
 FADE_IN_MS = 120
 FADE_OUT_MS = 140
+BOX_MS = 140  # плашка выросла или сжалась
+REVEAL_PARTS = 5  # дописанный кусок перевода проявляется примерно за столько кадров
 DOTS_MS = 300  # шаг бегущих точек, пока идёт перевод
 
 
@@ -104,6 +106,19 @@ class Overlay(QWidget):
         self._anim.valueChanged.connect(self._on_fade)
         self._anim.finished.connect(self._fade_done)
         self._dots = 0
+        # плашка меняет размер (перевод дописывается, добавилась строка) плавно, а не скачком
+        self._box_anim = QVariantAnimation(self)
+        self._box_anim.setDuration(BOX_MS)
+        self._box_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._box_anim.setStartValue(0.0)
+        self._box_anim.setEndValue(1.0)
+        self._box_anim.valueChanged.connect(lambda _v: self.update())
+        self._box_from: QRectF | None = None
+        self._box_to: QRectF | None = None
+        self._reveal = 0  # сколько букв перевода уже видно (остальные проявляются)
+        self._reveal_timer = QTimer(self)
+        self._reveal_timer.setInterval(16)
+        self._reveal_timer.timeout.connect(self._reveal_tick)
         self._dots_timer = QTimer(self)
         self._dots_timer.setInterval(DOTS_MS)
         self._dots_timer.timeout.connect(self._tick_dots)
@@ -143,12 +158,35 @@ class Overlay(QWidget):
         self, region: Rect, text: str, original: str | None = None, recall: Sequence[RecallChip] = ()
     ) -> None:
         appearing = not self.strip_visible
+        before = self._text
         self._region, self._text, self._busy = region, text, False
         self._original = original if original and original.strip() else None
         self._recall = tuple(recall)
         self._dots_timer.stop()
+        # перевод дописывается кусками: новые буквы проявляются за доли секунды, а не скачком.
+        # Готовый перевод (из кеша, сразу целиком) показываем сразу
+        if appearing or not self.fade or (before is not None and not text.startswith(before[: min(len(before), 8)])):
+            self._reveal = len(text)
+        else:
+            common = 0
+            for a, b in zip(before or "", text, strict=False):
+                if a != b:
+                    break
+                common += 1
+            self._reveal = min(self._reveal, common)
+            if self._reveal < len(text):
+                self._reveal_timer.start()
         self._appear(appearing)
         self._refresh()
+
+    def _reveal_tick(self) -> None:
+        text = self._text or ""
+        left = len(text) - self._reveal
+        if left <= 0:
+            self._reveal_timer.stop()
+            return
+        self._reveal = min(len(text), self._reveal + max(2, -(-left // REVEAL_PARTS)))
+        self.update()
 
     @property
     def muted(self) -> bool:
@@ -174,7 +212,34 @@ class Overlay(QWidget):
         self._refresh()
 
     # --- плавность ---
+    def _box(self, box: QRectF) -> QRectF:
+        """Где рисовать плашку сейчас: если её размер поменялся, она доезжает до нового за BOX_MS."""
+        if not self.fade or self._box_to is None:
+            self._box_from = self._box_to = QRectF(box)
+            return box
+        if box != self._box_to:
+            self._box_from = self._box_now()
+            self._box_to = QRectF(box)
+            self._box_anim.stop()
+            self._box_anim.start()
+        return self._box_now()
+
+    def _box_now(self) -> QRectF:
+        a, b = self._box_from, self._box_to
+        assert b is not None
+        if a is None or self._box_anim.state() != QVariantAnimation.State.Running:
+            return QRectF(b)
+        t = float(self._box_anim.currentValue())
+        return QRectF(
+            a.x() + (b.x() - a.x()) * t,
+            a.y() + (b.y() - a.y()) * t,
+            a.width() + (b.width() - a.width()) * t,
+            a.height() + (b.height() - a.height()) * t,
+        )
+
     def _appear(self, appearing: bool) -> None:
+        if appearing and self._ghost is None:
+            self._box_to = None  # новая плашка появляется на своём месте, а не едет от прошлой
         if self._ghost is not None:  # плашка как раз исчезала: возвращаем её с той же прозрачности
             self._ghost = None
             self._fade_to(1.0, FADE_IN_MS)
@@ -387,20 +452,23 @@ class Overlay(QWidget):
         strip = self._shown() if self.strip_visible else self._ghost
         if strip is not None and self._alpha > 0.0 and not self._muted:
             p.setOpacity(max(0.0, min(1.0, self._alpha)))
-            self._paint_strip(p, strip)
+            self._paint_strip(p, strip, live=self.strip_visible)
             p.setOpacity(1.0)
         if self._toast:
             self._paint_toast(p, self._toast)
         p.end()
 
-    def _paint_strip(self, p: QPainter, strip: _Strip) -> None:
+    def _paint_strip(self, p: QPainter, strip: _Strip, *, live: bool = True) -> None:
         box, font, text_rect, small, orig_rect, recall = self._strip_geometry(strip)
+        if live:
+            box = self._box(box)
         bg = QColor(STRIP_BG)
         bg.setAlphaF(max(0.3, min(1.0, self.opacity)))
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(bg)
         radius = min(12.0, box.height() / 2)
         p.drawRoundedRect(box, radius, radius)
+        p.setClipRect(box)  # пока плашка растёт, новая строка проявляется вместе с ней
         original = self._original_shown(strip)
         if orig_rect is not None and original:
             p.setFont(small)
@@ -410,10 +478,13 @@ class Overlay(QWidget):
             self._paint_recall(p, recall)
         if strip.text is None:
             self._paint_dots(p, text_rect, font)
+            p.setClipping(False)
             return
         p.setFont(font)
         p.setPen(TEXT)
-        p.drawText(text_rect, int(Qt.TextFlag.TextWordWrap | Qt.AlignmentFlag.AlignLeft), strip.text)
+        shown = strip.text[: self._reveal] if live and self._reveal < len(strip.text) else strip.text
+        p.drawText(text_rect, int(Qt.TextFlag.TextWordWrap | Qt.AlignmentFlag.AlignLeft), shown)
+        p.setClipping(False)
 
     @staticmethod
     def _paint_recall(p: QPainter, row: _RecallRow) -> None:

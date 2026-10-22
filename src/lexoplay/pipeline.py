@@ -182,10 +182,10 @@ class Pipeline:
             last = now
         return frame
 
-    async def _read(self, frame: Image.Image, region: Rect, mode: str, slot: int = 0) -> OcrResult:
+    async def _read(self, frame: Image.Image, region: Rect, mode: str, slot: int = 0, tag: str = "") -> OcrResult:
         prepared = await asyncio.to_thread(prepare, frame, region, mode=mode)
         if self._debug:
-            self._debug(f"prepared_{mode}", prepared.image)
+            self._debug(f"prepared_{tag or mode}", prepared.image)
         if slot and getattr(self._ocr, "parallel", False):
             return await self._ocr.recognize(prepared, slot=slot)  # type: ignore[call-arg]
         return await self._ocr.recognize(prepared)
@@ -245,7 +245,7 @@ class Pipeline:
             if mode != first or added:
                 log.info("OCR: способы %s, выбран %s, добавлено слов из других: %s", reading.tried, mode, added)
         if target.name_region is not None:
-            name_res = await self._read(frame, target.name_region, reading.mode, slot=slot)
+            name_res = await self._read(frame, target.name_region, reading.mode, slot=slot, tag="name")
             reading.name_text = name_from(name_res)
         return reading
 

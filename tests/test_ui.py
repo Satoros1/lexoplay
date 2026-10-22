@@ -696,7 +696,8 @@ def test_words_page_and_export(window, qapp, tmp_path):
     )
     w.show_page("words")
     texts = [lbl.text() for lbl in w.words.box.findChildren(QLabel)]
-    assert "despair" in texts and "отчаяние" in texts and "только здесь" in texts
+    joined = " ".join(texts)
+    assert "despair" in joined and "отчаяние" in joined and "только здесь" in texts
     assert "не привязан" in w.words.note.text()
     out = tmp_path / "w.txt"
     assert ctl.export_words(str(out), "anki") == 1
@@ -1018,3 +1019,101 @@ def test_words_page_search_sort_bold_and_explain(window, qapp):
 
     page.save_phrase(target, 0, ExplainItem("class trial", "классный суд", ""))
     assert any("сохранено" in t for t in texts())
+
+
+def _wait_for(cond, ms=2000):  # type: ignore[no-untyped-def]
+    import time
+
+    end = time.time() + ms / 1000
+    while not cond() and time.time() < end:
+        QTest.qWait(20)
+    return cond()
+
+
+def test_smooth_scroll_and_long_words_list(window, qapp):
+    """Колесо мыши крутит плавно; длинный список слов строится частями по мере прокрутки."""
+    from PySide6.QtCore import QPoint, QPointF
+    from PySide6.QtGui import QWheelEvent
+
+    from lexoplay.store import SavedWord
+    from lexoplay.ui.pages import WORDS_CHUNK
+
+    w, ctl = window
+    for i in range(80):
+        ctl.store.word_add(SavedWord("dr1_us.exe", "DR", f"word{i}", f"word{i}", "перевод", sentence=f"A word{i} here.", created_at=1_790_000_000 + i))
+    w.resize(900, 700)
+    w.show()
+    w.show_page("words")
+    page = w.words
+    assert 0 < len(page._rows) < WORDS_CHUNK  # noqa: SLF001  первые строки сразу
+    _wait_for(lambda: len(page._rows) == WORDS_CHUNK)  # noqa: SLF001  остальные следом
+    assert len(page._rows) == WORDS_CHUNK and page.more.isVisible()  # noqa: SLF001
+    sc = page._scroll  # noqa: SLF001
+    bar = sc.verticalScrollBar()
+    QTest.qWait(50)
+    assert bar.maximum() > 500, bar.maximum()
+    start = bar.value()
+    ev = QWheelEvent(QPointF(100, 100), QPointF(100, 100), QPoint(0, 0), QPoint(0, -120),
+                     Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier, Qt.ScrollPhase.NoScrollPhase, False)
+    qapp.sendEvent(sc.viewport(), ev)
+    qapp.processEvents()
+    assert bar.value() - start < 60  # не прыжком
+    QTest.qWait(350)
+    assert bar.value() - start >= 80  # а доехало плавно
+    bar.setValue(bar.maximum())  # долистали до конца: следующая часть достраивается по нескольку строк
+    _wait_for(lambda: len(page._rows) > WORDS_CHUNK)  # noqa: SLF001
+    assert len(page._rows) > WORDS_CHUNK  # noqa: SLF001
+    # удаление убирает одну строку, не перестраивая список
+    first = page.visible_words()[0]
+    other = page._rows[page.visible_words()[1].id]  # noqa: SLF001
+    page._delete(first.id)  # noqa: SLF001
+    assert first.id not in page._rows and page._rows[page.visible_words()[0].id] is other  # noqa: SLF001
+    assert page.summary.text() == "Слов: 79"
+    # открыли вкладку снова, ничего не менялось: список не строится заново
+    rows = dict(page._rows)  # noqa: SLF001
+    w.show_page("games")
+    w.show_page("words")
+    assert page._rows == rows  # noqa: SLF001
+
+
+def test_overlay_strip_grows_smoothly(qapp):
+    ov = Overlay()
+    ov.set_display_rect(Rect(0, 0, 960, 720))
+    region = Rect(0.05, 0.78, 0.9, 0.18)
+    ov.show_text(region, "Коротко.")
+    QTest.qWait(200)  # проявилась
+    ov.grab()
+    small = ov._box_now().height()  # noqa: SLF001
+    ov.show_text(region, "Длинный перевод, который точно переносится на несколько строк. " * 4)
+    ov.grab()  # кадр сразу после: плашка ещё не доросла
+    target = ov._strip_geometry(ov._shown())[0].height()  # noqa: SLF001
+    mid = ov._box_now().height()  # noqa: SLF001
+    assert small < target and mid < target
+    QTest.qWait(250)
+    ov.grab()
+    assert abs(ov._box_now().height() - target) < 0.5  # noqa: SLF001
+    ov.hide_strip()
+    QTest.qWait(250)
+    ov.show_text(Rect(0.05, 0.1, 0.9, 0.18), "Новая плашка в другом месте.")
+    QTest.qWait(40)
+    ov.grab()  # появилась сразу на своём месте, не поехала от прошлой
+    assert ov._box_now() == ov._strip_geometry(ov._shown())[0]  # noqa: SLF001
+    ov.close()
+
+
+def test_overlay_streamed_text_reveals_smoothly(qapp):
+    ov = Overlay()
+    ov.set_display_rect(Rect(0, 0, 960, 720))
+    region = Rect(0.05, 0.78, 0.9, 0.18)
+    ov.show_text(region, "Сразу целиком.")  # плашки не было: текст виден сразу
+    assert ov._reveal == len("Сразу целиком.")  # noqa: SLF001
+    ov.hide_strip()
+    ov.show_busy(region)
+    ov.show_text(region, "Подозреваемые утверждают,")
+    assert ov._reveal < len("Подозреваемые утверждают,")  # noqa: SLF001  дописанное проявляется
+    ov.show_text(region, "Подозреваемые утверждают, что им угрожали.")
+    _wait_for(lambda: ov._reveal >= len("Подозреваемые утверждают, что им угрожали."), 1500)  # noqa: SLF001
+    assert ov._reveal == len(ov.text)  # noqa: SLF001
+    ov.show_text(region, "Совсем другой перевод.")  # перевели заново: без печатания
+    assert ov._reveal == len("Совсем другой перевод.")  # noqa: SLF001
+    ov.close()

@@ -4,12 +4,22 @@ from __future__ import annotations
 
 import hashlib
 
-from PySide6.QtCore import QRectF, QSize, Qt, QVariantAnimation
-from PySide6.QtGui import QColor, QFont, QPainter
+from PySide6.QtCore import (
+    QAbstractAnimation,
+    QEasingCurve,
+    QPropertyAnimation,
+    QRectF,
+    QSize,
+    Qt,
+    QVariantAnimation,
+)
+from PySide6.QtGui import QColor, QFont, QPainter, QWheelEvent
 from PySide6.QtWidgets import (
     QAbstractButton,
+    QApplication,
     QCheckBox,
     QFrame,
+    QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -96,6 +106,90 @@ class Tile(QWidget):
         p.end()
 
 
+def fade_in(widget: QWidget, ms: int = 170) -> None:
+    """Плавно проявить виджет (страницу, раскрытый разбор). Эффект снимаем сразу после:
+    с ним Qt рисует виджет через лишнюю картинку, и прокрутка была бы тяжелее."""
+    if widget.graphicsEffect() is not None:
+        return
+    effect = QGraphicsOpacityEffect(widget)
+    effect.setOpacity(0.0)
+    widget.setGraphicsEffect(effect)
+    anim = QPropertyAnimation(effect, b"opacity", widget)
+    anim.setDuration(ms)
+    anim.setStartValue(0.0)
+    anim.setEndValue(1.0)
+    anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+    anim.finished.connect(lambda: widget.setGraphicsEffect(None))
+    anim.start(QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
+
+
+def crossfade(container: QWidget, old: QWidget | None, ms: int = 160) -> None:
+    """Смена вкладки: снимок старой поверх новой тает за ms. Дёшево: рисуется одна картинка,
+    а не вся страница каждый кадр (как было бы с прозрачностью у самой страницы)."""
+    if old is None or not container.isVisible() or old.width() <= 0:
+        return
+    shot = QLabel(container)
+    shot.setPixmap(old.grab())
+    shot.setGeometry(old.geometry())
+    shot.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+    effect = QGraphicsOpacityEffect(shot)
+    shot.setGraphicsEffect(effect)
+    shot.show()
+    shot.raise_()
+    anim = QPropertyAnimation(effect, b"opacity", shot)
+    anim.setDuration(ms)
+    anim.setStartValue(1.0)
+    anim.setEndValue(0.0)
+    anim.setEasingCurve(QEasingCurve.Type.InOutQuad)
+    anim.finished.connect(shot.deleteLater)
+    anim.start(QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
+
+
+class SmoothScrollArea(QScrollArea):
+    """Прокрутка колесом мыши плавная: за ~0,2 с, а не прыжком на три строки за кадр.
+
+    Тачпад и прокрутка с Ctrl/Shift идут как обычно: тачпад и так присылает мелкие шаги."""
+
+    STEP = 120  # пикселей за щелчок колеса (при трёх строках за щелчок в настройках Windows)
+    DURATION = 230
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._target: float | None = None
+        self._anim = QVariantAnimation(self)
+        self._anim.setDuration(self.DURATION)
+        self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._anim.valueChanged.connect(lambda v: self.verticalScrollBar().setValue(round(float(v))))
+        self._anim.finished.connect(self._done)
+
+    def _done(self) -> None:
+        self._target = None
+
+    def scroll_by(self, dy: float) -> None:
+        bar = self.verticalScrollBar()
+        running = self._anim.state() == QAbstractAnimation.State.Running and self._target is not None
+        base = self._target if running else float(bar.value())
+        target = max(float(bar.minimum()), min(float(bar.maximum()), base + dy))  # type: ignore[operator]
+        if target == bar.value() and not running:
+            return
+        self._target = target
+        self._anim.stop()
+        self._anim.setStartValue(float(bar.value()))
+        self._anim.setEndValue(target)
+        self._anim.start()
+
+    def wheelEvent(self, e: QWheelEvent) -> None:  # noqa: N802
+        dy = e.angleDelta().y()
+        if not dy or e.modifiers() != Qt.KeyboardModifier.NoModifier or not e.pixelDelta().isNull():
+            self._anim.stop()
+            self._target = None
+            super().wheelEvent(e)
+            return
+        lines = max(1, QApplication.wheelScrollLines())
+        self.scroll_by(-dy / 120 * self.STEP * lines / 3)
+        e.accept()
+
+
 def page_shell(title: str, subtitle: str) -> tuple[QScrollArea, QVBoxLayout, QHBoxLayout]:
     """Страница с прокруткой: заголовок, подзаголовок, место под кнопки справа и тело."""
     inner = QWidget()
@@ -113,7 +207,7 @@ def page_shell(title: str, subtitle: str) -> tuple[QScrollArea, QVBoxLayout, QHB
     actions.setSpacing(8)
     head.addLayout(actions)
     lay.addLayout(head)
-    scroll = QScrollArea()
+    scroll = SmoothScrollArea()
     scroll.setWidgetResizable(True)
     scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
     scroll.setFrameShape(QFrame.Shape.NoFrame)

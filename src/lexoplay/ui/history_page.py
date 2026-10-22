@@ -48,7 +48,7 @@ from lexoplay.ui import theme
 from lexoplay.ui.explainbox import HIGHLIGHT, explain_box, row_tool
 from lexoplay.ui.pages import copy_text
 from lexoplay.ui.theme import icon
-from lexoplay.ui.widgets import Tile, button, clear, label, page_shell
+from lexoplay.ui.widgets import Tile, button, clear, fade_in, label, page_shell
 
 SESSIONS_PAGE = 15  # сессий за раз, дальше «Показать ещё»
 LINES_FIRST = 15  # последних реплик в только что раскрытой сессии
@@ -180,6 +180,8 @@ class SessionCard(QFrame):
         self.preview.setVisible(not on)
         if on:
             self.render_body()
+            if self.isVisible():
+                fade_in(self.body)  # раскрылась плавно, а не выскочила
         elif not self.preview.text():
             last, _n = self._lines(1)
             self.preview.setText(self._preview(last[-1]) if last else "")

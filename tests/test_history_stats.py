@@ -127,8 +127,8 @@ def test_records_streaks_parts_of_speech_and_words_read(tmp_path):
 def test_explains_lookups_and_speaker_share(tmp_path):
     from lexoplay.lexo import Sense
     from lexoplay.lookup import (
-        Explanation,
         ExplainItem,
+        Explanation,
         explanation_from_json,
         explanation_json,
         lookup_key,

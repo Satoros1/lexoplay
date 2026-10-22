@@ -55,10 +55,14 @@ def word_spans(sentence: str, selection: str, lemma: str | None = None) -> list[
 
     if lemma and len(tokens(lemma)) > 1 and (found := by_forms(lemma)):
         return found  # выражение целиком: jump to conclusions, а не только jump to
-    if sel:
-        m = re.search(r"(?<![A-Za-z])" + re.escape(sel.replace("\u2019", "'")) + r"(?![A-Za-z])", text, re.I)
-        if m:
-            return [(m.start(), m.end())]
+    if sel:  # без регулярки: в списке слов это сотни разных шаблонов
+        low, needle = text.lower(), sel.replace("\u2019", "'").lower()
+        i = low.find(needle)
+        while i >= 0:
+            j = i + len(needle)
+            if (i == 0 or not low[i - 1].isalpha()) and (j >= len(low) or not low[j].isalpha()):
+                return [(i, j)]
+            i = low.find(needle, i + 1)
     return by_forms(lemma) or by_forms(sel)
 
 

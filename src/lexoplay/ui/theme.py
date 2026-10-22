@@ -250,7 +250,21 @@ def icon_svg(name: str, color: str = INK, size: int = 24, stroke: float = 2.0, f
     )
 
 
+_ICON_CACHE: dict[tuple[str, str, int, str], QIcon] = {}
+
+
 def icon(name: str, color: str = INK, size: int = 18, fill: str = "none") -> QIcon:
+    """Иконка из SVG. Одинаковые не рисуем заново: в длинных списках их сотни."""
+    key = (name, str(color), size, str(fill))
+    cached = _ICON_CACHE.get(key)
+    if cached is not None:
+        return cached
+    out = _render_icon(name, color, size, fill)
+    _ICON_CACHE[key] = out
+    return out
+
+
+def _render_icon(name: str, color: str, size: int, fill: str) -> QIcon:
     from PySide6.QtSvg import QSvgRenderer
 
     out = QIcon()

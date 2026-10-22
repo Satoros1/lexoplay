@@ -56,6 +56,8 @@ Write the translation a professional {target} game localizer would ship:
 - The text comes from OCR and can be garbled: l/I, 0/O, rn/m, split or merged words ("vi ew", "becamewarped"), stray symbols like | or #. Work out the words the game really shows from the letters and the context, then translate them. ALL CAPS is just the game's font: use normal capitalization.
 - The screen sometimes shows the same text twice (say, in a box behind the dialogue), so a sentence may come twice: translate it once and never invent a link between the copies.
 - If the speaker label looks like a piece of the sentence rather than a name, treat it as part of the line.
+- Stuttering and drawn-out words stay that way in the translation (b-b-blabbermouth → б-б-болтун, Nooo → Нееет). A word in *asterisks* is emphasis: keep the emphasis in the wording, drop the asterisks.
+- Russian and similar languages mark the speaker's gender in verbs and adjectives: work it out from the speaker's name and the earlier lines, and keep it the same for each character.
 - Punctuation: keep ? ! and three dots (...) as in the original, and a period where it has one. If the original ends with a comma or breaks off because the sentence continues in the next text box, end with "..." and never with a comma.
 {examples}
 Reply with the translation of the line after "Translate this line". Then on a new line write "@@" and that line in {source} as the game really shows it: the OCR mistakes fixed, the same words and punctuation, normal capitalization, no speaker name. Nothing else: no quotes, no notes.
@@ -74,6 +76,8 @@ EXAMPLES = {
         ("Ugh... my head is killing me.", "Ох... голова просто раскалывается."),
         ("l can't be|ieve this is happening...", "Не могу поверить, что это происходит..."),
         ("I'm sorry to have kept you waiting.", "Простите, что заставил вас ждать."),
+        ("You're not a b-b-blabbermouth, right? This h-has to be a secret!", "Ты ведь не б-б-болтун, правда? Это д-должно остаться в секрете!"),
+        ("Feels gross? Hell no. Feels *great*, more like!", "Противно? Чёрта с два. Скорее, кайфово!"),
     ],
 }
 

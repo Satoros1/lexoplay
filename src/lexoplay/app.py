@@ -943,6 +943,7 @@ class App(QObject):
         self.word_layer.font_scale = self.settings.font_scale
         self.word_layer.font_family = self.settings.strip_font
         self.word_layer.hover_pick = self.settings.hover_pick
+        self.word_layer.animate = self.overlay.fade
         self.word_layer.rare_label = LEVEL_NAMES.get(self.settings.rare_level, "")
 
     def _rebuild_translator(self) -> None:

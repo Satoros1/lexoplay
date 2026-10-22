@@ -68,6 +68,16 @@ def make_report(settings: Settings, store: Store, extra: dict[str, Any] | None =
         z.writestr("info.json", json.dumps(info, ensure_ascii=False, indent=2, default=str))
         z.writestr("games.json", json.dumps(games, ensure_ascii=False, indent=2))
         z.writestr("settings.json", json.dumps(asdict(settings), ensure_ascii=False, indent=2))
+        # последние переводы: по ним видно, где перевод хромает (это текст игры, секретов в нём нет)
+        try:
+            recent = [
+                {"time": datetime.fromtimestamp(ln.seen_at).isoformat(timespec="seconds"), "exe": ln.exe,
+                 "speaker": ln.speaker, "source": ln.source, "translation": ln.translation}
+                for ln in store.lines_list(limit=80)
+            ]  # fmt: skip
+            z.writestr("lines.json", json.dumps(recent, ensure_ascii=False, indent=2))
+        except Exception as exc:  # noqa: BLE001
+            z.writestr("lines.json", json.dumps({"error": str(exc)}))
         for log in sorted(data_dir().glob("lexoplay.log*")):
             z.write(log, f"logs/{log.name}")
         shots = sorted((p for p in debug_dir().rglob("*") if p.is_file()), key=lambda p: p.stat().st_mtime)[-40:]

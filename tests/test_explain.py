@@ -5,8 +5,8 @@ import json
 from lexoplay.lookup import (
     EXPLAIN_VERSION,
     MAX_ITEMS,
-    Explanation,
     ExplainItem,
+    Explanation,
     build_explain_prompt,
     explanation_from_json,
     explanation_json,

@@ -37,7 +37,7 @@ from lexoplay.store import Game, SavedWord, Store, StoredLine, fold
 from lexoplay.ui import theme
 from lexoplay.ui.explainbox import HIGHLIGHT, explain_box, row_tool
 from lexoplay.ui.theme import icon
-from lexoplay.ui.widgets import button, card, clear, label, page_shell
+from lexoplay.ui.widgets import button, card, clear, fade_in, label, page_shell
 
 PAGE = 100
 MONTHS = ["янв", "фев", "мар", "апр", "мая", "июн", "июл", "авг", "сен", "окт", "ноя", "дек"]
@@ -94,7 +94,10 @@ def times(n: int) -> str:
     return f"{n} {tail}"
 
 
-WORDS_PAGE = 100  # столько слов рисуем сразу, дальше по кнопке
+WORDS_PAGE = 100  # «Показать ещё»
+WORDS_CHUNK = 30  # столько строк строим сразу; остальные по мере прокрутки
+FEED_STEP = 5  # при прокрутке достраиваем по столько строк за раз, между кадрами
+FIRST_ROWS = 10  # столько строк вкладка показывает сразу
 SORTS = (("new", "Сначала новые"), ("seen", "Чаще встречаются"), ("abc", "По алфавиту"))
 
 
@@ -148,8 +151,8 @@ def marked_html(text: str, bold: list[tuple[int, int]], query: str = "") -> str:
     return "".join(out).replace("\n", "<br>")
 
 
-def rich_label(text: str, name: str | None) -> QLabel:
-    lbl = label("", name, wrap=True)
+def rich_label(text: str, name: str | None, *, wrap: bool = True) -> QLabel:
+    lbl = label("", name, wrap=wrap)
     lbl.setTextFormat(Qt.TextFormat.RichText)
     lbl.setText(text)
     lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -163,7 +166,14 @@ class WordsPage(QWidget):
         self._linked = linked
         self._hotkey = hotkey
         self._words: list[SavedWord] = []
-        self.shown = WORDS_PAGE
+        self._visible: list[SavedWord] = []
+        self._rendered = 0
+        self._rows: dict[int, QFrame] = {}
+        self._sig: tuple = ()
+        self._feed = QTimer(self)
+        self._feed.setInterval(0)
+        self._feed.timeout.connect(self._feed_tick)
+        self._feed_left = 0
         self.explain_open: set[int] = set()  # слова с раскрытым разбором примера
         self.explains: dict[int, object] = {}  # разбор (Explanation) или текст ошибки; пока грузится, ключа нет
         self.saved: set[tuple[int, int]] = set()  # (слово, пункт разбора), которые уже сохранены
@@ -180,6 +190,8 @@ class WordsPage(QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(scroll)
+        self._scroll = scroll
+        scroll.verticalScrollBar().valueChanged.connect(self._near_bottom)
         self.note = label("", "muted", wrap=True)
         lay.addWidget(self.note)
 
@@ -234,23 +246,42 @@ class WordsPage(QWidget):
             )
         self.note.setText(text)
         self.export_btn.setEnabled(bool(self._words))
+        sig = tuple((w.id, w.seen, w.lexo, w.sentence) for w in self._words)
+        if sig == self._sig and self._rows:
+            return  # ничего не поменялось: список не строим заново, вкладка открывается сразу
+        self._sig = sig
         self._render()
 
     def _filter(self) -> None:
-        self.shown = WORDS_PAGE
         self._render()
 
     def _more(self) -> None:
-        self.shown += WORDS_PAGE
-        self._render()
+        self._append(WORDS_PAGE)
+
+    def _near_bottom(self, value: int) -> None:
+        bar = self._scroll.verticalScrollBar()
+        if value >= bar.maximum() - 1400 and self._rendered < len(self._visible) and not self._feed.isActive():
+            # дочитываем список по мере прокрутки, по нескольку строк за раз: прокрутка не замирает
+            self._feed_left = WORDS_CHUNK
+            self._feed.start()
+
+    def _feed_tick(self) -> None:
+        n = min(FEED_STEP, self._feed_left)
+        self._append(n)
+        self._feed_left -= n
+        if self._feed_left <= 0 or self._rendered >= len(self._visible):
+            self._feed.stop()
 
     def visible_words(self) -> list[SavedWord]:
         found = [w for w in self._words if word_matches(w, self.query)]
         return sort_words(found, self.sort.currentData() or "new")
 
     def _render(self) -> None:
+        self._feed.stop()
         clear(self.box_lay)
-        words = self.visible_words()
+        self._rows = {}
+        self._rendered = 0
+        self._visible = words = self.visible_words()
         total = len(self._words)
         if self.query:
             self.summary.setText(f"Найдено: {len(words)} из {total}" if words else f"Ничего не нашлось среди {total} слов")
@@ -265,10 +296,41 @@ class WordsPage(QWidget):
             el.setContentsMargins(18, 14, 18, 14)
             el.addWidget(label("Слов пока нет." if not total else "Попробуй другое слово или перевод.", "muted"))
             self.box_lay.addWidget(empty)
-        page = words[: self.shown]
-        for i, w in enumerate(page):
-            self.box_lay.addWidget(self._row(w, last=i == len(page) - 1))
-        self.more.setVisible(len(words) > self.shown)
+        # первые строки сразу (их и видно), остальные между кадрами: вкладка открывается без задержки
+        self._append(FIRST_ROWS)
+        if self._rendered < len(words):
+            self._feed_left = WORDS_CHUNK - FIRST_ROWS
+            self._feed.start()
+
+    def _append(self, n: int) -> None:
+        part = self._visible[self._rendered : self._rendered + n]
+        if not part:
+            return
+        if self._rows:  # прошлая последняя строка больше не последняя: ей нужна линия снизу
+            last = self.box_lay.itemAt(self.box_lay.count() - 1).widget()
+            if last is not None and last.objectName() == "rowLast":
+                last.setObjectName("row")
+                last.style().unpolish(last)
+                last.style().polish(last)
+        for w in part:
+            self._rendered += 1
+            row = self._row(w, last=self._rendered == len(self._visible))
+            self._rows[w.id] = row
+            self.box_lay.addWidget(row)
+        self.more.setVisible(self._rendered < len(self._visible))
+
+    def _redraw(self, w: SavedWord) -> None:
+        """Перерисовать одну строку (раскрыли разбор): остальной список не трогаем."""
+        old = self._rows.get(w.id)
+        if old is None:
+            return
+        fresh = next((x for x in self._words if x.id == w.id), w)
+        row = self._row(fresh, last=old.objectName() == "rowLast")
+        self.box_lay.replaceWidget(old, row)
+        old.hide()
+        old.deleteLater()
+        self._rows[w.id] = row
+        fade_in(row)
 
     def _row(self, w: SavedWord, *, last: bool) -> QFrame:
         q = self.query
@@ -279,10 +341,11 @@ class WordsPage(QWidget):
         col.setSpacing(3)
         top = QHBoxLayout()
         top.setSpacing(8)
-        top.addWidget(rich_label(marked_html(w.word, [], q), "title"))
         extra = " · ".join(p for p in (f"/{w.ipa}/" if w.ipa else "", w.pos or "") if p)
+        head = marked_html(w.word, [], q)
         if extra:
-            top.addWidget(label(extra, "muted"))
+            head += f' <span style="color:{theme.MUTED}; font-size:10pt; font-weight:400">&nbsp;{html.escape(extra)}</span>'
+        top.addWidget(rich_label(head, "title", wrap=False))
         top.addWidget(label("в Lexo" if w.lexo else "только здесь", "chip" if w.lexo else "chipGray"))
         top.addStretch(1)
         if self.can_explain and w.sentence:
@@ -298,16 +361,26 @@ class WordsPage(QWidget):
         top.addWidget(row_tool("copy", "Скопировать слово и перевод", lambda: copy_text(f"{w.word} - {w.translation or ''}")))
         top.addWidget(row_tool("trash", "Удалить из списка", lambda: self._delete(w.id)))
         col.addLayout(top)
+        # всё остальное одной надписью: так длинный список строится в разы быстрее
+        parts: list[str] = []
         if w.translation:
-            col.addWidget(rich_label(marked_html(w.translation, [], q), None))
+            parts.append(f"<div>{marked_html(w.translation, [], q)}</div>")
         if w.sentence:
-            col.addWidget(rich_label(marked_html(w.sentence, word_spans(w.sentence, w.selection, w.lemma), q), "muted"))
+            example = marked_html(w.sentence, word_spans(w.sentence, w.selection, w.lemma), q)
+            parts.append(f'<div style="color:{theme.MUTED}; margin-top:3px">{example}</div>')
             if w.sentence_translation:
-                col.addWidget(rich_label(marked_html(w.sentence_translation, [], q), "version"))
+                parts.append(
+                    f'<div style="color:{theme.MUTED}; font-size:8.5pt; margin-top:1px">'
+                    f"{marked_html(w.sentence_translation, [], q)}</div>"
+                )
         meta = [w.game or "", when(w.created_at) if w.created_at else ""]
         if w.seen:
             meta.append(f"снова встретилось {times(w.seen)}")
-        col.addWidget(label(" · ".join(p for p in meta if p), "version"))
+        parts.append(
+            f'<div style="color:{theme.MUTED}; font-size:8.5pt; margin-top:3px">'
+            f'{html.escape(" · ".join(p for p in meta if p))}</div>'
+        )
+        col.addWidget(rich_label("".join(parts), None))
         if w.id in self.notes:
             col.addWidget(label(self.notes[w.id], "ok", wrap=True))
         if self.can_explain and w.id in self.explain_open:
@@ -324,30 +397,50 @@ class WordsPage(QWidget):
     def toggle_explain(self, w: SavedWord) -> None:
         if w.id in self.explain_open:
             self.explain_open.discard(w.id)
-            self._render()
+            self._redraw(w)
             return
         self.explain_open.add(w.id)
         if isinstance(self.explains.get(w.id), str):
             self.explains.pop(w.id)  # прошлая ошибка: пробуем ещё раз
         if w.id not in self.explains:
 
-            def done(exp, err, word_id=w.id):  # type: ignore[no-untyped-def]
-                self.explains[word_id] = exp if err is None else err
-                self._render()
+            def done(exp, err, word=w):  # type: ignore[no-untyped-def]
+                self.explains[word.id] = exp if err is None else err
+                self._redraw(word)
 
             self.ctl.explain_history_line(self.ctl.word_line(w), done)  # type: ignore[attr-defined]
-        self._render()
+        self._redraw(w)
 
     def save_phrase(self, w: SavedWord, index: int, item: object) -> None:
         line = self.ctl.word_line(w)  # type: ignore[attr-defined]
         where = self.ctl.save_phrase(line, item.phrase, item.meaning, item.base)  # type: ignore[attr-defined]
         self.saved.add((w.id, index))
         self.notes[w.id] = f"«{item.base or item.phrase}» сохранено в {where}"  # type: ignore[attr-defined]
-        self.refresh()
+        self._words = self.ctl.saved_words()
+        self._redraw(w)  # новое слово появится в списке, когда вкладку откроют снова
 
     def _delete(self, word_id: int) -> None:
+        """Убрать одну строку, не строя список заново."""
         self.ctl.delete_word(word_id)
-        self.refresh()
+        self._words = [w for w in self._words if w.id != word_id]
+        self._visible = [w for w in self._visible if w.id != word_id]
+        self._sig = tuple((w.id, w.seen, w.lexo, w.sentence) for w in self._words)
+        row = self._rows.pop(word_id, None)
+        if row is None:
+            self._render()
+            return
+        self.box_lay.removeWidget(row)
+        row.hide()
+        row.deleteLater()
+        self._rendered -= 1
+        if not self._visible:
+            self._render()
+            return
+        total = len(self._words)
+        self.summary.setText(f"Найдено: {len(self._visible)} из {total}" if self.query else f"Слов: {total}")
+        self.export_btn.setEnabled(bool(self._words))
+        if self._rendered < len(self._visible):
+            self._append(1)
 
     def _export(self, fmt: str) -> None:
         ext, flt = (".txt", "Anki (*.txt)") if fmt == "anki" else (".csv", "CSV (*.csv)")

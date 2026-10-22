@@ -1066,17 +1066,13 @@ def _qt_checks(out_dir: Path) -> None:
 
     def main_window() -> tuple[str, object]:
         import tempfile
+        from types import SimpleNamespace
 
         from lexoplay.config import Settings
         from lexoplay.lexo import Deck
-        from lexoplay.store import Game, Store
+        from lexoplay.store import Game, SavedWord, Store
         from lexoplay.ui import theme
-        from lexoplay.ui.main_window import AccountStatus, MainWindow
-
-        from types import SimpleNamespace
-
-        from lexoplay.store import SavedWord
-        from lexoplay.ui.main_window import UpdateState
+        from lexoplay.ui.main_window import AccountStatus, MainWindow, UpdateState
 
         family = theme.load_fonts()
         tmp = Path(tempfile.mkdtemp(prefix="lexoplay-ui-"))
@@ -1309,8 +1305,8 @@ def _qt_checks(out_dir: Path) -> None:
         info["kinds"] = sorted(set(got))
         # боковая кнопка мыши (Mouse5) как горячая клавиша: Raw Input -> HotkeyManager -> действие
         from lexoplay.hotkeys import parse as _parse
-        from lexoplay.win.hooks import HotkeyManager
         from lexoplay.win import winapi as _wa0
+        from lexoplay.win.hooks import HotkeyManager
 
         hm = HotkeyManager()
         fired: list[str] = []
@@ -1636,9 +1632,9 @@ def run(report: str) -> int:
     out = Path(report).resolve()
     out_dir = out.parent
     out_dir.mkdir(parents=True, exist_ok=True)
-    from lexoplay import __version__
-
     import faulthandler
+
+    from lexoplay import __version__
 
     crash = (out_dir / "crash.txt").open("w", encoding="utf-8")  # падение в C (хуки, Qt): стек всех потоков
     faulthandler.enable(file=crash, all_threads=True)
