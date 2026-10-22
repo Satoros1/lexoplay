@@ -11,7 +11,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Protocol
 
-from PySide6.QtCore import QRectF, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QRectF, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (
     QAction,
     QCloseEvent,
@@ -23,6 +23,8 @@ from PySide6.QtGui import (
     QImage,
     QPainter,
     QPixmap,
+    QResizeEvent,
+    QShowEvent,
 )
 from PySide6.QtWidgets import (
     QButtonGroup,
@@ -1470,6 +1472,14 @@ class MainWindow(QWidget):
         self.games.go_lexo.connect(lambda: self.show_page("lexo"))
         self.lexo.changed.connect(self._account_changed)
 
+        # подсветка выбранной вкладки: одна «таблетка», которая переезжает к нужной кнопке
+        self._pill = QFrame(side)
+        self._pill.setObjectName("navPill")
+        self._pill.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self._pill.hide()
+        self._pill_anim = QPropertyAnimation(self._pill, b"geometry", self)
+        self._pill_anim.setDuration(220)
+        self._pill_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
         self.nav = QButtonGroup(self)
         self.nav_buttons: dict[str, QPushButton] = {}
         for key, text, icon_name in self.PAGES:
@@ -1508,6 +1518,7 @@ class MainWindow(QWidget):
             crossfade(self.stack, previous)  # вкладки сменяются плавно, а не щелчком
         self.stack.setCurrentWidget(self.pages[key])
         self.nav_buttons[key].setChecked(True)
+        self._move_pill(animated=previous is not None and self.isVisible())
         if key == "games":
             self.games.refresh()
         elif key == "history":
@@ -1523,17 +1534,53 @@ class MainWindow(QWidget):
         elif key == "more":
             self.more.refresh()
 
+    def _move_pill(self, *, animated: bool) -> None:
+        btn = self.nav.checkedButton()
+        if btn is None or btn.width() <= 0:
+            return
+        target = btn.geometry()
+        self._pill.lower()
+        if not animated or not self._pill.isVisible():
+            self._pill_anim.stop()
+            self._pill.setGeometry(target)
+            self._pill.show()
+            return
+        self._pill_anim.stop()
+        self._pill_anim.setStartValue(self._pill.geometry())
+        self._pill_anim.setEndValue(target)
+        self._pill_anim.start()
+
+    def showEvent(self, e: QShowEvent) -> None:  # noqa: N802
+        super().showEvent(e)
+        QTimer.singleShot(0, lambda: self._move_pill(animated=False))  # кнопки уже разложены
+
+    def resizeEvent(self, e: QResizeEvent) -> None:  # noqa: N802
+        super().resizeEvent(e)
+        if self._pill_anim.state() != QPropertyAnimation.State.Running:
+            self._move_pill(animated=False)
+
     def open(self, page: str | None = None) -> None:
         if page:
             self.show_page(page)
         else:
             current = next((k for k, w in self.pages.items() if w is self.stack.currentWidget()), "games")
             self.show_page(current)
+        appearing = not self.isVisible() or self.isMinimized()
         if self.isMinimized():
             self.showNormal()
+        if appearing:  # окно проявляется за доли секунды, а не выскакивает
+            self.setWindowOpacity(0.0)
         self.show()
         self.raise_()
         self.activateWindow()
+        if appearing:
+            anim = QPropertyAnimation(self, b"windowOpacity", self)
+            anim.setDuration(160)
+            anim.setStartValue(0.0)
+            anim.setEndValue(1.0)
+            anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+            anim.finished.connect(lambda: self.setWindowOpacity(1.0))
+            anim.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
         if self.ctl.account_status().linked and not self.decks.loaded:
             self.lexo.reload_decks()
 

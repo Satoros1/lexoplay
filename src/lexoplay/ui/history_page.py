@@ -53,6 +53,8 @@ from lexoplay.ui.widgets import Tile, button, clear, fade_in, label, page_shell
 
 SESSIONS_PAGE = 15  # сессий за раз, дальше «Показать ещё»
 LINES_FIRST = 15  # последних реплик в только что раскрытой сессии
+ROWS_NOW = 6  # столько реплик раскрытой сессии сразу, остальные следом между кадрами
+ROWS_STEP = 3
 LINES_PAGE = 40  # и сколько добавляет «Показать раньше»
 AUTO_OPEN = 3  # при поиске сразу раскрываем столько сессий с совпадениями
 STAR = "#D99A1E"
@@ -143,6 +145,12 @@ class SessionCard(QFrame):
         self.body_lay.setContentsMargins(0, 2, 0, 10)
         self.body_lay.setSpacing(0)
         lay.addWidget(self.body)
+        # реплики раскрытой сессии строим по нескольку за раз: окно не замирает на полсекунды
+        self._pending: list[tuple[StoredLine, str, bool, bool]] = []
+        self._rows_at = 0
+        self._feed = QTimer(self)
+        self._feed.setInterval(0)
+        self._feed.timeout.connect(self._feed_rows)
         self.opened = False
         self.set_open(opened)
 
@@ -180,7 +188,7 @@ class SessionCard(QFrame):
         self.body.setVisible(on)
         self.preview.setVisible(not on)
         if on:
-            self.render_body()
+            self.render_body(progressive=self.isVisible())
             if self.isVisible():
                 fade_in(self.body)  # раскрылась плавно, а не выскочила
         elif not self.preview.text():
@@ -204,7 +212,11 @@ class SessionCard(QFrame):
             limit=limit,
         )
 
-    def render_body(self) -> None:
+    def render_body(self, *, progressive: bool = False) -> None:
+        """progressive: сессию только что раскрыли, реплики достраиваются следом. Иначе (звёздочка,
+        разбор, «Перевести иначе») всё сразу: иначе список на миг стал бы короче и прокрутка прыгнула."""
+        self._feed.stop()
+        self._pending = []
         clear(self.body_lay)
         page = self.page
         lines, total = self._lines(self.limit)
@@ -230,8 +242,8 @@ class SessionCard(QFrame):
             box.addStretch(1)
             self.body_lay.addLayout(box)
         query = page.query if only_found or page.query else ""
-        for i, line in enumerate(lines):
-            self.body_lay.addWidget(self._row(line, query, last=i == len(lines) - 1, explained=line.norm in explained))
+        self._rows_at = self.body_lay.count()
+        self._pending = [(line, query, i == len(lines) - 1, line.norm in explained) for i, line in enumerate(lines)]
         foot = QHBoxLayout()
         foot.setContentsMargins(18, 8, 18, 0)
         foot.setSpacing(8)
@@ -245,6 +257,21 @@ class SessionCard(QFrame):
             foot.addWidget(whole)
         foot.addStretch(1)
         self.body_lay.addLayout(foot)
+        self._feed_rows(ROWS_NOW if progressive else len(self._pending))
+        if self._pending:
+            self._feed.start()
+
+    def _feed_rows(self, n: int = ROWS_STEP) -> None:
+        for line, query, last, explained in self._pending[:n]:
+            self.body_lay.insertWidget(self._rows_at, self._row(line, query, last=last, explained=explained))
+            self._rows_at += 1
+        self._pending = self._pending[n:]
+        if not self._pending:
+            self._feed.stop()
+
+    def flush(self) -> None:
+        """Достроить все реплики сразу (поиск по странице, тесты)."""
+        self._feed_rows(len(self._pending))
 
     def _row(self, line: StoredLine, query: str, *, last: bool, explained: bool = False) -> QFrame:
         page = self.page
@@ -345,6 +372,7 @@ class HistoryPage(QWidget):
         self.explains: dict[int, object] = {}  # разбор (Explanation) или текст ошибки; пока грузится, ключа нет
         self.saved: set[tuple[int, int]] = set()  # (реплика, пункт разбора), которые уже в словах
         # что умеет контроллер (в тестах и selftest он упрощённый)
+        self._stamp: tuple = ()
         self.can_explain = hasattr(ctl, "explain_history_line")
         self.can_retranslate = hasattr(ctl, "retranslate_history_line")
         self.can_save = hasattr(ctl, "save_phrase")
@@ -427,6 +455,10 @@ class HistoryPage(QWidget):
 
     def refresh(self) -> None:
         self._games()
+        stamp = (self.store.lines_stamp(), tuple(g.exe for g in self.store.list_games()))
+        if stamp == self._stamp and self.cards:
+            return  # с прошлого раза ничего не поменялось: вкладка как была (раскрытые сессии, прокрутка)
+        self._stamp = stamp
         self._reset()
 
     def _reset(self) -> None:

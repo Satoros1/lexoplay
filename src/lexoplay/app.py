@@ -130,6 +130,7 @@ WORDS_VKS = {0x1B, 0x0D, 0x25, 0x26, 0x27, 0x28, 0x52, 0x31, 0x32, 0x33, 0x34, 0
 KNOWN_CLICK_GRABBERS = {"dr1_us.exe", "dr2_us.exe"}
 FREEZE_GRACE_S = 1.5  # сколько после сворачивания игры фокус может прыгать сам (в окне)
 FREEZE_GRACE_FULL_S = 3.5  # полноэкранной: она ещё меняет режим экрана
+PREWARM_MS = 3000  # через столько после запуска окно LexoPlay собирается заранее (если игра не идёт)
 NAMES_TTL_S = 600.0  # имена игры пересобираем раз в 10 минут: новые реплики могли добавить новые
 CURSOR_TICK_MS = 150  # режим слов: как часто смотреть, не держит ли курсор игра
 BUSY_LIMIT_MS = 40_000  # перевод или чтение не вернулись за это время: снять «занято», чтобы F2 снова работал
@@ -393,6 +394,7 @@ class App(QObject):
     def start(self) -> None:
         log.info("LexoPlay %s, игр в списке: %s, Lexo: %s", __version__, len(self.store.list_games()), self.client.linked)
         self._clean_examples()
+        QTimer.singleShot(PREWARM_MS, self._prewarm_window)
         self.hotkeys.set_group("global", True)
         self._on_foreground(winapi.foreground_window())
         self.bridge_ocr_check()
@@ -525,6 +527,15 @@ class App(QObject):
             QGuiApplication.clipboard().setText(INSTALL_HINT)
 
     # ------------------------------------------------------------------ окно LexoPlay (контроллер)
+    def _prewarm_window(self) -> None:
+        """Окно LexoPlay собираем заранее, пока игра не запущена: потом оно открывается сразу,
+        без задержки на полсекунды. Если игра уже идёт, не трогаем: соберётся, когда откроют."""
+        if self.window is not None or self.active is not None or self.state != "idle" or self._closing:
+            return
+        t0 = time.perf_counter()
+        self.window = MainWindow(self)
+        log.debug("окно LexoPlay собрано заранее за %.0f мс", (time.perf_counter() - t0) * 1000)
+
     def show_window(self, page: str | None = None) -> None:
         if self.window is None:
             self.window = MainWindow(self)

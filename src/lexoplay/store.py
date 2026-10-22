@@ -668,6 +668,15 @@ class Store:
             )
             self._db.commit()
 
+    def lines_stamp(self) -> tuple:
+        """Поменялось ли что-то в истории реплик: новые, удалённые, звёздочки, переводы заново."""
+        with self._lock:
+            row = self._db.execute(
+                "SELECT COUNT(*), COALESCE(MAX(id), 0), COALESCE(MAX(seen_at), 0), COALESCE(SUM(star), 0), "
+                "COALESCE(SUM(LENGTH(translation)), 0) FROM lines"
+            ).fetchone()
+        return tuple(row)
+
     def words_stamp(self) -> tuple[int, int]:
         """(сколько слов, последний id): поменялось ли что-то в словах с прошлого раза."""
         with self._lock:

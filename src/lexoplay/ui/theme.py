@@ -144,7 +144,9 @@ QPushButton#link:hover {{ background: transparent; text-decoration: underline; }
 QPushButton#nav {{ text-align: left; border: none; border-radius: 8px; padding: 10px 12px; font-size: 10.5pt;
                   font-weight: 600; color: #4A4945; }}
 QPushButton#nav:hover {{ background: #E6E3DB; }}
-QPushButton#nav:checked {{ background: {GREEN_SOFT}; color: {GREEN_INK}; }}
+QPushButton#nav:checked {{ background: transparent; color: {GREEN_INK}; }}
+QPushButton#nav:checked:hover {{ background: transparent; }}
+QFrame#navPill {{ background: {GREEN_SOFT}; border-radius: 8px; }}
 QPushButton#hotkey {{ min-width: 92px; font-weight: 800; font-size: 10.5pt; background: {CARD};
                      border: 1px solid {BORDER_STRONG}; border-bottom-width: 2px; }}
 QPushButton#hotkey[capturing="true"] {{ border: 2px solid {GREEN}; color: {GREEN}; }}
