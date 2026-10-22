@@ -721,7 +721,11 @@ def _app_vs_game(out_dir: Path) -> Callable[[], tuple[str, object]]:
                 u32.SetCursorPos(int(lr.x + (hv.rect.x + hv.rect.w / 2) * lr.w) - 2, int(lr.y + (hv.rect.y + hv.rect.h / 2) * lr.h))
                 pump(lambda: False, 0.05)
                 u32.mouse_event(0x0001, 2, 0, 0, 0)  # движение, как от мыши
-            info["hover_picked"] = pump(lambda: app.word_layer.selection == [2], 3)
+            picked = pump(lambda: app.word_layer.selection == [2], 1.5)
+            if not picked and hv is not None:  # собранный exe бывает медленнее: ещё раз шевельнуть мышью над словом
+                u32.mouse_event(0x0001, -1, 0, 0, 0)
+                picked = pump(lambda: app.word_layer.selection == [2], 2.5)
+            info["hover_picked"] = picked
             if v is not None:
                 click(int(lr.x + (v.rect.x + v.rect.w / 2) * lr.w), int(lr.y + (v.rect.y + v.rect.h / 2) * lr.h))
             info["picked"] = pump(lambda: app.word_layer.selection == [3], 3)
