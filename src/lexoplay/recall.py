@@ -36,6 +36,32 @@ def variants(token: str) -> set[str]:
     return {token} | bases(token)
 
 
+def word_spans(sentence: str, selection: str, lemma: str | None = None) -> list[tuple[int, int]]:
+    """Где в примере само сохранённое слово (для жирного во вкладке «Слова»): (начало, конец).
+
+    Сначала ищем то, что выделяли в игре, как есть, потом словарную форму по словоформам
+    (сохранил lure, в примере lured out)."""
+    text = sentence.replace("\u2019", "'").replace("\u2018", "'")
+    sel = selection.strip()
+    toks = list(_TOKEN.finditer(text))
+    forms = [variants(t.group(0).lower()) for t in toks]
+
+    def by_forms(target: str | None) -> list[tuple[int, int]]:
+        parts = tokens(target or "")
+        for i in range(len(toks) - len(parts) + 1) if parts else ():
+            if all(parts[k] in forms[i + k] for k in range(len(parts))):
+                return [(toks[i].start(), toks[i + len(parts) - 1].end())]
+        return []
+
+    if lemma and len(tokens(lemma)) > 1 and (found := by_forms(lemma)):
+        return found  # выражение целиком: jump to conclusions, а не только jump to
+    if sel:
+        m = re.search(r"(?<![A-Za-z])" + re.escape(sel.replace("\u2019", "'")) + r"(?![A-Za-z])", text, re.I)
+        if m:
+            return [(m.start(), m.end())]
+    return by_forms(lemma) or by_forms(sel)
+
+
 def short_translation(text: str) -> str:
     """Первое значение: «жуткий, зловещий; странный» -> «жуткий»."""
     first = re.split(r"[;,/(\n]| - | – ", text, maxsplit=1)[0].strip(" .\t")

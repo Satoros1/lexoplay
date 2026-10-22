@@ -402,6 +402,11 @@ class FakeCtl:
     def saved_words(self):
         return self.store.words_list()
 
+    def word_line(self, w):
+        from lexoplay.store import StoredLine
+
+        return StoredLine(-w.id, w.exe, w.sentence or "", None, w.sentence or "", w.sentence_translation or "", "ru", 0.0, 0.0, 0)
+
     def delete_word(self, word_id):
         self.store.word_delete(word_id)
 
@@ -955,3 +960,61 @@ def test_overlay_strip_muted_under_word_mode(qapp):
     ov.mute_strip(False)
     assert ov.isVisible()
     ov.close()
+
+
+def test_words_page_search_sort_bold_and_explain(window, qapp):
+    from PySide6.QtWidgets import QLabel
+
+    from lexoplay.store import SavedWord
+
+    w, ctl = window
+    st = ctl.store
+    st.word_add(SavedWord("dr1_us.exe", "Danganronpa", "lured", "lure", "заманивать, приманивать",
+                          sentence="But the target had to be lured out.", sentence_translation="Но жертву пришлось выманить.",
+                          created_at=1_790_000_000))
+    st.word_add(SavedWord("dr1_us.exe", "Danganronpa", "rebuttal", "rebuttal", "опровержение",
+                          sentence="So, you have no rebuttal?", created_at=1_790_000_100, seen=0))
+    wid = st.word_add(SavedWord("dr1_us.exe", "Danganronpa", "Blameless", "blameless", "невиновный",
+                                sentence="She wasn't a blameless victim.", created_at=1_790_000_050))
+    st.words_seen([wid], 1_790_000_200)
+    w.show_page("words")
+    page = w.words
+
+    def texts():  # type: ignore[no-untyped-def]
+        return [lbl.text() for lbl in page.box.findChildren(QLabel)]
+
+    assert page.summary.text() == "Слов: 3"
+    lured = next(t for t in texts() if "target" in t)
+    assert "<b" in lured and ">lured</b>" in lured  # слово в примере жирное
+    assert any("Но жертву" in t for t in texts())  # перевод примера под ним
+    # поиск по-русски (ё = е, без регистра) и по-английски
+    page.search.setText("ЗАМАНИВ")
+    QTest.qWait(300)
+    assert [x.word for x in page.visible_words()] == ["lure"] and page.summary.text() == "Найдено: 1 из 3"
+    page.search.setText("victim")
+    QTest.qWait(300)
+    assert [x.word for x in page.visible_words()] == ["blameless"]
+    assert any("background-color" in t for t in texts())  # найденное подсвечено
+    page.search.setText("zzz")
+    QTest.qWait(300)
+    assert page.visible_words() == [] and "Ничего не нашлось" in page.summary.text()
+    page.search.clear()
+    QTest.qWait(300)
+    # сортировка
+    page.sort.setCurrentIndex(page.sort.findData("abc"))
+    page.sort.activated.emit(page.sort.currentIndex())
+    assert [x.word for x in page.visible_words()] == ["blameless", "lure", "rebuttal"]
+    page.sort.setCurrentIndex(page.sort.findData("seen"))
+    page.sort.activated.emit(page.sort.currentIndex())
+    assert page.visible_words()[0].word == "blameless"
+    page.sort.setCurrentIndex(page.sort.findData("new"))
+    page.sort.activated.emit(page.sort.currentIndex())
+    assert page.visible_words()[0].word == "rebuttal"
+    # разбор примера: как в «Истории», пункт разбора сохраняется в слова
+    target = next(x for x in page.visible_words() if x.word == "lure")
+    page.toggle_explain(target)
+    assert ctl.explained_lines and any("Торжественно" in t for t in texts())
+    from lexoplay.lookup import ExplainItem
+
+    page.save_phrase(target, 0, ExplainItem("class trial", "классный суд", ""))
+    assert any("сохранено" in t for t in texts())

@@ -215,3 +215,34 @@ def to_utterance(result: OcrResult, name_text: str | None = None, *, guess_speak
         if len(lines) >= 2 and _looks_like_name(first, lines[1:]):
             return Utterance(first.strip(), drop_repeats(lines[1:]))
     return Utterance(None, drop_repeats(lines))
+
+
+_OPENERS = "\"'“‘«([.…¿¡"
+
+
+def strip_speaker(text: str, speakers: list[str] | tuple[str, ...] | set[str] = ()) -> str:
+    """Пример к слову без имени говорящего впереди: «Kyoko Kirigiri: If the killer...»,
+    «Byakuya Togami So, you have no rebuttal?» (имя склеилось с репликой в 0.6.13 и раньше).
+
+    Имя без двоеточия убираем, только если это известный говорящий игры и после него
+    начинается новая фраза (с заглавной): «Makoto Naegi is here» остаётся как есть."""
+    t = text.strip()
+    names = sorted({s.strip() for s in speakers if s and s.strip()}, key=len, reverse=True)
+    low = t.casefold()
+    for name in names:
+        n = name.casefold()
+        if not low.startswith(n) or len(t) <= len(name) + 1:
+            continue
+        rest = t[len(name) :]
+        if rest[0] not in " :：":
+            continue
+        colon = rest.lstrip()[:1] in ":："
+        rest = rest.lstrip(" :：")
+        if rest and (colon or rest[0].isupper() or rest[0] in _OPENERS):
+            return rest
+    m = _NAME_COLON.match(t)
+    if m:  # «Old Man: Back again?»: подпись из двух-трёх слов с заглавной, даже если имени нет в списке
+        words = m.group(1).split()
+        if 2 <= len(words) <= 3 and all(w[:1].isupper() for w in words) and m.group(2)[:1].isupper():
+            return m.group(2).strip()
+    return t

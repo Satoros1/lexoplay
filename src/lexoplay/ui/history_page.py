@@ -45,6 +45,7 @@ from lexoplay.timeline import (
     time_range,
 )
 from lexoplay.ui import theme
+from lexoplay.ui.explainbox import HIGHLIGHT, explain_box, row_tool
 from lexoplay.ui.pages import copy_text
 from lexoplay.ui.theme import icon
 from lexoplay.ui.widgets import Tile, button, clear, label, page_shell
@@ -53,7 +54,6 @@ SESSIONS_PAGE = 15  # сессий за раз, дальше «Показать 
 LINES_FIRST = 15  # последних реплик в только что раскрытой сессии
 LINES_PAGE = 40  # и сколько добавляет «Показать раньше»
 AUTO_OPEN = 3  # при поиске сразу раскрываем столько сессий с совпадениями
-HIGHLIGHT = "#FBE3A0"
 STAR = "#D99A1E"
 
 
@@ -78,17 +78,6 @@ def text_label(text: str, name: str, query: str = "") -> QLabel:
     lbl.setText(rich(text, query))
     lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
     return lbl
-
-
-def row_tool(icon_name: str, tip: str, on_click: Callable[[], None], color: str = theme.MUTED, fill: str = "none") -> QToolButton:
-    b = QToolButton()
-    b.setObjectName("rowTool")
-    b.setIcon(icon(icon_name, color, 15, fill=fill))
-    b.setIconSize(QSize(15, 15))
-    b.setToolTip(tip)
-    b.setCursor(Qt.CursorShape.PointingHandCursor)
-    b.clicked.connect(on_click)
-    return b
 
 
 def session_text(title: str, s: PlaySession, lines: list[StoredLine]) -> str:
@@ -311,56 +300,11 @@ class SessionCard(QFrame):
 
     def _explain_panel(self, line: StoredLine) -> QWidget:
         page = self.page
-        box = QFrame()
-        box.setObjectName("explainBox")
-        lay = QVBoxLayout(box)
-        lay.setContentsMargins(12, 10, 12, 10)
-        lay.setSpacing(6)
-        got = page.explains.get(line.id)
-        if got is None:
-            lay.addWidget(label("Разбираю реплику…", "muted"))
-            return box
-        if isinstance(got, str):
-            lay.addWidget(label(got, "error", wrap=True))
-            return box
-        # сначала смысл реплики целиком, потом «дословно», потом трудные выражения
-        if got.summary:
-            lay.addWidget(label(got.summary, None, wrap=True))
-        if got.literal:
-            lay.addWidget(label(f"Дословно: {got.literal}", "muted", wrap=True))
-        for i, item in enumerate(got.items):
-            row = QHBoxLayout()
-            row.setSpacing(8)
-            col = QVBoxLayout()
-            col.setSpacing(1)
-            head = label("", None, wrap=True)
-            head.setTextFormat(Qt.TextFormat.RichText)
-            base = f' <span style="color:{theme.MUTED}">· {html.escape(item.base)}</span>' if item.base else ""
-            head.setText(f"<b>{html.escape(item.phrase)}</b>{base}: {html.escape(item.meaning)}")
-            col.addWidget(head)
-            if item.note:
-                col.addWidget(label(item.note, "version", wrap=True))
-            row.addLayout(col, 1)
-            if (line.id, i) in page.saved:
-                done = QLabel()
-                done.setPixmap(icon("check", theme.GREEN, 16).pixmap(16, 16))
-                done.setToolTip("Сохранено")
-                row.addWidget(done, 0, Qt.AlignmentFlag.AlignTop)
-            elif page.can_save:
-                row.addWidget(
-                    row_tool(
-                        "plus",
-                        "Сохранить в слова",
-                        lambda i=i, item=item: page.save_phrase(line, i, item.phrase, item.meaning, item.base),
-                        theme.GREEN,
-                    ),
-                    0,
-                    Qt.AlignmentFlag.AlignTop,
-                )
-            lay.addLayout(row)
-        if not got.items:
-            lay.addWidget(label("Отдельных трудных выражений здесь нет.", "muted"))
-        return box
+        return explain_box(
+            page.explains.get(line.id),
+            saved=lambda i: (line.id, i) in page.saved,
+            on_save=(lambda i, item: page.save_phrase(line, i, item.phrase, item.meaning, item.base)) if page.can_save else None,
+        )
 
     def _earlier(self) -> None:
         self.page.limits[self.s.key] = self.limit + LINES_PAGE

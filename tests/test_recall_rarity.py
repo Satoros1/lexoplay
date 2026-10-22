@@ -130,3 +130,16 @@ def test_store_counts_word_encounters(tmp_path):
     st = Store(tmp_path / "s.db")
     assert [x.seen for x in st.words_list()] == [0, 0]
     st.close()
+
+
+def test_word_spans_for_bold_examples():
+    from lexoplay.recall import word_spans
+
+    def bold(sentence, selection, lemma=None):  # type: ignore[no-untyped-def]
+        return [sentence[a:b] for a, b in word_spans(sentence, selection, lemma)]
+
+    assert bold("The target had to be lured out.", "lured", "lure") == ["lured"]
+    assert bold("He gave up on it.", "", "give up") == ["gave up"]
+    assert bold("She wasn't a blameless victim.", "Blameless") == ["blameless"]
+    assert bold("Don't jump to conclusions.", "jump to", "jump to conclusions") == ["jump to conclusions"]
+    assert bold("Nothing here.", "eerie", "eerie") == []

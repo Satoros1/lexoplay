@@ -75,7 +75,7 @@ from lexoplay.rarity import LEVEL_NAMES, LEVELS
 from lexoplay.recall import RecallChip, Recaller, RecallIndex
 from lexoplay.session import GameSession, Sessions
 from lexoplay.store import Game, SavedWord, Store, StoredLine, Task
-from lexoplay.textproc import Utterance, to_utterance
+from lexoplay.textproc import Utterance, strip_speaker, to_utterance
 from lexoplay.translate import (
     AnthropicTranslator,
     ContextLine,
@@ -84,6 +84,7 @@ from lexoplay.translate import (
     TranslationError,
     Translator,
     check_key,
+    drop_label,
     pick_source,
 )
 from lexoplay.ui.freeze_frame import FreezeFrame
@@ -390,6 +391,7 @@ class App(QObject):
     # ------------------------------------------------------------------ запуск и выход
     def start(self) -> None:
         log.info("LexoPlay %s, игр в списке: %s, Lexo: %s", __version__, len(self.store.list_games()), self.client.linked)
+        self._clean_examples()
         self.hotkeys.set_group("global", True)
         self._on_foreground(winapi.foreground_window())
         self.bridge_ocr_check()
@@ -2676,6 +2678,42 @@ class App(QObject):
         ctx.views = self._line_views(ctx.line)
         self.word_layer.set_views(ctx.views)
 
+    def _clean_example(self, exe: str, sentence: str, translation: str | None) -> tuple[str, str | None]:
+        """Пример к слову без имени говорящего («Byakuya Togami So, you...») ни в оригинале, ни в переводе."""
+        clean = strip_speaker(sentence, self.store.line_speakers(exe, 300) if exe else [])
+        return clean, drop_label(translation, clean) if translation else translation
+
+    def _clean_examples(self) -> None:
+        """Слова, сохранённые до 0.6.14: в примерах бывало имя говорящего. Чистим один раз."""
+        if self.store.get_meta("examples_clean") == "1":
+            return
+        fixed = 0
+        try:
+            for w in self.store.words_list(limit=100_000):
+                if not w.sentence:
+                    continue
+                sentence, translation = self._clean_example(w.exe, w.sentence, w.sentence_translation)
+                if (sentence, translation) != (w.sentence, w.sentence_translation):
+                    self.store.word_set_example(w.id, sentence, translation)
+                    fixed += 1
+            self.store.set_meta("examples_clean", "1")
+        except Exception:
+            log.exception("не получилось почистить примеры к словам")
+        if fixed:
+            log.info("примеры к словам без имени говорящего: %s", fixed)
+
+    def word_line(self, w: SavedWord) -> StoredLine:
+        """Реплика, из которой слово: для разбора во вкладке «Слова» (тот же, что в «Истории»)."""
+        lang = self.settings.target_lang
+        norm = normalize_text(w.sentence or "")
+        found = self.store.line_find(w.exe, lang, norm) if w.exe and norm else None
+        if found is not None:
+            return found
+        return StoredLine(
+            id=-w.id, exe=w.exe or "", norm=norm, speaker=None, source=w.sentence or "",
+            translation=w.sentence_translation or "", lang=lang, created_at=w.created_at, seen_at=w.created_at, hits=0,
+        )  # fmt: skip
+
     def _store_word(
         self,
         exe: str,
@@ -2691,6 +2729,7 @@ class App(QObject):
         sentence_translation: str | None,
         marked: str | None = None,
     ) -> None:
+        sentence, sentence_translation = self._clean_example(exe, sentence, sentence_translation)
         game = self.store.get_game(exe)
         linked = self.client.linked
         self.store.word_add(

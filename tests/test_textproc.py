@@ -128,3 +128,18 @@ def test_interface_labels_are_not_part_of_the_line():
     assert to_utterance(ocr("YOU'RE NOT LEAVING", "THIS ROOM ALIVE")).text == "YOU'RE NOT LEAVING THIS ROOM ALIVE"
     # крик с восклицанием: это реплика
     assert to_utterance(ocr("Mira", "And then I said", "WHAT?!")).text == "And then I said WHAT?!"
+
+
+def test_strip_speaker_from_saved_examples():
+    from lexoplay.textproc import strip_speaker
+
+    sp = ["Byakuya Togami", "Makoto Naegi", "Kyoko Kirigiri", "Celeste"]
+    assert strip_speaker("Byakuya Togami So, you have no rebuttal?", sp) == "So, you have no rebuttal?"
+    assert strip_speaker("Kyoko Kirigiri: If the killer had been on cleaning duty", sp) == "If the killer had been on cleaning duty"
+    assert strip_speaker("Celeste: But for that to work,", sp) == "But for that to work,"
+    assert strip_speaker("Old Man: Back again?") == "Back again?"
+    # имя как часть фразы и обычные двоеточия не трогаем
+    assert strip_speaker("Makoto Naegi is here.", sp) == "Makoto Naegi is here."
+    assert strip_speaker("Celeste...? Where are you?", sp) == "Celeste...? Where are you?"
+    assert strip_speaker("Note: Keep out.") == "Note: Keep out."
+    assert strip_speaker("An insult, obviously...", sp) == "An insult, obviously..."

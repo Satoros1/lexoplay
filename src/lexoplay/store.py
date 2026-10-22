@@ -660,6 +660,14 @@ class Store:
             rows = self._db.execute(sql, (limit,)).fetchall()
         return [self._word(r) for r in rows]
 
+    def word_set_example(self, word_id: int, sentence: str | None, sentence_translation: str | None) -> None:
+        with self._lock:
+            self._db.execute(
+                "UPDATE words SET sentence = ?, sentence_translation = ? WHERE id = ?",
+                (sentence, sentence_translation, word_id),
+            )
+            self._db.commit()
+
     def words_stamp(self) -> tuple[int, int]:
         """(сколько слов, последний id): поменялось ли что-то в словах с прошлого раза."""
         with self._lock:

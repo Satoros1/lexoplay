@@ -7,19 +7,22 @@
 
 from __future__ import annotations
 
+import html
 import time
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Protocol
 
-from PySide6.QtCore import QSize, Qt
+from PySide6.QtCore import QSize, Qt, QTimer
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
+    QComboBox,
     QDialog,
     QFileDialog,
     QFrame,
     QHBoxLayout,
+    QLabel,
     QLineEdit,
     QMenu,
     QPushButton,
@@ -29,8 +32,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from lexoplay.store import Game, SavedWord, Store, StoredLine
+from lexoplay.recall import word_spans
+from lexoplay.store import Game, SavedWord, Store, StoredLine, fold
 from lexoplay.ui import theme
+from lexoplay.ui.explainbox import HIGHLIGHT, explain_box, row_tool
 from lexoplay.ui.theme import icon
 from lexoplay.ui.widgets import button, card, clear, label, page_shell
 
@@ -89,12 +94,82 @@ def times(n: int) -> str:
     return f"{n} {tail}"
 
 
+WORDS_PAGE = 100  # столько слов рисуем сразу, дальше по кнопке
+SORTS = (("new", "Сначала новые"), ("seen", "Чаще встречаются"), ("abc", "По алфавиту"))
+
+
+def word_matches(w: SavedWord, query: str) -> bool:
+    """Поиск по слову, переводу и примеру: по-английски и по-русски, без регистра, ё = е."""
+    q = fold(query.strip())
+    if not q:
+        return True
+    hay = " \n".join(
+        x or "" for x in (w.word, w.selection, w.translation, w.sentence, w.sentence_translation, w.game)
+    )
+    return q in fold(hay)
+
+
+def sort_words(words: list[SavedWord], how: str) -> list[SavedWord]:
+    if how == "seen":
+        return sorted(words, key=lambda w: (-w.seen, -w.created_at, -w.id))
+    if how == "abc":
+        return sorted(words, key=lambda w: (fold(w.word), -w.id))
+    return sorted(words, key=lambda w: (-w.created_at, -w.id))
+
+
+def marked_html(text: str, bold: list[tuple[int, int]], query: str = "") -> str:
+    """Текст для QLabel: слово жирным и зелёным, совпадения с поиском подсвечены."""
+    marks = [0] * (len(text) + 1)  # 1: жирное, 2: найденное
+    for a, b in bold:
+        for i in range(max(0, a), min(len(text), b)):
+            marks[i] |= 1
+    q = fold(query.strip())
+    low = fold(text)
+    if q and len(low) == len(text):
+        i = 0
+        while (j := low.find(q, i)) >= 0:
+            for k in range(j, j + len(q)):
+                marks[k] |= 2
+            i = j + len(q)
+    out: list[str] = []
+    i = 0
+    while i < len(text):
+        m = marks[i]
+        j = i
+        while j < len(text) and marks[j] == m:
+            j += 1
+        chunk = html.escape(text[i:j])
+        if m & 2:
+            chunk = f'<span style="background-color:{HIGHLIGHT}">{chunk}</span>'
+        if m & 1:
+            chunk = f'<b style="color:{theme.GREEN_INK}">{chunk}</b>'
+        out.append(chunk)
+        i = j
+    return "".join(out).replace("\n", "<br>")
+
+
+def rich_label(text: str, name: str | None) -> QLabel:
+    lbl = label("", name, wrap=True)
+    lbl.setTextFormat(Qt.TextFormat.RichText)
+    lbl.setText(text)
+    lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+    return lbl
+
+
 class WordsPage(QWidget):
     def __init__(self, ctl: Ctl, linked: Callable[[], bool], hotkey: Callable[[], str]) -> None:
         super().__init__()
         self.ctl = ctl
         self._linked = linked
         self._hotkey = hotkey
+        self._words: list[SavedWord] = []
+        self.shown = WORDS_PAGE
+        self.explain_open: set[int] = set()  # слова с раскрытым разбором примера
+        self.explains: dict[int, object] = {}  # разбор (Explanation) или текст ошибки; пока грузится, ключа нет
+        self.saved: set[tuple[int, int]] = set()  # (слово, пункт разбора), которые уже сохранены
+        self.notes: dict[int, str] = {}
+        self.can_explain = hasattr(ctl, "explain_history_line") and hasattr(ctl, "word_line")
+        self.can_save = hasattr(ctl, "save_phrase") and hasattr(ctl, "word_line")
         scroll, lay, actions = page_shell("Слова", "Слова, которые ты сохранил в играх.")
         self.export_btn = button(" Экспорт", None, "download")
         menu = QMenu(self.export_btn)
@@ -107,18 +182,47 @@ class WordsPage(QWidget):
         outer.addWidget(scroll)
         self.note = label("", "muted", wrap=True)
         lay.addWidget(self.note)
+
+        bar = QHBoxLayout()
+        bar.setSpacing(8)
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Поиск: слово, перевод или пример, по-английски и по-русски")
+        self.search.setClearButtonEnabled(True)
+        self.search.addAction(icon("search", theme.MUTED, 16), QLineEdit.ActionPosition.LeadingPosition)
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(200)
+        self._search_timer.timeout.connect(self._filter)
+        self.search.textChanged.connect(lambda _t: self._search_timer.start())
+        self.sort = QComboBox()
+        for code, text in SORTS:
+            self.sort.addItem(text, code)
+        self.sort.activated.connect(lambda _i: self._filter())
+        bar.addWidget(self.search, 1)
+        bar.addWidget(self.sort)
+        lay.addLayout(bar)
+        self.summary = label("", "muted")
+        lay.addWidget(self.summary)
+
         self.box, self.box_lay = card()
         self.box_lay.setContentsMargins(0, 4, 0, 4)
         self.box_lay.setSpacing(0)
         lay.addWidget(self.box)
+        self.more = button("Показать ещё")
+        self.more.clicked.connect(self._more)
+        lay.addWidget(self.more, 0, Qt.AlignmentFlag.AlignHCenter)
         self.status = label("", "ok", wrap=True)
         self.status.hide()
         lay.addWidget(self.status)
         lay.addStretch(1)
 
+    @property
+    def query(self) -> str:
+        return self.search.text().strip()
+
     def refresh(self) -> None:
-        words = self.ctl.saved_words()
-        local = sum(1 for w in words if not w.lexo)
+        self._words = self.ctl.saved_words()
+        local = sum(1 for w in self._words if not w.lexo)
         if self._linked():
             text = "Слова уходят в карточки Lexo. Здесь копия: её можно выгрузить в Anki или таблицу."
             if local:
@@ -129,49 +233,117 @@ class WordsPage(QWidget):
                 "и «+ в мои слова». Когда привяжешь Lexo, они сами станут карточками."
             )
         self.note.setText(text)
-        self.export_btn.setEnabled(bool(words))
+        self.export_btn.setEnabled(bool(self._words))
+        self._render()
+
+    def _filter(self) -> None:
+        self.shown = WORDS_PAGE
+        self._render()
+
+    def _more(self) -> None:
+        self.shown += WORDS_PAGE
+        self._render()
+
+    def visible_words(self) -> list[SavedWord]:
+        found = [w for w in self._words if word_matches(w, self.query)]
+        return sort_words(found, self.sort.currentData() or "new")
+
+    def _render(self) -> None:
         clear(self.box_lay)
+        words = self.visible_words()
+        total = len(self._words)
+        if self.query:
+            self.summary.setText(f"Найдено: {len(words)} из {total}" if words else f"Ничего не нашлось среди {total} слов")
+        else:
+            self.summary.setText(f"Слов: {total}" if total else "")
+        self.summary.setVisible(bool(total))
+        self.search.setVisible(bool(total))
+        self.sort.setVisible(bool(total))
         if not words:
             empty = QWidget()
             el = QVBoxLayout(empty)
             el.setContentsMargins(18, 14, 18, 14)
-            el.addWidget(label("Слов пока нет.", "muted"))
+            el.addWidget(label("Слов пока нет." if not total else "Попробуй другое слово или перевод.", "muted"))
             self.box_lay.addWidget(empty)
-        for i, w in enumerate(words):
-            self.box_lay.addWidget(self._row(w, last=i == len(words) - 1))
+        page = words[: self.shown]
+        for i, w in enumerate(page):
+            self.box_lay.addWidget(self._row(w, last=i == len(page) - 1))
+        self.more.setVisible(len(words) > self.shown)
 
     def _row(self, w: SavedWord, *, last: bool) -> QFrame:
+        q = self.query
         row = QFrame()
         row.setObjectName("rowLast" if last else "row")
-        lay = QHBoxLayout(row)
-        lay.setContentsMargins(18, 10, 10, 10)
-        lay.setSpacing(12)
-        col = QVBoxLayout()
+        col = QVBoxLayout(row)
+        col.setContentsMargins(18, 10, 12, 10)
         col.setSpacing(3)
         top = QHBoxLayout()
         top.setSpacing(8)
-        top.addWidget(selectable(label(w.word, "title")))
+        top.addWidget(rich_label(marked_html(w.word, [], q), "title"))
         extra = " · ".join(p for p in (f"/{w.ipa}/" if w.ipa else "", w.pos or "") if p)
         if extra:
             top.addWidget(label(extra, "muted"))
         top.addWidget(label("в Lexo" if w.lexo else "только здесь", "chip" if w.lexo else "chipGray"))
         top.addStretch(1)
+        if self.can_explain and w.sentence:
+            opened = w.id in self.explain_open
+            top.addWidget(
+                row_tool(
+                    "lightbulb",
+                    "Свернуть разбор" if opened else "Разбор примера: смысл, сленг, идиомы (как F7 в игре)",
+                    lambda: self.toggle_explain(w),
+                    theme.GREEN if opened else theme.MUTED,
+                )
+            )
+        top.addWidget(row_tool("copy", "Скопировать слово и перевод", lambda: copy_text(f"{w.word} - {w.translation or ''}")))
+        top.addWidget(row_tool("trash", "Удалить из списка", lambda: self._delete(w.id)))
         col.addLayout(top)
         if w.translation:
-            col.addWidget(selectable(label(w.translation, wrap=True)))
+            col.addWidget(rich_label(marked_html(w.translation, [], q), None))
         if w.sentence:
-            col.addWidget(selectable(label(w.sentence, "muted", wrap=True)))
+            col.addWidget(rich_label(marked_html(w.sentence, word_spans(w.sentence, w.selection, w.lemma), q), "muted"))
+            if w.sentence_translation:
+                col.addWidget(rich_label(marked_html(w.sentence_translation, [], q), "version"))
         meta = [w.game or "", when(w.created_at) if w.created_at else ""]
         if w.seen:
             meta.append(f"снова встретилось {times(w.seen)}")
         col.addWidget(label(" · ".join(p for p in meta if p), "version"))
-        lay.addLayout(col, 1)
-        tools = QVBoxLayout()
-        tools.addWidget(tool("copy", "Скопировать слово и перевод", lambda: copy_text(f"{w.word} - {w.translation or ''}")))
-        tools.addWidget(tool("trash", "Удалить из списка", lambda: self._delete(w.id)))
-        tools.addStretch(1)
-        lay.addLayout(tools)
+        if w.id in self.notes:
+            col.addWidget(label(self.notes[w.id], "ok", wrap=True))
+        if self.can_explain and w.id in self.explain_open:
+            col.addSpacing(4)
+            col.addWidget(
+                explain_box(
+                    self.explains.get(w.id),
+                    saved=lambda i: (w.id, i) in self.saved,
+                    on_save=(lambda i, item: self.save_phrase(w, i, item)) if self.can_save else None,
+                )
+            )
         return row
+
+    def toggle_explain(self, w: SavedWord) -> None:
+        if w.id in self.explain_open:
+            self.explain_open.discard(w.id)
+            self._render()
+            return
+        self.explain_open.add(w.id)
+        if isinstance(self.explains.get(w.id), str):
+            self.explains.pop(w.id)  # прошлая ошибка: пробуем ещё раз
+        if w.id not in self.explains:
+
+            def done(exp, err, word_id=w.id):  # type: ignore[no-untyped-def]
+                self.explains[word_id] = exp if err is None else err
+                self._render()
+
+            self.ctl.explain_history_line(self.ctl.word_line(w), done)  # type: ignore[attr-defined]
+        self._render()
+
+    def save_phrase(self, w: SavedWord, index: int, item: object) -> None:
+        line = self.ctl.word_line(w)  # type: ignore[attr-defined]
+        where = self.ctl.save_phrase(line, item.phrase, item.meaning, item.base)  # type: ignore[attr-defined]
+        self.saved.add((w.id, index))
+        self.notes[w.id] = f"«{item.base or item.phrase}» сохранено в {where}"  # type: ignore[attr-defined]
+        self.refresh()
 
     def _delete(self, word_id: int) -> None:
         self.ctl.delete_word(word_id)
