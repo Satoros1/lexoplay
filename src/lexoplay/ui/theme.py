@@ -192,8 +192,15 @@ QMenu {{ background: {CARD}; border: 1px solid {BORDER}; border-radius: 8px; pad
 QMenu::item {{ padding: 7px 18px; border-radius: 6px; font-size: 10pt; }}
 QMenu::item:selected {{ background: {GREEN_SOFT}; color: {INK}; }}
 QMenu::separator {{ height: 1px; background: {BORDER}; margin: 4px 6px; }}
-QScrollBar:vertical {{ background: transparent; width: 10px; margin: 2px; }}
-QScrollBar::handle:vertical {{ background: #D6D3CA; border-radius: 4px; min-height: 30px; }}
+QScrollBar:vertical {{ background: transparent; width: 12px; margin: 2px 3px; }}
+QScrollBar:vertical:hover {{ margin: 2px 1px; }}
+QScrollBar::handle:vertical {{ background: #D6D3CA; border-radius: 3px; min-height: 30px; }}
+QScrollBar::handle:vertical:hover {{ background: #BDB9AE; border-radius: 4px; }}
+QScrollBar::handle:vertical:pressed {{ background: #A9A59A; }}
+QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
+QToolButton#toTop {{ background: {CARD}; border: 1px solid {BORDER_STRONG}; border-radius: 19px; }}
+QToolButton#toTop:hover {{ background: {GREEN_SOFT}; border-color: {GREEN}; }}
+QFrame#stickyHost {{ background: {BG}; border: none; border-bottom: 1px solid {BORDER}; }}
 QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; }}
 QToolTip {{ background: {INK}; color: white; border: none; padding: 6px 8px; border-radius: 6px; }}
 QDialog {{ background: {BG}; }}

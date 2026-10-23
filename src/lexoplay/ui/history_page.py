@@ -55,6 +55,7 @@ SESSIONS_PAGE = 15  # сессий за раз, дальше «Показать 
 LINES_FIRST = 15  # последних реплик в только что раскрытой сессии
 ROWS_NOW = 6  # столько реплик раскрытой сессии сразу, остальные следом между кадрами
 ROWS_STEP = 3
+SCROLL_AFTER_MS = 180  # раскрытая сессия к этому времени достроена: можно докрутить к ней
 LINES_PAGE = 40  # и сколько добавляет «Показать раньше»
 AUTO_OPEN = 3  # при поиске сразу раскрываем столько сессий с совпадениями
 STAR = "#D99A1E"
@@ -177,7 +178,15 @@ class SessionCard(QFrame):
 
     def toggle(self) -> None:
         self.set_open(not self.opened)
+        if self.opened:  # раскрыли внизу: докрутить, чтобы реплики было видно (когда достроятся)
+            QTimer.singleShot(SCROLL_AFTER_MS, self._scroll_to_me)
 
+    def _scroll_to_me(self) -> None:
+        try:
+            if self.opened and self.isVisible():
+                self.page.scroll.ensure_visible(self)
+        except RuntimeError:
+            pass  # сессию уже перестроили (поиск, удаление): докручивать не к чему
     def set_open(self, on: bool) -> None:
         self.opened = on
         if on:
@@ -386,7 +395,9 @@ class HistoryPage(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(scroll)
 
-        bar = QHBoxLayout()
+        self.toolbar = QWidget()  # поиск прилипает к верху, когда список прокручен ниже него
+        bar = QHBoxLayout(self.toolbar)
+        bar.setContentsMargins(0, 0, 0, 0)
         bar.setSpacing(8)
         self.game = QComboBox()
         self.game.setMinimumContentsLength(14)
@@ -419,7 +430,8 @@ class HistoryPage(QWidget):
         bar.addWidget(self.search, 1)
         bar.addWidget(self.star_btn)
         bar.addWidget(clear_btn)
-        lay.addLayout(bar)
+        lay.addWidget(self.toolbar)
+        self.scroll.set_sticky(self.toolbar)
 
         self.summary = label("", "muted")
         lay.addWidget(self.summary)

@@ -7,13 +7,14 @@ import hashlib
 from PySide6.QtCore import (
     QAbstractAnimation,
     QEasingCurve,
+    QPoint,
     QPropertyAnimation,
     QRectF,
     QSize,
     Qt,
     QVariantAnimation,
 )
-from PySide6.QtGui import QColor, QFont, QPainter, QWheelEvent
+from PySide6.QtGui import QColor, QFont, QKeyEvent, QPainter, QResizeEvent, QWheelEvent
 from PySide6.QtWidgets import (
     QAbstractButton,
     QApplication,
@@ -25,6 +26,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSlider,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -146,12 +148,17 @@ def crossfade(container: QWidget, old: QWidget | None, ms: int = 160) -> None:
 
 
 class SmoothScrollArea(QScrollArea):
-    """Прокрутка колесом мыши плавная: за ~0,2 с, а не прыжком на три строки за кадр.
+    """Прокрутка страницы окна LexoPlay: плавная и удобная.
 
-    Тачпад и прокрутка с Ctrl/Shift идут как обычно: тачпад и так присылает мелкие шаги."""
+    - колесо мыши крутит за ~0,2 с, а не прыжком на три строки за кадр (тачпад и Ctrl/Shift как обычно);
+    - PageUp/PageDown, Home/End и стрелки тоже плавно;
+    - пролистал далеко вниз: справа снизу кнопка «наверх»;
+    - панель поиска (set_sticky) не уезжает вместе со списком, а прилипает к верху;
+    - ensure_visible: плавно докрутить, чтобы раскрытое (сессия, разбор) было видно целиком."""
 
     STEP = 120  # пикселей за щелчок колеса (при трёх строках за щелчок в настройках Windows)
     DURATION = 230
+    KEY_STEP = 70  # стрелка вверх или вниз
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -161,7 +168,27 @@ class SmoothScrollArea(QScrollArea):
         self._anim.setEasingCurve(QEasingCurve.Type.OutCubic)
         self._anim.valueChanged.connect(lambda v: self.verticalScrollBar().setValue(round(float(v))))
         self._anim.finished.connect(self._done)
+        self._top = QToolButton(self)
+        self._top.setObjectName("toTop")
+        self._top.setIcon(icon("chevron-up", theme.INK, 18))
+        self._top.setIconSize(QSize(18, 18))
+        self._top.setToolTip("Наверх (Home)")
+        self._top.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._top.setFixedSize(38, 38)
+        self._top.clicked.connect(lambda: self.scroll_to(0))
+        self._top.hide()
+        self._top_fx = QGraphicsOpacityEffect(self._top)
+        self._top.setGraphicsEffect(self._top_fx)
+        self._top_anim = QPropertyAnimation(self._top_fx, b"opacity", self)
+        self._top_anim.setDuration(160)
+        self._top_anim.finished.connect(self._top_faded)
+        self._sticky: QWidget | None = None
+        self._sticky_host: QFrame | None = None
+        self._placeholder: QWidget | None = None
+        self.verticalScrollBar().valueChanged.connect(self._scrolled)
+        self.verticalScrollBar().rangeChanged.connect(lambda _a, _b: self._scrolled())
 
+    # --- плавная прокрутка
     def _done(self) -> None:
         self._target = None
 
@@ -169,14 +196,41 @@ class SmoothScrollArea(QScrollArea):
         bar = self.verticalScrollBar()
         running = self._anim.state() == QAbstractAnimation.State.Running and self._target is not None
         base = self._target if running else float(bar.value())
-        target = max(float(bar.minimum()), min(float(bar.maximum()), base + dy))  # type: ignore[operator]
+        self._animate_to(base + dy, self.DURATION)  # type: ignore[operator]
+
+    def scroll_to(self, value: float, ms: int | None = None) -> None:
+        """Плавно к месту: чем дальше, тем чуть дольше (но не дольше полусекунды)."""
+        bar = self.verticalScrollBar()
+        dist = abs(value - bar.value())
+        self._animate_to(value, ms if ms is not None else int(min(480, 200 + dist / 10)))
+
+    def _animate_to(self, value: float, ms: int) -> None:
+        bar = self.verticalScrollBar()
+        running = self._anim.state() == QAbstractAnimation.State.Running
+        target = max(float(bar.minimum()), min(float(bar.maximum()), value))
         if target == bar.value() and not running:
             return
         self._target = target
         self._anim.stop()
+        self._anim.setDuration(ms)
         self._anim.setStartValue(float(bar.value()))
         self._anim.setEndValue(target)
         self._anim.start()
+
+    def ensure_visible(self, widget: QWidget, margin: int = 12) -> None:
+        """Раскрыли что-то внизу (сессию, разбор): докрутить, чтобы его было видно, не теряя его верх."""
+        content = self.widget()
+        if content is None or not widget.isVisible():
+            return
+        top = widget.mapTo(content, QPoint(0, 0)).y()
+        bottom = top + widget.height()
+        bar = self.verticalScrollBar()
+        cover = self._sticky_host.height() if self._sticky_host is not None and self._sticky_host.isVisible() else 0
+        view_top, view_h = bar.value() + cover, self.viewport().height() - cover
+        if top < view_top:
+            self.scroll_to(top - margin - cover)
+        elif bottom > view_top + view_h:
+            self.scroll_to(min(top - margin - cover, bottom - view_h - cover + margin))
 
     def wheelEvent(self, e: QWheelEvent) -> None:  # noqa: N802
         dy = e.angleDelta().y()
@@ -188,6 +242,133 @@ class SmoothScrollArea(QScrollArea):
         lines = max(1, QApplication.wheelScrollLines())
         self.scroll_by(-dy / 120 * self.STEP * lines / 3)
         e.accept()
+
+    def keyPressEvent(self, e: QKeyEvent) -> None:  # noqa: N802
+        page = self.viewport().height() * 0.85
+        key = e.key()
+        if key == Qt.Key.Key_PageDown:
+            self.scroll_by(page)
+        elif key == Qt.Key.Key_PageUp:
+            self.scroll_by(-page)
+        elif key == Qt.Key.Key_Down:
+            self.scroll_by(self.KEY_STEP)
+        elif key == Qt.Key.Key_Up:
+            self.scroll_by(-self.KEY_STEP)
+        elif key == Qt.Key.Key_Home:
+            self.scroll_to(0)
+        elif key == Qt.Key.Key_End:
+            self.scroll_to(self.verticalScrollBar().maximum())
+        else:
+            super().keyPressEvent(e)
+            return
+        e.accept()
+
+    # --- кнопка «наверх» и прилипающая панель
+    def _scrolled(self) -> None:
+        bar = self.verticalScrollBar()
+        self._show_top(bar.value() > max(600, self.viewport().height() * 1.2))
+        self._update_sticky()
+
+    def _show_top(self, on: bool) -> None:
+        showing = self._top.isVisible() and self._top_anim.endValue() != 0.0  # видна и не тает
+        if on == showing:
+            return
+        if on:
+            self._place_top()
+            self._top.show()
+            self._top.raise_()
+        self._top_anim.stop()
+        self._top_anim.setStartValue(self._top_fx.opacity() if self._top.isVisible() else 0.0)
+        self._top_anim.setEndValue(1.0 if on else 0.0)
+        self._top_anim.start()
+
+    def _top_faded(self) -> None:
+        if self._top_anim.endValue() == 0.0:
+            self._top.hide()
+
+    def _place_top(self) -> None:
+        vp = self.viewport().geometry()
+        self._top.move(vp.right() - self._top.width() - 18, vp.bottom() - self._top.height() - 18)
+
+    def resizeEvent(self, e: QResizeEvent) -> None:  # noqa: N802
+        super().resizeEvent(e)
+        self._place_top()
+        if self._sticky_host is not None and self._sticky_host.isVisible():
+            self._place_sticky()
+
+    def set_sticky(self, bar: QWidget, margins: tuple[int, int, int, int] = (32, 10, 32, 10)) -> None:
+        """bar (панель поиска) прилипает к верху, когда страницу прокрутили ниже неё.
+
+        Сама панель переезжает наверх (а на её месте пустое место той же высоты), поэтому
+        фокус и набранный текст в поиске не теряются."""
+        self._sticky = bar
+        host = QFrame(self)
+        host.setObjectName("stickyHost")
+        hl = QVBoxLayout(host)
+        hl.setContentsMargins(*margins)
+        host.hide()
+        self._sticky_host = host
+        self._placeholder = QWidget()
+        self._placeholder.hide()
+
+    def _content_layout(self) -> QVBoxLayout | None:
+        content = self.widget()
+        lay = content.layout() if content is not None else None
+        return lay if isinstance(lay, QVBoxLayout) else None
+
+    def _update_sticky(self) -> None:
+        bar, host, ph, lay = self._sticky, self._sticky_host, self._placeholder, self._content_layout()
+        if bar is None or host is None or ph is None or lay is None:
+            return
+        if not host.isVisible():
+            if bar.isVisible() and bar.mapTo(self.viewport(), QPoint(0, 0)).y() < 0:
+                self._stick(bar, host, ph, lay)
+        elif ph.mapTo(self.viewport(), QPoint(0, 0)).y() >= 0:
+            self._unstick(bar, host, ph, lay)
+
+    @staticmethod
+    def _focus_in(bar: QWidget) -> QWidget | None:
+        w = QApplication.focusWidget()
+        return w if w is not None and (w is bar or bar.isAncestorOf(w)) else None
+
+    def _stick(self, bar: QWidget, host: QFrame, ph: QWidget, lay: QVBoxLayout) -> None:
+        focus = self._focus_in(bar)
+        idx = lay.indexOf(bar)
+        ph.setFixedHeight(bar.height())
+        lay.insertWidget(idx, ph)
+        ph.show()
+        host.layout().addWidget(bar)  # type: ignore[union-attr]
+        bar.show()
+        self._place_sticky()
+        host.show()
+        host.raise_()
+        self._top.raise_()
+        if focus is not None:
+            focus.setFocus()
+        fade_in(host, 140)
+
+    def _unstick(self, bar: QWidget, host: QFrame, ph: QWidget, lay: QVBoxLayout) -> None:
+        focus = self._focus_in(bar)
+        idx = lay.indexOf(ph)
+        lay.insertWidget(idx, bar)
+        bar.show()
+        lay.removeWidget(ph)
+        ph.hide()
+        host.hide()
+        if focus is not None:
+            focus.setFocus()
+
+    def _place_sticky(self) -> None:
+        host, bar = self._sticky_host, self._sticky
+        if host is None or bar is None:
+            return
+        vp = self.viewport().geometry()
+        m = host.layout().contentsMargins()  # type: ignore[union-attr]
+        host.setGeometry(vp.x(), vp.y(), vp.width(), bar.sizeHint().height() + m.top() + m.bottom())
+
+    @property
+    def stuck(self) -> bool:
+        return self._sticky_host is not None and self._sticky_host.isVisible()
 
 
 def page_shell(title: str, subtitle: str) -> tuple[QScrollArea, QVBoxLayout, QHBoxLayout]:

@@ -195,7 +195,9 @@ class WordsPage(QWidget):
         self.note = label("", "muted", wrap=True)
         lay.addWidget(self.note)
 
-        bar = QHBoxLayout()
+        self.toolbar = QWidget()  # поиск прилипает к верху, когда список прокручен ниже него
+        bar = QHBoxLayout(self.toolbar)
+        bar.setContentsMargins(0, 0, 0, 0)
         bar.setSpacing(8)
         self.search = QLineEdit()
         self.search.setPlaceholderText("Поиск: слово, перевод или пример, по-английски и по-русски")
@@ -212,7 +214,8 @@ class WordsPage(QWidget):
         self.sort.activated.connect(lambda _i: self._filter())
         bar.addWidget(self.search, 1)
         bar.addWidget(self.sort)
-        lay.addLayout(bar)
+        lay.addWidget(self.toolbar)
+        self._scroll.set_sticky(self.toolbar)
         self.summary = label("", "muted")
         lay.addWidget(self.summary)
 
@@ -331,6 +334,13 @@ class WordsPage(QWidget):
         old.deleteLater()
         self._rows[w.id] = row
         fade_in(row)
+        if w.id in self.explain_open:  # раскрыли разбор у слова внизу: докрутить, чтобы его было видно
+            QTimer.singleShot(60, lambda wid=w.id: self._show_row(wid))
+
+    def _show_row(self, word_id: int) -> None:
+        row = self._rows.get(word_id)  # строку могли уже перерисовать: берём нынешнюю
+        if row is not None and row.isVisible():
+            self._scroll.ensure_visible(row)
 
     def _row(self, w: SavedWord, *, last: bool) -> QFrame:
         q = self.query

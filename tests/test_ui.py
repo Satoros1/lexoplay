@@ -1154,3 +1154,48 @@ def test_word_card_never_covers_buttons_or_panel(qapp, size, region, scale):
     for btn in (layer._explain_btn, layer._retranslate_btn):  # noqa: SLF001
         assert btn is None or not card.intersects(btn)  # кнопка либо в стороне, либо не нарисована под карточкой
     layer.close()
+
+
+def test_scroll_extras_sticky_search_top_button_keys(window, qapp):
+    """Поиск прилипает к верху, кнопка «наверх» появляется и плавно возвращает, клавиши крутят плавно."""
+    from lexoplay.store import SavedWord
+
+    w, ctl = window
+    for i in range(60):
+        ctl.store.word_add(SavedWord("dr1_us.exe", "DR", f"word{i}", f"word{i}", "перевод", sentence=f"A word{i} here.", created_at=1_790_000_000 + i))
+    w.resize(900, 650)
+    w.show()
+    w.show_page("words")
+    page = w.words
+    sc = page._scroll  # noqa: SLF001
+    bar = sc.verticalScrollBar()
+    _wait_for(lambda: bar.maximum() > 1500)
+    page.search.setFocus()
+    page.search.setText("word")  # набранное и фокус переживают прилипание
+    QTest.qWait(250)
+    assert not sc.stuck
+    bar.setValue(900)
+    qapp.processEvents()
+    assert sc.stuck and page.toolbar.parent() is sc._sticky_host  # noqa: SLF001
+    assert page.search.text() == "word" and page.search.hasFocus()
+    _wait_for(lambda: sc._top.isVisible())  # noqa: SLF001
+    assert sc._top.isVisible()  # noqa: SLF001
+    sc._top.click()  # noqa: SLF001
+    _wait_for(lambda: bar.value() == 0, 1500)
+    qapp.processEvents()
+    assert bar.value() == 0 and not sc.stuck and page.toolbar.parent() is not sc._sticky_host  # noqa: SLF001
+    assert page.search.hasFocus()
+    _wait_for(lambda: not sc._top.isVisible(), 800)  # noqa: SLF001
+    # PageDown и End плавно, а не прыжком
+    sc.setFocus()
+    QTest.keyClick(sc, Qt.Key.Key_PageDown)
+    qapp.processEvents()
+    assert bar.value() < sc.viewport().height() * 0.85
+    _wait_for(lambda: bar.value() >= sc.viewport().height() * 0.8, 800)
+    QTest.keyClick(sc, Qt.Key.Key_End)
+    _wait_for(lambda: bar.value() == bar.maximum(), 1500)
+    assert bar.value() == bar.maximum()
+    # Ctrl+F: к поиску текущей вкладки
+    w.show_page("history")
+    w._focus_search()  # noqa: SLF001
+    assert w.history.search.hasFocus()

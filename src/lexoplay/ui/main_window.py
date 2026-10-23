@@ -21,9 +21,11 @@ from PySide6.QtGui import (
     QFontDatabase,
     QFontMetricsF,
     QImage,
+    QKeySequence,
     QPainter,
     QPixmap,
     QResizeEvent,
+    QShortcut,
     QShowEvent,
 )
 from PySide6.QtWidgets import (
@@ -1509,6 +1511,14 @@ class MainWindow(QWidget):
 
         self.show_page("games")
         self.refresh_account()
+        find = QShortcut(QKeySequence.StandardKey.Find, self)  # Ctrl+F: к поиску на «Истории» и «Словах»
+        find.activated.connect(self._focus_search)
+
+    def _focus_search(self) -> None:
+        search = getattr(self.stack.currentWidget(), "search", None)
+        if isinstance(search, QLineEdit) and search.isVisible():
+            search.setFocus(Qt.FocusReason.ShortcutFocusReason)
+            search.selectAll()
 
     # --- навигация
     def show_page(self, key: str) -> None:
