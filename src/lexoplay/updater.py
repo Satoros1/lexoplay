@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import os
@@ -115,38 +116,97 @@ def target_dir() -> Path:
     return exe_path().parent
 
 
+ATTEMPTS = 6  # связь оборвалась посреди файла: докачиваем с того же места
+RETRY_PAUSE_S = 1.0
+
+
+class _Retry(Exception):
+    pass
+
+
+def part_path(folder: Path, version: str) -> Path:
+    """Недокачанный файл своей версии: следующая попытка (и следующее нажатие «Обновить») продолжит его."""
+    return folder / f"{ASSET}.{version}.part"
+
+
+def _resume_from(part: Path, size: int) -> tuple[int, hashlib._Hash]:
+    sha = hashlib.sha256()
+    if not part.exists():
+        return 0, sha
+    if size and part.stat().st_size > size:
+        part.unlink(missing_ok=True)
+        return 0, sha
+    got = 0
+    with part.open("rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            sha.update(block)
+            got += len(block)
+    return got, sha
+
+
 async def download(
     rel: Release,
     progress: Callable[[int, int], None] | None = None,
     *,
     dest_dir: Path | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
+    attempts: int = ATTEMPTS,
+    pause: float = RETRY_PAUSE_S,
 ) -> Path:
-    """Скачать новый exe рядом с текущим. Возвращает путь к .new."""
+    """Скачать новый exe рядом с текущим. Возвращает путь к .new.
+
+    Связь оборвалась посреди файла: ждём и докачиваем с того же места (Range), до ATTEMPTS раз.
+    Не вышло и так: недокачанное остаётся, следующее «Обновить» продолжит с него."""
     folder = dest_dir or target_dir()
     dest = folder / (ASSET + ".new")
-    part = folder / (ASSET + ".part")
-    sha = hashlib.sha256()
-    got = 0
+    part = part_path(folder, rel.version)
+    for other in [*folder.glob(f"{ASSET}.*part"), folder / f"{ASSET}.part"]:
+        if other != part:
+            other.unlink(missing_ok=True)  # от другой версии
+    last: Exception | None = None
     try:
+        got, sha = _resume_from(part, rel.size)
+        if got:
+            log.info("обновление %s: продолжаю с %s из %s байт", rel.version, got, rel.size)
         async with httpx.AsyncClient(timeout=httpx.Timeout(20, read=60), transport=transport, follow_redirects=True) as http:
-            async with http.stream("GET", rel.url, headers={"User-Agent": f"LexoPlay/{__version__}"}) as resp:
-                if resp.status_code != 200:
-                    raise UpdateError(f"GitHub не отдал файл (ошибка {resp.status_code}).")
-                total = int(resp.headers.get("content-length") or rel.size or 0)
-                with part.open("wb") as f:
-                    async for chunk in resp.aiter_bytes(256 * 1024):
-                        f.write(chunk)
-                        sha.update(chunk)
-                        got += len(chunk)
-                        if progress:
-                            progress(got, total)
+            for attempt in range(attempts):
+                if rel.size and got >= rel.size:
+                    break
+                headers = {"User-Agent": f"LexoPlay/{__version__}"}
+                if got:
+                    headers["Range"] = f"bytes={got}-"
+                try:
+                    async with http.stream("GET", rel.url, headers=headers) as resp:
+                        if resp.status_code >= 500 or resp.status_code == 429:
+                            raise _Retry(f"GitHub ответил {resp.status_code}")
+                        if resp.status_code not in (200, 206):
+                            raise UpdateError(f"GitHub не отдал файл (ошибка {resp.status_code}).")
+                        if resp.status_code == 200 and got:  # докачку не дали: заново
+                            got, sha = 0, hashlib.sha256()
+                        total = rel.size or got + int(resp.headers.get("content-length") or 0)
+                        with part.open("ab" if got else "wb") as f:
+                            async for chunk in resp.aiter_bytes():  # без буфера: при обрыве на диске всё полученное
+                                f.write(chunk)
+                                sha.update(chunk)
+                                got += len(chunk)
+                                if progress:
+                                    progress(got, total)
+                    break
+                except (httpx.TransportError, _Retry) as exc:
+                    last = exc
+                    log.info("скачивание обновления прервалось на %s из %s байт: %s (попытка %s)", got, rel.size, exc, attempt + 1)
+                    if attempt + 1 < attempts:
+                        await asyncio.sleep(pause * min(8, 2**attempt))
+            else:
+                raise UpdateError(
+                    "Не получилось скачать обновление: связь с GitHub всё время обрывается. "
+                    "Нажми «Обновить» ещё раз, скачанное не пропадёт."
+                ) from last
     except PermissionError as exc:
         raise UpdateError(
             f"Нет прав записать в папку {folder}. Перенеси LexoPlay.exe, например, на рабочий стол или в Документы."
         ) from exc
     except httpx.HTTPError as exc:
-        part.unlink(missing_ok=True)
         raise UpdateError("Не получилось скачать обновление: нет связи с GitHub.") from exc
     if rel.size and got != rel.size:
         part.unlink(missing_ok=True)
@@ -229,18 +289,21 @@ def wait_pid(pid: int, timeout: float = 20.0) -> None:
 
 
 def cleanup_old(folder: Path | None = None) -> int:
-    """Удалить .old и недокачанное от прошлого обновления. Возвращает, сколько удалено."""
+    """Удалить .old и недокачанное от прошлого обновления. Возвращает, сколько удалено.
+
+    Недокачанная более новая версия остаётся: «Обновить» продолжит её."""
     folder = folder or target_dir()
     removed = 0
-    for pattern in (f"{ASSET}*.old", f"{ASSET}.part"):
-        for p in folder.glob(pattern):
-            for _ in range(10):
-                try:
-                    p.unlink()
-                    removed += 1
-                    break
-                except FileNotFoundError:
-                    break
-                except OSError:
-                    time.sleep(0.3)  # старый процесс ещё выходит
+    files = [*folder.glob(f"{ASSET}*.old"), *folder.glob(f"{ASSET}.part")]
+    files += [p for p in folder.glob(f"{ASSET}.*.part") if parse_version(p.name[len(ASSET) + 1 : -5]) <= parse_version(__version__)]
+    for p in files:
+        for _ in range(10):
+            try:
+                p.unlink()
+                removed += 1
+                break
+            except FileNotFoundError:
+                break
+            except OSError:
+                time.sleep(0.3)  # старый процесс ещё выходит
     return removed

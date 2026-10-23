@@ -54,8 +54,8 @@ Write the translation a professional {target} game localizer would ship:
 - Translate only what the line says: never add a meaning, a reason or an ending of your own. If the OCR lost words or the line breaks off mid-sentence, translate what is there and end with "...".
 - Keep the perspective: a line in which the speaker talks about themselves stays in the first person and is never retold ("he says that...", "she asks..."). Never talk to the player, never add the speaker's name.
 - A line with a speaker is that character's own words. A line without a speaker is narration, the hero's thoughts, a sign or a menu: translate it as such.
-- Keep each character's voice: slang, rudeness, jokes, hesitation, politeness. Stay consistent with the earlier translations: the same form of address between the same characters (ты/вы and the like), the same genders, the same names and terms. The glossary wins over everything. Transliterate names by the usual {target} rules.
-- The text comes from OCR and can be garbled: l/I, 0/O, rn/m, split or merged words ("vi ew", "becamewarped"), stray symbols like | or #. Work out the words the game really shows from the letters and the context, then translate them. ALL CAPS is just the game's font: use normal capitalization.
+- Keep each character's voice: slang, rudeness, jokes, hesitation, politeness. Stay consistent with the earlier translations: the same form of address between the same characters (ты/вы and the like), the same genders, the same names and terms. The glossary wins over everything. Write names in the {target} alphabet by its usual transliteration rules; when {target} has its own alphabet, never leave a name in Latin letters.
+- The text comes from OCR and can be garbled: l/I, 0/O, rn/m, split or merged words ("vi ew", "becamewarped"), stray symbols like | or #, a few stray letters after the last sentence ("... say? lij": that is the text box arrow, drop it). Work out the words the game really shows from the letters and the context, then translate them. ALL CAPS is just the game's font: use normal capitalization.
 - The screen sometimes shows the same text twice (say, in a box behind the dialogue), so a sentence may come twice: translate it once and never invent a link between the copies.
 - If the speaker label looks like a piece of the sentence rather than a name, treat it as part of the line.
 - Stuttering and drawn-out words stay that way in the translation (b-b-blabbermouth → б-б-болтун, Nooo → Нееет). A word in *asterisks* is emphasis: keep the emphasis in the wording, drop the asterisks.
@@ -63,7 +63,7 @@ Write the translation a professional {target} game localizer would ship:
 - Punctuation: keep ? ! and three dots (...) as in the original, and a period where it has one. If the original ends with a comma or breaks off because the sentence continues in the next text box, end with "..." and never with a comma.
 {examples}
 Reply with the translation of the line after "Translate this line". Then on a new line write "@@" and that line in {source} as the game really shows it: the OCR mistakes fixed, the same words and punctuation, normal capitalization, no speaker name. Nothing else: no quotes, no notes.
-Work out the garbled words silently, before you answer: the reply is shown to the player as is, so it never contains your reasoning, guesses about the OCR, alternatives or a second version. If you can't be sure of a word, choose the most likely one and translate.
+Work out the garbled words silently, before you answer: the reply is shown to the player as is, so it never contains your reasoning, guesses about the OCR, corrections of yourself, alternatives or a second version: write the translation once, from start to end. If you can't be sure of a word, choose the most likely one and translate.
 Never use the em dash character; use a comma, a colon or a new sentence instead."""
 
 SOURCE_MARK = "@@"
@@ -365,6 +365,100 @@ def drop_speaker_name(translation: str, speaker: str | None) -> str:
     return translation
 
 
+_CORRECTION = re.compile(
+    r"\(\s*(?:исправл\w*|поправл\w*|поправк\w*|correct\w*|fix\w*|oops|упс)\s*\)\s*"
+    r"|\*\s*(?:исправл\w*|поправл\w*|correct\w*)\s*\*\s*",
+    re.IGNORECASE,
+)
+
+
+def drop_self_correction(text: str) -> str:
+    """«...на тебя это ничуdirect... (исправляю) Если бы ты...» -> только исправленный вариант.
+
+    Модель без раздумий иногда сбивается и начинает фразу заново прямо в ответе."""
+    parts = _CORRECTION.split(text)
+    return parts[-1].lstrip() if len(parts) > 1 else text
+
+
+_TAIL_NOISE = re.compile(r"(?<=[.!?…\"'»”’)])\s+[a-z|]{1,4}\s*$")
+
+
+def drop_tail_noise(translation: str, target_lang: str = "ru") -> str:
+    """«Это ты хочешь сказать? lij» -> без «lij»: стрелка окна диалога, которую OCR прочитал как буквы,
+    а модель переписала из оригинала. В переводе не латиницей такой хвост не бывает настоящим."""
+    if target_lang in LATIN_TARGETS:
+        return translation
+    return _TAIL_NOISE.sub("", translation)
+
+
+# Имена, оставленные латиницей в русском переводе («виноват Byakuya»): берём то написание,
+# которым модель уже писала это имя в прошлых репликах (Byakuya -> Бьякуя).
+_LATIN_NAME = re.compile(r"(?<![\w'’-])[A-Z][a-z]{2,}(?:-[A-Za-z][a-z]+)?(?![\w'’-])")
+_CYR_NAME = re.compile(r"(?<![\w-])[А-ЯЁЇІЄҐ][а-яёїієґ]+(?:-[А-ЯЁа-яё][а-яё]+)?(?![\w-])")
+_CYRILLIC = re.compile(r"[а-яёїієґ]", re.IGNORECASE)
+NAME_SIMILARITY = 0.75
+_name_forms: dict[tuple[str, str], dict[str, int]] = {}
+_learned: set[tuple[str, str]] = set()
+
+
+def _english_word(token: str) -> bool:
+    from lexoplay.wordlist_en import WORDS
+
+    return token.lower() in WORDS
+
+
+def _sounds(cyr: str, latin: str) -> float:
+    from difflib import SequenceMatcher
+
+    return SequenceMatcher(None, _latin(cyr), latin.lower()).ratio()
+
+
+def learn_names(source: str, translation: str, target_lang: str) -> None:
+    """Запомнить, как имена из оригинала записаны в переводе: Byakuya -> Бьякуя."""
+    if target_lang in LATIN_TARGETS or not _CYRILLIC.search(translation):
+        return
+    key = (source, translation)
+    if key in _learned:
+        return
+    if len(_learned) > 5000:
+        _learned.clear()
+    _learned.add(key)
+    cands = set(_CYR_NAME.findall(translation))
+    if not cands:
+        return
+    for name in set(_LATIN_NAME.findall(source)):
+        if _english_word(name):
+            continue
+        best = max(cands, key=lambda c: _sounds(c, name))
+        if _sounds(best, name) >= NAME_SIMILARITY:
+            forms = _name_forms.setdefault((target_lang, name.lower()), {})
+            forms[best] = forms.get(best, 0) + 1
+
+
+def fix_latin_names(translation: str, target_lang: str = "ru") -> str:
+    """Имя латиницей посреди кириллицы -> как его писали раньше (обычно именительный падеж:
+    модель оставляет латиницу там, где имя не склоняется)."""
+    if target_lang in LATIN_TARGETS or not _CYRILLIC.search(translation):
+        return translation
+
+    def sub(m: re.Match[str]) -> str:
+        name = m.group(0)
+        forms = _name_forms.get((target_lang, name.lower()))
+        if not forms:
+            return name
+        return max(forms, key=lambda f: (round(_sounds(f, name), 2), forms[f]))
+
+    return _LATIN_NAME.sub(sub, translation)
+
+
+def tidy_saved(translation: str, *speakers: str | None, target_lang: str = "ru") -> str:
+    """Перевод из кеша или истории: та же чистка, что у нового (старые версии её не знали)."""
+    t = drop_self_correction(translation)
+    for sp in speakers:
+        t = drop_speaker_name(t, sp)
+    return fix_latin_names(drop_tail_noise(t, target_lang), target_lang)
+
+
 def split_reply(raw: str) -> tuple[str, str | None]:
     """Ответ модели → (перевод, исправленный оригинал после «@@» или None)."""
     if SOURCE_MARK not in raw:
@@ -415,6 +509,7 @@ def clean_translation(
         except (ValueError, json.JSONDecodeError):
             return ""
     t = drop_thinking(t, target_lang, partial=partial).strip()
+    t = drop_self_correction(t)
     t = _LABEL.sub("", t)
     if source is not None and (speaker or _SOURCE_LABEL.match(source) is None):
         if partial and len(t) < 34 and ":" not in t and ":" not in source[:40] and "\n" not in t:
@@ -426,7 +521,7 @@ def clean_translation(
                 t = t[len(prefix) :].lstrip()
         t = drop_speaker_name(t, speaker)
     if not partial:
-        t = t.strip(_QUOTES).strip()
+        t = drop_tail_noise(t.strip(_QUOTES).strip(), target_lang)
     else:
         t = t.lstrip(_QUOTES)
     return no_dash(t) if not partial else t.replace("—", ",")
@@ -525,10 +620,16 @@ class AnthropicTranslator:
                 raise friendly_error(a, exc, self._model) from exc
             except Exception as exc:
                 raise friendly_error(a, exc, self._model) from exc
+            for c in req.context:
+                learn_names(c.source, c.translation, req.target_lang)
+            for k, v in req.glossary.items():
+                learn_names(k, v, req.target_lang)
             translation = fix_punctuation(
                 req.text, clean_translation(raw, req.speaker, target_lang=req.target_lang, source=req.text)
             )
+            translation = fix_latin_names(translation, req.target_lang)
             if translation:
+                learn_names(req.text, translation, req.target_lang)
                 source = pick_source(req.text, split_reply(raw)[1])
                 return TranslateResult(source=source, translation=translation, usage=usage)
             if stop == "refusal":

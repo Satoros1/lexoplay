@@ -222,6 +222,28 @@ def _without_name(lines: list[str], speaker: str) -> list[str]:
     return lines
 
 
+_TAIL = re.compile(r"(?<=[.!?…\"'”’»)])\s+([a-z|!][a-z|!1]{0,3})\s*$")
+_STROKES = re.compile(r"^[lij|!1]+$")  # стрелка «дальше» в углу окна диалога читается как l, li, lij, |
+
+
+def drop_tail_noise(text: str) -> str:
+    """«Is that what you want to say? lij» -> без «lij».
+
+    После конца последней фразы 1-4 строчных знака, которые не слово: это значок в углу окна
+    диалога, а не текст. Настоящее слово («...why», «...huh») остаётся."""
+    m = _TAIL.search(text)
+    if m is None:
+        return text
+    token = m.group(1)
+    if not _STROKES.match(token):
+        from lexoplay.rarity import INTERJECTIONS
+        from lexoplay.wordlist_en import WORDS
+
+        if token in WORDS or token in INTERJECTIONS:
+            return text
+    return text[: m.start()].rstrip()
+
+
 def to_utterance(result: OcrResult, name_text: str | None = None, *, guess_speaker: bool = True) -> Utterance:
     """OcrResult области диалога -> (говорящий, текст).
 
@@ -233,7 +255,7 @@ def to_utterance(result: OcrResult, name_text: str | None = None, *, guess_speak
     lines = _without_labels(result, keep_first=name_text is None)
     if name_text is not None:
         speaker = join_lines([name_text])
-        return Utterance(speaker, drop_repeats(_without_name(lines, speaker)))
+        return Utterance(speaker, drop_tail_noise(drop_repeats(_without_name(lines, speaker))))
     if not lines:
         return Utterance(None, "")
     if guess_speaker:
@@ -241,10 +263,10 @@ def to_utterance(result: OcrResult, name_text: str | None = None, *, guess_speak
         m = _NAME_BRACKETS.match(first) or _NAME_COLON.match(first)
         if m and has_text(m.group(1)):
             rest = [m.group(2)] + lines[1:] if m.group(2).strip() else lines[1:]
-            return Utterance(m.group(1).strip(), drop_repeats(rest))
+            return Utterance(m.group(1).strip(), drop_tail_noise(drop_repeats(rest)))
         if len(lines) >= 2 and _looks_like_name(first, lines[1:]):
-            return Utterance(first.strip(), drop_repeats(lines[1:]))
-    return Utterance(None, drop_repeats(lines))
+            return Utterance(first.strip(), drop_tail_noise(drop_repeats(lines[1:])))
+    return Utterance(None, drop_tail_noise(drop_repeats(lines)))
 
 
 _OPENERS = "\"'“‘«([.…¿¡"

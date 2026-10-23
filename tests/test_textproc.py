@@ -173,3 +173,14 @@ def test_empty_name_frame_falls_back_to_guess():
     """Рамка имени не прочиталась: имя всё равно не уходит в текст реплики, если оно отдельной строкой."""
     u = to_utterance(ocr("Toko Fukawa", "The world has a front and a back, a top inning and a"), "")
     assert u.speaker == "Toko Fukawa" and u.text.startswith("The world")
+
+
+def test_text_box_arrow_after_last_sentence_is_dropped():
+    from lexoplay.textproc import drop_tail_noise
+
+    assert drop_tail_noise("Is that what you want to say? lij") == "Is that what you want to say?"
+    assert drop_tail_noise("It is over. |") == "It is over."
+    assert drop_tail_noise("Is that so? li") == "Is that so?"
+    assert drop_tail_noise("Wait... why") == "Wait... why"  # настоящее слово
+    assert drop_tail_noise("Hmm... huh") == "Hmm... huh"
+    assert drop_tail_noise("You are... Mr. Togami") == "You are... Mr. Togami"

@@ -323,3 +323,38 @@ def test_old_translations_with_speaker_name_are_not_reused(tmp_path):
     new_src = "The world has a front and a back, a top inning and a bottom, a sea of truth and a web of lies!"
     assert cache.find("dr1_us.exe", "ru", new_src) is None  # переведётся заново, уже без имени
     st.close()
+
+
+def test_self_correction_and_box_arrow_are_dropped():
+    from lexoplay.translate import drop_tail_noise
+
+    raw = (
+        "Если бы ты и правда был убийцей, на тебя это ничуdirect... (исправляю) "
+        "Если бы ты и правда был убийцей, на тебя всё это не должно было подействовать."
+    )
+    assert clean_translation(raw, "Makoto Naegi") == "Если бы ты и правда был убийцей, на тебя всё это не должно было подействовать."
+    assert clean_translation("Это ты хочешь сказать? lij", "Byakuya Togami") == "Это ты хочешь сказать?"
+    assert clean_translation("Я исправляю ошибку.") == "Я исправляю ошибку."  # просто слово, не сбой
+    assert drop_tail_noise("Is that so? ok", "en") == "Is that so? ok"  # в переводе латиницей не трогаем
+
+
+def test_latin_name_takes_spelling_from_earlier_lines():
+    from lexoplay import translate as T
+
+    T._name_forms.clear()  # noqa: SLF001
+    T._learned.clear()  # noqa: SLF001
+    http = _http()
+
+    def handler(req):
+        return _ok(http, _sse("Улики, которые доказывают, что виноват Byakuya, спрятаны там?"))
+
+    ctx = (
+        ContextLine("Makoto Naegi", "And you, Byakuya, looked nervous.", "И ты, Бьякуя, как будто занервничал."),
+        ContextLine("Makoto Naegi", "I asked Byakuya about it.", "Я спросил об этом Бьякую."),
+    )
+    req = TranslateRequest("The evidence that proves Byakuya is responsible is hidden in there?", "Makoto Naegi", "DR", context=ctx)
+    res = asyncio.run(_sdk_translator(handler).translate(req))
+    assert res.translation == "Улики, которые доказывают, что виноват Бьякуя, спрятаны там?"
+    assert T.fix_latin_names("Mondo тоже знал.") == "Mondo тоже знал."  # как писать, не знаем: не трогаем
+    assert T.fix_latin_names("Maybe Byakuya knew", "en") == "Maybe Byakuya knew"
+    assert T.tidy_saved("Byakuya Togami Это ты хочешь сказать? lij", "Byakuya Togami") == "Это ты хочешь сказать?"
