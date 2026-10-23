@@ -112,6 +112,9 @@ def main() -> None:
     qapp = QApplication(sys.argv)
     qapp.setApplicationName("LexoPlay")
     qapp.setQuitOnLastWindowClosed(False)
+    from lexoplay.gcguard import install as install_gc
+
+    install_gc(qapp)
     if _already_running():
         sys.exit(0)
 

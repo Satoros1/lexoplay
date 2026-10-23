@@ -424,6 +424,9 @@ def _app_flow(out_dir: Path) -> Callable[[], tuple[str, object]]:
         from PySide6.QtWidgets import QApplication
 
         app_q = QApplication.instance() or QApplication(sys.argv[:1])
+        from lexoplay.gcguard import install as install_gc
+
+        install_gc(app_q)
         tmp = tempfile.mkdtemp(prefix="lexoplay-selftest-")
         os.environ["LEXOPLAY_HOME"] = tmp
         os.environ["ANTHROPIC_API_KEY"] = "sk-selftest"  # чтобы при старте не открылись настройки
@@ -598,6 +601,9 @@ def _app_vs_game(out_dir: Path) -> Callable[[], tuple[str, object]]:
         from PySide6.QtWidgets import QApplication
 
         app_q = QApplication.instance() or QApplication(sys.argv[:1])
+        from lexoplay.gcguard import install as install_gc
+
+        install_gc(app_q)
         tmp = tempfile.mkdtemp(prefix="lexoplay-selftest-game-")
         os.environ["LEXOPLAY_HOME"] = tmp
         os.environ["ANTHROPIC_API_KEY"] = "sk-selftest"
@@ -831,6 +837,9 @@ def _own_key_flow(out_dir: Path) -> Callable[[], tuple[str, object]]:
         from PySide6.QtWidgets import QApplication
 
         app_q = QApplication.instance() or QApplication(sys.argv[:1])
+        from lexoplay.gcguard import install as install_gc
+
+        install_gc(app_q)
         tmp = tempfile.mkdtemp(prefix="lexoplay-selftest-own-")
         os.environ["LEXOPLAY_HOME"] = tmp
         os.environ["ANTHROPIC_API_KEY"] = "sk-selftest"
@@ -1001,6 +1010,9 @@ def _qt_checks(out_dir: Path) -> None:
     from lexoplay.ui.overlay import Overlay
 
     app = QApplication.instance() or QApplication(sys.argv[:1])
+    from lexoplay.gcguard import install as install_gc
+
+    install_gc(app)
 
     def overlay() -> tuple[str, object]:
         ov = Overlay()
@@ -1651,6 +1663,7 @@ def run(report: str) -> int:
 
         mods = [
             "lexoplay.watch",
+            "lexoplay.gcguard",
             "lexoplay.translate",
             "lexoplay.store",
             "lexoplay.lexo",

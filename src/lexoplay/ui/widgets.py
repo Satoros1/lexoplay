@@ -308,7 +308,7 @@ class SmoothScrollArea(QScrollArea):
         hl.setContentsMargins(*margins)
         host.hide()
         self._sticky_host = host
-        self._placeholder = QWidget()
+        self._placeholder = QWidget(self)  # с родителем: Qt удаляет его вместе со страницей
         self._placeholder.hide()
 
     def _content_layout(self) -> QVBoxLayout | None:

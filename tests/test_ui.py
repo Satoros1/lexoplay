@@ -1173,6 +1173,7 @@ def test_scroll_extras_sticky_search_top_button_keys(window, qapp):
     page.search.setFocus()
     page.search.setText("word")  # набранное и фокус переживают прилипание
     QTest.qWait(250)
+    _wait_for(lambda: bar.maximum() > 1500)  # после поиска список строится заново, по частям
     assert not sc.stuck
     bar.setValue(900)
     qapp.processEvents()
@@ -1199,3 +1200,32 @@ def test_scroll_extras_sticky_search_top_button_keys(window, qapp):
     w.show_page("history")
     w._focus_search()  # noqa: SLF001
     assert w.history.search.hasFocus()
+
+
+def test_gc_guard_collects_from_timer(qapp):  # type: ignore[no-untyped-def]
+    import gc
+
+    from lexoplay import gcguard
+
+    was = gc.isenabled()
+    guard = gcguard.install(qapp)
+    try:
+        assert not gc.isenabled()  # не внутри обработчика системных сообщений
+        assert gcguard.install(qapp) is guard
+
+        class Loop:
+            pass
+
+        a = Loop()
+        a.me = a  # type: ignore[attr-defined]
+        del a
+        for _ in range(guard.threshold[0] + 10):
+            Loop()
+        guard.check()
+        assert gc.get_count()[0] <= guard.threshold[0]
+    finally:
+        guard.timer.stop()
+        guard.deleteLater()
+        gcguard._installed = None
+        if was:
+            gc.enable()
