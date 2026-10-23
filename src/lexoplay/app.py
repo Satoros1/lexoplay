@@ -74,9 +74,11 @@ from lexoplay.preprocess import MODE_NAMES, is_black, thumbnail
 from lexoplay.rarity import LEVEL_NAMES, LEVELS
 from lexoplay.recall import RecallChip, Recaller, RecallIndex
 from lexoplay.session import GameSession, Sessions
-from lexoplay.store import Game, SavedWord, Store, StoredLine, Task
+from lexoplay.store import Game, GameNotes, SavedWord, Store, StoredLine, Task
 from lexoplay.textproc import Utterance, strip_speaker, to_utterance
 from lexoplay.translate import (
+    NOTES_MAX_CHARS,
+    NOTES_SAMPLE_LINES,
     AnthropicTranslator,
     ContextLine,
     LexoTranslator,
@@ -131,6 +133,10 @@ KNOWN_CLICK_GRABBERS = {"dr1_us.exe", "dr2_us.exe"}
 FREEZE_GRACE_S = 1.5  # сколько после сворачивания игры фокус может прыгать сам (в окне)
 FREEZE_GRACE_FULL_S = 3.5  # полноэкранной: она ещё меняет режим экрана
 PREWARM_MS = 3000  # через столько после запуска окно LexoPlay собирается заранее (если игра не идёт)
+NOTES_RETRY_S = 600.0  # справка по игре не собралась (сеть, лимит): снова не раньше чем через 10 минут
+NOTES_RECHECK_S = 1800.0  # раз в полчаса смотрим, не появились ли герои, которых в справке нет
+NOTES_NEW_SPEAKERS = 4  # столько новых героев: справку пора дособрать
+NOT_NAMES = {"narrator", "???", "unknown"}  # не герои: по ним справку не пересобираем
 NAMES_TTL_S = 600.0  # имена игры пересобираем раз в 10 минут: новые реплики могли добавить новые
 CURSOR_TICK_MS = 150  # режим слов: как часто смотреть, не держит ли курсор игра
 BUSY_LIMIT_MS = 40_000  # перевод или чтение не вернулись за это время: снять «занято», чтобы F2 снова работал
@@ -294,6 +300,11 @@ class App(QObject):
         self.word_layer.retranslate_clicked.connect(self._retranslate)
         self._better: AnthropicTranslator | None = None
         self._better_model = ""
+        # справка по игре для перевода (герои, термины, тон): собирается моделью посильнее в фоне
+        self._notes_busy: set[str] = set()
+        self._notes_failed: dict[str, float] = {}
+        self._notes_error: dict[str, str] = {}
+        self._notes_checked: dict[str, float] = {}
         self._translator_sig: tuple | None = None  # с чем собран переводчик: пересобираем, только если это сменилось
         self._retranslate_token: object | None = None
         self.word_layer.explain_save.connect(self._on_explain_save)
@@ -1607,7 +1618,7 @@ class App(QObject):
         return p
 
     def _target(self, game: Game, session_id: str = "", *, glossary: bool = True) -> Target:
-        """glossary=False для проверок смены реплики: они идут часто, а глоссарий им не нужен."""
+        """glossary=False для проверок смены реплики: они идут часто, а глоссарий и справка им не нужны."""
         assert game.region is not None
         mode = game.ocr_mode or ("pixel" if game.binarize else None)
         return Target(
@@ -1618,7 +1629,84 @@ class App(QObject):
             game_exe=game.exe,
             session_id=session_id,
             glossary=self.store.glossary(game.exe) if glossary else {},
+            notes=self._notes_for(game.exe) if glossary else "",
         )
+
+    # ------------------------------------------------------------------ справка по игре
+    def game_notes(self, exe: str) -> GameNotes | None:
+        return self.store.game_notes(exe, self.settings.target_lang)
+
+    def notes_state(self, exe: str) -> tuple[bool, str]:
+        """(собирается сейчас, ошибка прошлой попытки)."""
+        return exe in self._notes_busy, self._notes_error.get(exe, "")
+
+    def notes_possible(self) -> bool:
+        """Справку собирает своя модель: со своим ключом (с Lexo переводит сервер)."""
+        return isinstance(self.translator, AnthropicTranslator) and not self.client.linked and bool(get_api_key())
+
+    def set_game_notes(self, exe: str, text: str) -> None:
+        """Игрок поправил справку руками: больше сама не пересобирается. Пустая: перевод без справки."""
+        text = text.strip()[:NOTES_MAX_CHARS]
+        self.store.game_notes_set(exe, self.settings.target_lang, text, "ready" if text else "off", edited=True)
+
+    def remake_game_notes(self, exe: str) -> bool:
+        return self._make_notes(exe, force=True)
+
+    def _notes_for(self, exe: str) -> str:
+        """Текст справки для промпта. Нет справки (или появились новые герои): собрать в фоне."""
+        rec = self.store.game_notes(exe, self.settings.target_lang)
+        if rec is None:
+            self._make_notes(exe)
+        elif rec.status == "ready" and not rec.edited and self._notes_outdated(exe, rec.text):
+            log.info("в справке по %s нет новых героев: пересобираю", exe)
+            self._make_notes(exe)
+        return rec.text if rec is not None and rec.status == "ready" else ""
+
+    def _notes_outdated(self, exe: str, text: str) -> bool:
+        """Справку собирали в начале игры, а теперь говорят герои, которых в ней нет."""
+        now = time.time()
+        if now - self._notes_checked.get(exe, 0.0) < NOTES_RECHECK_S:
+            return False
+        self._notes_checked[exe] = now
+        low = text.lower()
+        speakers = [sp for sp in self.store.line_speakers(exe, 30) if len(sp) >= 3 and sp.lower() not in NOT_NAMES]
+        missing = [sp for sp in speakers if sp.split()[0].lower() not in low]
+        return len(missing) >= NOTES_NEW_SPEAKERS
+
+    def _make_notes(self, exe: str, *, force: bool = False) -> bool:
+        if exe in self._notes_busy:
+            return True
+        if not force and time.time() - self._notes_failed.get(exe, 0.0) < NOTES_RETRY_S:
+            return False
+        tr = self._better_translator() if self.notes_possible() else None
+        if not isinstance(tr, AnthropicTranslator):
+            return False
+        game = self.store.get_game(exe)
+        title = game.title if game else exe
+        lang, model = self.settings.target_lang, self._better_model
+        lines = self.store.recent_lines(exe, NOTES_SAMPLE_LINES)
+        speakers = self.store.line_speakers(exe, 40)
+        self._notes_busy.add(exe)
+        self._notes_error.pop(exe, None)
+        log.info("собираю справку по игре %s моделью %s", title, model)
+
+        def done(result: Any, err: BaseException | None) -> None:
+            self._notes_busy.discard(exe)
+            if err is not None:
+                self._notes_failed[exe] = time.time()
+                self._notes_error[exe] = str(err) if isinstance(err, TranslationError) else f"Не получилось: {err}"
+                log.info("справка по игре %s не собралась: %s", title, err)
+                return
+            text, usage = result
+            self.own_usage.add("notes", usage, model)
+            self._notes_checked[exe] = time.time()
+            self.store.game_notes_set(exe, lang, text or "", "ready" if text else "unknown")
+            log.info("справка по игре %s: %s", title, f"{len(text)} знаков" if text else "модель не знает игру")
+
+        self.run_bg(
+            tr.game_notes(title, lines, speakers, source_lang=self.settings.source_lang, target_lang=lang), done
+        )
+        return True
 
     def _make_grab(self, active: Active, game: Game, display: Rect):  # type: ignore[no-untyped-def]
         hwnd, store, exe = active.hwnd, self.store, game.exe
@@ -2363,6 +2451,7 @@ class App(QObject):
             source_lang=self.settings.source_lang,
             context=tuple(ContextLine(r.speaker, r.source, r.translation) for r in earlier),
             glossary=target.glossary,
+            notes=target.notes,
             line_id=str(uuid.uuid4()),
             session_id=ctx.session_id,
             game_exe=ctx.exe,
@@ -2621,6 +2710,7 @@ class App(QObject):
             source_lang=self.settings.source_lang,
             context=tuple(ContextLine(r.speaker, r.source, r.translation) for r in earlier),
             glossary=self.store.glossary(line.exe),
+            notes=self._notes_for(line.exe),
             line_id=str(uuid.uuid4()),
             session_id=self._history_session(line.exe),
             game_exe=line.exe,

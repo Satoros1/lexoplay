@@ -53,3 +53,17 @@ def test_games_filter():
     assert [w.hwnd for w in rank(wins)] == [2, 3, 4]
     assert clean_title("  My Game - Direct3D 9 ", "mygame.exe") == "My Game"
     assert clean_title("", "mygame.exe") == "mygame"
+
+
+def test_game_notes_roundtrip(tmp_path):
+    from lexoplay.store import Store
+
+    s = Store(tmp_path / "db.sqlite")
+    assert s.game_notes("dr1_us.exe", "ru") is None
+    s.game_notes_set("DR1_US.exe", "ru", "GAME: Danganronpa")
+    rec = s.game_notes("dr1_us.exe", "ru")
+    assert rec is not None and rec.text == "GAME: Danganronpa" and rec.status == "ready" and not rec.edited
+    s.game_notes_set("dr1_us.exe", "ru", "", "off", edited=True)
+    rec = s.game_notes("dr1_us.exe", "ru")
+    assert rec is not None and rec.status == "off" and rec.edited
+    assert s.game_notes("dr1_us.exe", "en") is None  # у другого языка своя справка

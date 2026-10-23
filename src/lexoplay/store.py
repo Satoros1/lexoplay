@@ -104,7 +104,26 @@ CREATE TABLE IF NOT EXISTS stats (
     seconds INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (day, exe)
 );
+CREATE TABLE IF NOT EXISTS game_notes (
+    exe TEXT NOT NULL,
+    lang TEXT NOT NULL,
+    text TEXT NOT NULL,
+    status TEXT NOT NULL,
+    edited INTEGER NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL,
+    PRIMARY KEY (exe, lang)
+);
 """
+
+
+@dataclass(frozen=True, slots=True)
+class GameNotes:
+    """Справка по игре для перевода. status: ready (есть текст) | unknown (модель не знает игру)."""
+
+    text: str
+    status: str
+    edited: bool
+    created_at: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -302,6 +321,7 @@ class Store:
         with self._lock:
             self._db.execute("DELETE FROM games WHERE exe = ?", (exe.lower(),))
             self._db.execute("DELETE FROM glossary WHERE exe = ?", (exe.lower(),))
+            self._db.execute("DELETE FROM game_notes WHERE exe = ?", (exe.lower(),))
             self._db.commit()
 
     def known_exes(self) -> set[str]:
@@ -802,6 +822,37 @@ class Store:
         with self._lock:
             self._db.execute("DELETE FROM glossary WHERE exe = ? AND term = ?", (exe.lower(), term))
             self._db.commit()
+
+    # ------------------------------------------------------------------ справка по игре
+    def game_notes(self, exe: str, lang: str) -> GameNotes | None:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT text, status, edited, created_at FROM game_notes WHERE exe = ? AND lang = ?", (exe.lower(), lang)
+            ).fetchone()
+        return GameNotes(row[0], row[1], bool(row[2]), row[3]) if row else None
+
+    def game_notes_set(self, exe: str, lang: str, text: str, status: str = "ready", *, edited: bool = False) -> None:
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO game_notes (exe, lang, text, status, edited, created_at) VALUES (?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(exe, lang) DO UPDATE SET text = excluded.text, status = excluded.status, "
+                "edited = excluded.edited, created_at = excluded.created_at",
+                (exe.lower(), lang, text, status, int(edited), time.time()),
+            )
+            self._db.commit()
+
+    def game_notes_delete(self, exe: str, lang: str) -> None:
+        with self._lock:
+            self._db.execute("DELETE FROM game_notes WHERE exe = ? AND lang = ?", (exe.lower(), lang))
+            self._db.commit()
+
+    def recent_lines(self, exe: str, limit: int = 40) -> list[tuple[str | None, str]]:
+        """Последние реплики (говорящий, оригинал), от старых к новым: по ним модель узнаёт игру."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT speaker, source FROM lines WHERE exe = ? ORDER BY id DESC LIMIT ?", (exe.lower(), limit)
+            ).fetchall()
+        return [(r[0], r[1]) for r in reversed(rows)]
 
     # ------------------------------------------------------------------ stats
     def stats_add(self, day: str, exe: str, *, lines: int = 0, words: int = 0, seconds: int = 0) -> None:

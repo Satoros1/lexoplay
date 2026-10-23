@@ -158,6 +158,9 @@ QToolButton#rowTool:hover {{ background: #EFEDE6; }}
 QLineEdit {{ background: {CARD}; border: 1px solid {BORDER_STRONG}; border-radius: 8px; padding: 8px 10px;
             font-size: 10.5pt; selection-background-color: {GREEN_SOFT}; selection-color: {INK}; }}
 QLineEdit:focus {{ border: 2px solid {GREEN}; padding: 7px 9px; }}
+QPlainTextEdit {{ background: {CARD}; border: 1px solid {BORDER_STRONG}; border-radius: 8px; padding: 6px 8px;
+                 font-size: 10pt; selection-background-color: {GREEN_SOFT}; selection-color: {INK}; }}
+QPlainTextEdit:focus {{ border: 2px solid {GREEN}; padding: 5px 7px; }}
 QLineEdit#code {{ font-family: "Consolas", monospace; font-size: 16pt; font-weight: 700; letter-spacing: 4px;
                  padding: 8px 12px; }}
 QComboBox {{ background: {CARD}; border: 1px solid {BORDER_STRONG}; border-radius: 8px; padding: 6px 10px;

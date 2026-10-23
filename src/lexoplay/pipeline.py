@@ -102,6 +102,7 @@ class Target:
     game_exe: str = ""
     session_id: str = ""
     glossary: dict[str, str] = field(default_factory=dict, hash=False)
+    notes: str = field(default="", compare=False)  # справка по игре для промпта
 
 
 class Pipeline:
@@ -339,6 +340,7 @@ class Pipeline:
             session_id=target.session_id,
             game_exe=target.game_exe,
             glossary=dict(target.glossary),
+            notes=target.notes,
             on_partial=on_partial,
         )
         if on_source is not None:

@@ -16,6 +16,10 @@ from lexoplay.ocr_model import Line, OcrResult, Word
 REPEAT_SAME = 0.85  # так похожи две копии текста (OCR читает их чуть по-разному)
 REPEAT_MIN_CHARS = 15  # короче не трогаем: «No! No!» и «Wait. Wait.» повторяют нарочно
 REPEAT_MIN_WORDS = 3
+# Повтор одного предложения внутри реплики: только длинное. Короткое повторяют нарочно:
+# «Where's your evidence...? Y-Yeah, where's your evidence!?»
+REPEAT_SENTENCE_MIN_CHARS = 25
+REPEAT_SENTENCE_MIN_WORDS = 6
 _SENTENCE = re.compile(r"\S.*?(?:[.!?…]+[\"'»”’)\]]*(?=\s|$)|$)")
 
 _TERMINAL = tuple(".,!?…:;\"'”’»)")
@@ -40,6 +44,10 @@ def has_text(text: str) -> bool:
 
 def _long(norm: str) -> bool:
     return len(norm) >= REPEAT_MIN_CHARS and len(norm.split()) >= REPEAT_MIN_WORDS
+
+
+def _long_sentence(norm: str) -> bool:
+    return len(norm) >= REPEAT_SENTENCE_MIN_CHARS and len(norm.split()) >= REPEAT_SENTENCE_MIN_WORDS
 
 
 def _clean_score(text: str) -> float:
@@ -74,7 +82,7 @@ def drop_repeats(lines: list[str]) -> str:
     seen: list[str] = []
     for s in sentences:
         n = normalize_text(s)
-        if _long(n) and any(similarity(n, k) >= REPEAT_SAME for k in seen):
+        if _long_sentence(n) and any(_long_sentence(k) and similarity(n, k) >= REPEAT_SAME for k in seen):
             continue
         kept.append(s)
         seen.append(n)

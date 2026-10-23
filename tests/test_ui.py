@@ -427,6 +427,26 @@ class FakeCtl:
     def speakers(self, exe):
         return self.store.line_speakers(exe)
 
+    notes_busy = False
+    notes_remade = 0
+
+    def game_notes(self, exe):
+        return self.store.game_notes(exe, "ru")
+
+    def notes_state(self, exe):
+        return self.notes_busy, ""
+
+    def notes_possible(self):
+        return True
+
+    def set_game_notes(self, exe, text):
+        self.store.game_notes_set(exe, "ru", text, "ready" if text else "off", edited=True)
+
+    def remake_game_notes(self, exe):
+        self.notes_remade += 1
+        self.notes_busy = True
+        return True
+
     def get_last_read(self, exe):
         return self.last_reads.get(exe)
 
@@ -1229,3 +1249,26 @@ def test_gc_guard_collects_from_timer(qapp):  # type: ignore[no-untyped-def]
         gcguard._installed = None
         if was:
             gc.enable()
+
+
+def test_game_notes_dialog_shows_progress_and_saves_edit(window, qapp):
+    from lexoplay.ui.pages import GameNotesDialog
+
+    _w, ctl = window
+    game = ctl.store.get_game("dr1_us.exe")
+    dlg = GameNotesDialog(ctl, game)
+    assert "пока нет" in dlg.status.text() and dlg.remake.text().strip() == "Собрать"
+    dlg._remake()  # noqa: SLF001
+    assert ctl.notes_remade == 1 and "Собираю" in dlg.status.text() and dlg.edit.isReadOnly()
+    ctl.store.game_notes_set("dr1_us.exe", "ru", "GAME: Danganronpa\nTERMS:\nClass Trial = Классный суд")
+    ctl.notes_busy = False
+    _wait_for(lambda: not dlg.edit.isReadOnly(), 2000)
+    assert "Классный суд" in dlg.edit.toPlainText() and "Собрана моделью" in dlg.status.text()
+    dlg.edit.setPlainText(dlg.edit.toPlainText() + "\nFever Time = Фивер-тайм")
+    dlg._save()  # noqa: SLF001
+    rec = ctl.store.game_notes("dr1_us.exe", "ru")
+    assert rec.edited and "Фивер-тайм" in rec.text
+    dlg2 = GameNotesDialog(ctl, game)
+    assert "Поправлена тобой" in dlg2.status.text()
+    dlg.deleteLater()
+    dlg2.deleteLater()

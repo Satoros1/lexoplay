@@ -54,11 +54,11 @@ from lexoplay.games import WindowInfo
 from lexoplay.geometry import font_px_for
 from lexoplay.hotkeys import HotkeyError, parse, risk
 from lexoplay.lexo import Deck
-from lexoplay.store import Game, SavedWord, Store, StoredLine
+from lexoplay.store import Game, GameNotes, SavedWord, Store, StoredLine
 from lexoplay.ui import theme
 from lexoplay.ui.history_page import HistoryPage
 from lexoplay.ui.hotkey_edit import HotkeyEdit
-from lexoplay.ui.pages import GlossaryDialog, WordsPage
+from lexoplay.ui.pages import GameNotesDialog, GlossaryDialog, WordsPage
 from lexoplay.ui.progress_page import ProgressPage
 from lexoplay.ui.theme import app_icon, draw_logo, icon
 
@@ -134,6 +134,11 @@ class Controller(Protocol):
     def set_glossary(self, exe: str, term: str, translation: str) -> None: ...
     def delete_glossary(self, exe: str, term: str) -> None: ...
     def speakers(self, exe: str) -> list[str]: ...
+    def game_notes(self, exe: str) -> GameNotes | None: ...
+    def notes_state(self, exe: str) -> tuple[bool, str]: ...
+    def notes_possible(self) -> bool: ...
+    def set_game_notes(self, exe: str, text: str) -> None: ...
+    def remake_game_notes(self, exe: str) -> bool: ...
     def get_last_read(self, exe: str): ...  # type: ignore[no-untyped-def]
     def autostart_supported(self) -> bool: ...
     def autostart_enabled(self) -> bool: ...
@@ -310,10 +315,13 @@ class GamesPage(QWidget):
         rename.triggered.connect(lambda: self._rename(g))
         gloss = QAction("Имена и термины…", menu)
         gloss.triggered.connect(lambda: self._glossary(g))
+        notes = QAction("Справка об игре для перевода…", menu)
+        notes.triggered.connect(lambda: GameNotesDialog(self.ctl, g, self.window()).exec())
         forget = QAction("Убрать из списка", menu)
         forget.triggered.connect(lambda: self._forget(g))
         menu.addAction(rename)
         menu.addAction(gloss)
+        menu.addAction(notes)
         if g.ocr_mode:
             reocr = QAction("Подобрать распознавание заново", menu)
             reocr.triggered.connect(lambda: self._reset_ocr(g))

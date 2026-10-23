@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMenu,
+    QPlainTextEdit,
     QPushButton,
     QSizePolicy,
     QToolButton,
@@ -33,7 +34,7 @@ from PySide6.QtWidgets import (
 )
 
 from lexoplay.recall import word_spans
-from lexoplay.store import Game, SavedWord, Store, StoredLine, fold
+from lexoplay.store import Game, GameNotes, SavedWord, Store, StoredLine, fold
 from lexoplay.ui import theme
 from lexoplay.ui.explainbox import HIGHLIGHT, explain_box, row_tool
 from lexoplay.ui.theme import icon
@@ -56,6 +57,11 @@ class Ctl(Protocol):
     def set_glossary(self, exe: str, term: str, translation: str) -> None: ...
     def delete_glossary(self, exe: str, term: str) -> None: ...
     def speakers(self, exe: str) -> list[str]: ...
+    def game_notes(self, exe: str) -> GameNotes | None: ...
+    def notes_state(self, exe: str) -> tuple[bool, str]: ...
+    def notes_possible(self) -> bool: ...
+    def set_game_notes(self, exe: str, text: str) -> None: ...
+    def remake_game_notes(self, exe: str) -> bool: ...
 
 
 def when(ts: float) -> str:
@@ -473,6 +479,110 @@ class WordsPage(QWidget):
 
 
 # ------------------------------------------------------------------ Словарь игры
+class GameNotesDialog(QDialog):
+    """Справка об игре для перевода: посмотреть, поправить руками, собрать заново."""
+
+    POLL_MS = 700
+
+    def __init__(self, ctl: Ctl, game: Game, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.ctl, self.game = ctl, game
+        self.setWindowTitle(f"Справка об игре: {game.title}")
+        self.setMinimumSize(620, 560)
+        self.setStyleSheet(theme.stylesheet())
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(22, 20, 22, 20)
+        lay.setSpacing(12)
+        lay.addWidget(label("Справка об игре", "h2"))
+        lay.addWidget(
+            label(
+                "Модель посильнее один раз собирает, что знает об игре: героев, их пол и манеру речи, термины и тон. "
+                "Справка уходит в каждый перевод, поэтому имена и термины везде одинаковые, а непонятные реплики "
+                "понимаются через игру. Без спойлеров: только то, что известно с начала игры и что ты уже видел.",
+                "muted",
+                wrap=True,
+            )
+        )
+        self.status = label("", "muted", wrap=True)
+        lay.addWidget(self.status)
+        self.edit = QPlainTextEdit()
+        self.edit.setPlaceholderText(
+            "GAME: что это за игра\nCHARACTERS:\nMakoto Naegi = Макото Наэги | мужской | ...\nTERMS:\nClass Trial = Классный суд"
+        )
+        lay.addWidget(self.edit, 1)
+        row = QHBoxLayout()
+        self.remake = button(" Собрать заново", None, "refresh")
+        self.remake.setToolTip("Модель соберёт справку с нуля, с учётом героев, которые уже встречались")
+        self.remake.clicked.connect(self._remake)
+        row.addWidget(self.remake)
+        row.addStretch(1)
+        self.save = button(" Сохранить", "primary", "check")
+        self.save.setToolTip("Твоя правка: справка больше не пересобирается сама. Пустая справка выключает её")
+        self.save.clicked.connect(self._save)
+        close = QPushButton("Закрыть")
+        close.clicked.connect(self.reject)
+        row.addWidget(self.save)
+        row.addWidget(close)
+        lay.addLayout(row)
+        self._loaded = ""
+        self._busy = False
+        self._timer = QTimer(self)
+        self._timer.setInterval(self.POLL_MS)
+        self._timer.timeout.connect(self._poll)
+        self._load()
+
+    def _load(self) -> None:
+        rec = self.ctl.game_notes(self.game.exe)
+        busy, error = self.ctl.notes_state(self.game.exe)
+        self._busy = busy
+        self._loaded = rec.text if rec is not None else ""
+        self.edit.setPlainText(self._loaded)
+        self.edit.setReadOnly(busy)
+        possible = self.ctl.notes_possible()
+        self.remake.setEnabled(possible and not busy)
+        self.remake.setText(" Собрать заново" if rec is not None and rec.text else " Собрать")
+        self.save.setEnabled(not busy)
+        self.status.setText(self._status_text(rec, busy, error, possible))
+        if busy:
+            self._timer.start()
+        else:
+            self._timer.stop()
+
+    @staticmethod
+    def _status_text(rec: GameNotes | None, busy: bool, error: str, possible: bool) -> str:
+        if busy:
+            return "Собираю справку… Обычно это до минуты, переводить можно и сейчас."
+        if error:
+            return f"Не собралась: {error}"
+        when = datetime.fromtimestamp(rec.created_at).strftime("%d.%m %H:%M") if rec is not None else ""
+        if rec is None:
+            if not possible:
+                return "Справку собирает своя модель, нужен свой ключ Anthropic. Можно написать справку самому."
+            return "Справки пока нет: соберётся сама при следующем переводе, или нажми «Собрать»."
+        if rec.status == "unknown":
+            return "Модель не знает эту игру, перевод идёт без справки. Можно написать её самому: кто есть кто, как переводить термины."
+        if rec.status == "off":
+            return "Справка выключена, перевод идёт без неё."
+        if rec.edited:
+            return f"Поправлена тобой {when}. Сама больше не пересобирается."
+        return f"Собрана моделью {when}. Дособерётся сама, когда в игре появятся новые герои."
+
+    def _poll(self) -> None:
+        busy, _error = self.ctl.notes_state(self.game.exe)
+        if not busy:
+            self._load()
+
+    def _remake(self) -> None:
+        if self.ctl.remake_game_notes(self.game.exe):
+            self._load()
+
+    def _save(self) -> None:
+        text = self.edit.toPlainText().strip()
+        if text != self._loaded.strip():
+            self.ctl.set_game_notes(self.game.exe, text)
+        self.accept()
+
+
 class GlossaryDialog(QDialog):
     def __init__(self, ctl: Ctl, game: Game, parent: QWidget | None = None) -> None:
         super().__init__(parent)

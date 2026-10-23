@@ -44,7 +44,9 @@ LATIN_TARGETS = frozenset({"en", "nl", "de", "es", "fr", "it", "pt", "pl"})  # �
 # 5: рассуждения модели, попавшие в ответ, и подпись имени вырезаются (в 4 они бывали в переводе)
 # 6: имя говорящего больше не попадает в текст реплики (в 5 из-за «SPEAKING» на плашке имени попадало,
 #    а похожая реплика без имени потом находилась в кеше вместе со старым переводом с именем)
-TRANSLATION_VERSION = 6
+# 7: справка по игре (герои, термины, тон) и правила понимать реплику через игру; нарочные повторы
+#    внутри реплики больше не выбрасываются
+TRANSLATION_VERSION = 7
 
 SYSTEM_PROMPT = """You are the localizer of the video game "{game}". The player reads its dialogue in {target}: you translate it line by line while they play.
 
@@ -54,17 +56,21 @@ Write the translation a professional {target} game localizer would ship:
 - Translate only what the line says: never add a meaning, a reason or an ending of your own. If the OCR lost words or the line breaks off mid-sentence, translate what is there and end with "...".
 - Keep the perspective: a line in which the speaker talks about themselves stays in the first person and is never retold ("he says that...", "she asks..."). Never talk to the player, never add the speaker's name.
 - A line with a speaker is that character's own words. A line without a speaker is narration, the hero's thoughts, a sign or a menu: translate it as such.
+- Use what you know about {game}: its world, the story so far, the characters, how they relate to each other and how they talk, its mechanics and terms (the game notes below sum this up). Read every line in that light: a line that looks odd or garbled usually means something specific in this game (a mechanic, an item, a nickname, a running joke, a callback to an earlier scene), so translate that meaning, not the words one by one. Your knowledge only explains the line: never add facts the line doesn't state and never reveal what happens later in the game.
+- Game terms (mechanics, modes, items, titles, places) read like the proper name of that thing in {target} and stay the same every time: take them from the glossary or the game notes. A term that isn't there gets a short natural {target} name a player would understand, never a transliteration of the English sounds.
+- Tutorial and system lines explain the controls and mechanics: make them clear and exact, with the same terms the game uses elsewhere.
+- The result must make sense in the scene. If you can't make sense of a line even with the context and the game in mind, translate what is clear and keep it plain; never write nonsense.
 - Keep each character's voice: slang, rudeness, jokes, hesitation, politeness. Stay consistent with the earlier translations: the same form of address between the same characters (ты/вы and the like), the same genders, the same names and terms. The glossary wins over everything. Write names in the {target} alphabet by its usual transliteration rules; when {target} has its own alphabet, never leave a name in Latin letters.
 - The text comes from OCR and can be garbled: l/I, 0/O, rn/m, split or merged words ("vi ew", "becamewarped"), stray symbols like | or #, a few stray letters after the last sentence ("... say? lij": that is the text box arrow, drop it). Work out the words the game really shows from the letters and the context, then translate them. ALL CAPS is just the game's font: use normal capitalization.
-- The screen sometimes shows the same text twice (say, in a box behind the dialogue), so a sentence may come twice: translate it once and never invent a link between the copies.
+- The screen sometimes shows the same text twice (say, in a box behind the dialogue), so a long sentence may come twice: translate it once and never invent a link between the copies. A character repeating their own words on purpose is not that ("Where's your evidence...? Y-Yeah, where's your evidence!?"): translate every part.
 - If the speaker label looks like a piece of the sentence rather than a name, treat it as part of the line.
 - Stuttering and drawn-out words stay that way in the translation (b-b-blabbermouth → б-б-болтун, Nooo → Нееет). A word in *asterisks* is emphasis: keep the emphasis in the wording, drop the asterisks.
 - Russian and similar languages mark the speaker's gender in verbs and adjectives: work it out from the speaker's name and the earlier lines, and keep it the same for each character.
-- Punctuation: keep ? ! and three dots (...) as in the original, and a period where it has one. If the original ends with a comma or breaks off because the sentence continues in the next text box, end with "..." and never with a comma.
+- Punctuation: keep ? ! and three dots (...) as in the original, and a period where it has one. A line that starts with "..." continues the previous text box: start the translation with "..." too. If the original ends with a comma or breaks off because the sentence continues in the next text box, end with "..." and never with a comma.
 {examples}
 Reply with the translation of the line after "Translate this line". Then on a new line write "@@" and that line in {source} as the game really shows it: the OCR mistakes fixed, the same words and punctuation, normal capitalization, no speaker name. Nothing else: no quotes, no notes.
 Work out the garbled words silently, before you answer: the reply is shown to the player as is, so it never contains your reasoning, guesses about the OCR, corrections of yourself, alternatives or a second version: write the translation once, from start to end. If you can't be sure of a word, choose the most likely one and translate.
-Never use the em dash character; use a comma, a colon or a new sentence instead."""
+Never use the em dash character; use a comma, a colon or a new sentence instead.{notes}"""
 
 SOURCE_MARK = "@@"
 
@@ -90,6 +96,51 @@ def examples_block(target_lang: str) -> str:
         return ""
     lines = "\n".join(f"{en} → {tr}" for en, tr in pairs)
     return f"\nExamples of the style we want (original → translation):\n{lines}\n"
+
+
+# Справка по игре: один раз на игру модель посильнее пишет, что это за игра, как зовут героев
+# по-русски, какого они пола и как говорят, как называются термины. Справка идёт в промпт каждой
+# реплики (кешируется вместе с ним), поэтому имена и термины одинаковые, а странные реплики
+# понимаются через игру.
+NOTES_MAX_CHARS = 7000
+NOTES_MAX_TOKENS = 6000
+NOTES_TIMEOUT_S = 150.0
+NOTES_SAMPLE_LINES = 40
+
+NOTES_PROMPT = """You prepare notes for a localizer who translates the video game "{game}" from {source} into {target} line by line while the player plays.
+Use only what you really know about this game. If you don't know it at all, reply with the single word UNKNOWN.
+No spoilers: describe the game, the characters and the terms as they are at the start of the game, plus what the lines from the player's screen already show. Never reveal twists, culprits, deaths, secret identities or anything else the player hasn't reached.
+
+The player reads these notes too: write the descriptions in {target}; the names and terms on the left stay as the game writes them.
+Reply in exactly this format, plain text, no markdown:
+GAME: 2-3 sentences: genre, setting, tone, who the player character is, how the story is told.
+CHARACTERS:
+English name = {target} spelling | gender as presented at the start | their title or role | how they talk and address others, in a few words
+(the main and recurring characters, up to 25 lines)
+TERMS:
+English term = {target} translation | a few words of what it is
+(game-specific mechanics, modes, items, titles, places, organizations, catchphrases: up to 40 lines. Use the established official or fan {target} translation if there is one; otherwise a short natural {target} name a player would understand, not a transliteration of the English sounds)
+STYLE: 1-3 sentences: the tone the translation should keep, and ты/вы or similar forms between the characters where it matters."""
+
+
+def build_notes_user(game: str, lines: list[tuple[str | None, str]], speakers: list[str]) -> str:
+    parts = [f'Game: "{game}"']
+    if speakers:
+        parts.append("Characters the player has met (as the game writes them): " + ", ".join(speakers[:40]))
+    if lines:
+        parts.append("Lines from the player's screen, oldest first (OCR, may be garbled):")
+        parts += [_line(sp, text) for sp, text in lines[-NOTES_SAMPLE_LINES:]]
+    parts.append("Write the notes.")
+    return "\n".join(parts)
+
+
+def clean_notes(text: str) -> str | None:
+    """Ответ модели -> справка. None: модель не знает игру."""
+    t = text.strip().strip("`").strip()
+    if not t or t.upper().startswith("UNKNOWN") or len(t) < 40:
+        return None
+    t = re.sub(r"\*\*|^#+\s*", "", t, flags=re.MULTILINE)  # markdown, если всё же написала
+    return t[:NOTES_MAX_CHARS].strip()
 
 
 MAX_TOKENS = 1024
@@ -131,6 +182,7 @@ class TranslateRequest:
     session_id: str = ""
     game_exe: str = ""
     previous: str | None = None  # «Перевести иначе»: прошлый перевод, который не понравился
+    notes: str = ""  # справка по игре: герои, термины, тон (game_notes)
     # кусок перевода по мере того, как модель его пишет (из фонового потока)
     on_partial: Partial | None = field(default=None, compare=False, repr=False)
 
@@ -150,12 +202,24 @@ def lang_name(code: str) -> str:
     return LANGS.get(code, code)
 
 
+def notes_block(notes: str) -> str:
+    notes = notes.strip()
+    if not notes:
+        return ""
+    return (
+        "\n\nGame notes: what is known about this game, its characters and terms. Follow them for names, genders, "
+        "terms and tone (the glossary wins over them); they only help you understand the lines and are never "
+        "quoted or retold in the translation.\n<game_notes>\n" + notes[:NOTES_MAX_CHARS] + "\n</game_notes>"
+    )
+
+
 def build_system(req: TranslateRequest) -> str:
     return SYSTEM_PROMPT.format(
         target=lang_name(req.target_lang),
         source=lang_name(req.source_lang),
         game=(req.game or "unknown").replace('"', "'"),
         examples=examples_block(req.target_lang),
+        notes=notes_block(req.notes),
     )
 
 
@@ -225,6 +289,16 @@ def line_ending(text: str) -> str:
     if tail[-1] in "—–-":
         return "—"
     return "."
+
+
+_LEAD_DOTS = re.compile(r"^\s*[\"'“«(]?\s*(?:\.{2,}|…)")
+
+
+def fix_start(source: str, translation: str) -> str:
+    """Оригинал начинается с «...» (продолжение прошлого окна диалога): перевод тоже."""
+    if translation and _LEAD_DOTS.match(source) and not _LEAD_DOTS.match(translation):
+        return "..." + translation.lstrip()
+    return translation
 
 
 def fix_punctuation(source: str, translation: str) -> str:
@@ -574,6 +648,52 @@ class AnthropicTranslator:
             params["output_config"] = {"effort": "low"}
         return params
 
+    async def game_notes(
+        self,
+        game: str,
+        lines: list[tuple[str | None, str]],
+        speakers: list[str],
+        *,
+        source_lang: str = "en",
+        target_lang: str = "ru",
+    ) -> tuple[str | None, tuple[int, int] | None]:
+        """Справка по игре (NOTES_PROMPT) и токены. Справка None: модель не знает эту игру."""
+        a = self._anthropic
+        params: dict = {
+            "model": self._model,
+            "max_tokens": NOTES_MAX_TOKENS,
+            "system": NOTES_PROMPT.format(
+                game=(game or "unknown").replace('"', "'"), source=lang_name(source_lang), target=lang_name(target_lang)
+            ),
+            "messages": [{"role": "user", "content": build_notes_user(game, lines, speakers)}],
+        }
+        if self._mode == "think":
+            params["output_config"] = {"effort": "medium"}
+        elif self._mode == "off":
+            params["thinking"] = {"type": "disabled"}
+        else:
+            params["output_config"] = {"effort": "low"}
+        for _attempt in range(2):
+            try:
+                msg = await self._client.messages.create(**params, timeout=NOTES_TIMEOUT_S)
+                break
+            except a.BadRequestError as exc:
+                low = str(exc).lower()
+                if "output_config" in params and ("effort" in low or "output_config" in low):
+                    params.pop("output_config")  # модель без effort
+                    continue
+                if "thinking" in params and "thinking" in low:
+                    params.pop("thinking")
+                    params["output_config"] = {"effort": "low"}
+                    continue
+                raise friendly_error(a, exc, self._model) from exc
+            except Exception as exc:
+                raise friendly_error(a, exc, self._model) from exc
+        else:
+            raise TranslationError("Модель не приняла запрос справки по игре.")
+        text = "".join(getattr(b, "text", "") for b in msg.content if getattr(b, "type", "") == "text")
+        return clean_notes(text), usage_of(msg)
+
     async def warm(self) -> None:
         """Открыть соединение заранее (TLS ~0.1–0.3 с), пока идёт захват и OCR."""
         if time.monotonic() - self._last_used < 20:
@@ -624,8 +744,9 @@ class AnthropicTranslator:
                 learn_names(c.source, c.translation, req.target_lang)
             for k, v in req.glossary.items():
                 learn_names(k, v, req.target_lang)
-            translation = fix_punctuation(
-                req.text, clean_translation(raw, req.speaker, target_lang=req.target_lang, source=req.text)
+            translation = fix_start(
+                req.text,
+                fix_punctuation(req.text, clean_translation(raw, req.speaker, target_lang=req.target_lang, source=req.text)),
             )
             translation = fix_latin_names(translation, req.target_lang)
             if translation:

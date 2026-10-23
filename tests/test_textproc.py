@@ -91,6 +91,8 @@ def test_same_text_twice_on_screen_is_read_once():
     # нарочные короткие повторы и обычный перенос не трогаем
     assert drop_repeats(["No! No! No!"]) == "No! No! No!"
     assert drop_repeats(["I said run. I said run."]) == "I said run. I said run."
+    evidence = ["Where's your evidence...? Y-Yeah, where's your", "evidence!?"]  # Исимару переспрашивает сам себя
+    assert drop_repeats(evidence) == "Where's your evidence...? Y-Yeah, where's your evidence!?"
     assert drop_repeats(["Before we go any farther, I guess I should", "introduce myself."]) == (
         "Before we go any farther, I guess I should introduce myself."
     )

@@ -131,7 +131,7 @@ def test_streams_translation_with_medium_effort_and_fixed_source():
     parts = []
     req = TranslateRequest("...SUSPECTS CLAIM TO HAVE BEEN THREATENED INT0...", None, "Hotline Miami", on_partial=parts.append)
     res = asyncio.run(_sdk_translator(handler).translate(req))
-    assert res.translation == "Подозреваемые утверждают, что им угрожали…"
+    assert res.translation == "...Подозреваемые утверждают, что им угрожали…"  # «...» в начале оригинала сохраняется
     assert res.source == "...Suspects claim to have been threatened into..."  # оригинал без ошибок OCR, для режима слов
     # первые слова ждут, пока не станет ясно, что это не подпись «Имя:»
     assert parts[0].startswith("Подозреваемые утверждают") and not any("@" in x or "Suspects" in x for x in parts)
@@ -358,3 +358,66 @@ def test_latin_name_takes_spelling_from_earlier_lines():
     assert T.fix_latin_names("Mondo тоже знал.") == "Mondo тоже знал."  # как писать, не знаем: не трогаем
     assert T.fix_latin_names("Maybe Byakuya knew", "en") == "Maybe Byakuya knew"
     assert T.tidy_saved("Byakuya Togami Это ты хочешь сказать? lij", "Byakuya Togami") == "Это ты хочешь сказать?"
+
+
+NOTES = """GAME: Danganronpa: Trigger Happy Havoc, a murder mystery visual novel at Hope's Peak Academy.
+CHARACTERS:
+Makoto Naegi = Макото Наэги | male | Ultimate Lucky Student | polite, unsure
+Kiyotaka Ishimaru = Киётака Исимару | male | Ultimate Moral Compass | loud, formal
+TERMS:
+Class Trial = Классный суд | the trial after each murder
+Fever Time = Фивер-тайм | the rhythm minigame speeds up
+STYLE: Students mostly use ты between each other."""
+
+
+def _message(text: str):  # type: ignore[no-untyped-def]
+    return {
+        "id": "msg_1",
+        "type": "message",
+        "role": "assistant",
+        "model": "claude-sonnet-5-5",
+        "content": [{"type": "text", "text": text}],
+        "stop_reason": "end_turn",
+        "stop_sequence": None,
+        "usage": {"input_tokens": 900, "output_tokens": 400},
+    }
+
+
+def test_game_notes_are_made_once_and_go_into_every_prompt():
+    from lexoplay.translate import build_system
+
+    http = _http()
+    seen = []
+
+    def handler(req):
+        seen.append(json.loads(req.content))
+        return http.Response(200, json=_message("**" + NOTES + "**"))
+
+    tr = _sdk_translator(handler)
+    lines = [("Kiyotaka Ishimaru", "Where's your evidence...? Y-Yeah, where's your evidence!?")]
+    notes, usage = asyncio.run(tr.game_notes("Danganronpa : Trigger Happy Havoc", lines, ["Kiyotaka Ishimaru"]))
+    assert notes == NOTES and usage == (900, 400)  # markdown снят
+    body = seen[0]
+    assert "No spoilers" in body["system"] and "Russian" in body["system"]
+    user = body["messages"][0]["content"]
+    assert "Kiyotaka Ishimaru" in user and "Where's your evidence" in user
+    assert body.get("output_config") == {"effort": "medium"}  # переводчик с thinking: справка тоже
+
+    with_notes = build_system(TranslateRequest("Hi", None, "DR", notes=notes))
+    assert "<game_notes>" in with_notes and "Фивер-тайм" in with_notes and "never reveal what happens later" in with_notes
+    assert "<game_notes>" not in build_system(TranslateRequest("Hi", None, "DR"))
+
+
+def test_unknown_game_gives_no_notes():
+    http = _http()
+    tr = _sdk_translator(lambda req: http.Response(200, json=_message("UNKNOWN")))
+    notes, _usage = asyncio.run(tr.game_notes("Some Tiny Indie Game", [], []))
+    assert notes is None
+
+
+def test_line_continuing_previous_box_keeps_leading_dots():
+    from lexoplay.translate import fix_start
+
+    assert fix_start("...Fever Time will activate.", "Начнётся Фивер-тайм.") == "...Начнётся Фивер-тайм."
+    assert fix_start("…and then", "...а потом") == "...а потом"
+    assert fix_start("Fever Time will activate.", "Начнётся Фивер-тайм.") == "Начнётся Фивер-тайм."
