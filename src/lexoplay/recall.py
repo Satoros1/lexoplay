@@ -1,10 +1,10 @@
 """Сохранённые слова, которые снова встретились: под переводом реплики мелкая подсказка «eerie · жуткий».
 
-Так сохранённое слово повторяется прямо в игре, в новом контексте. Чтобы подсказка не надоедала:
-- не больше трёх слов за реплику;
-- одно и то же слово не чаще раза в 15 минут (та же реплика, нажатая ещё раз, показывает его снова);
-- не в той реплике, из которой слово сохраняли, и не в первые минуты после сохранения.
-Каждая новая встреча считается: «встречалось N раз» видно во вкладке «Слова» и в подсказке (×N).
+Так сохранённое слово повторяется прямо в игре, в новом контексте. Подсказка есть всегда, когда
+сохранённое слово есть в реплике (до трёх слов за реплику): подчёркнуто жёлтым в F3, значит и под
+переводом видно. Встречей считается только новая реплика: не та, из которой слово сохраняли, не та
+же реплика ещё раз и не первые минуты после сохранения. «Встречалось N раз» видно во вкладке «Слова»
+и в подсказке (×N).
 """
 
 from __future__ import annotations
@@ -19,7 +19,6 @@ from lexoplay.rarity import bases
 from lexoplay.store import SavedWord, fold
 from lexoplay.words import is_stopword
 
-SHOW_EVERY_S = 15 * 60
 FRESH_S = 120.0  # только что сохранил: напоминать рано
 MAX_CHIPS = 3
 TRANSLATION_CHARS = 32
@@ -149,10 +148,8 @@ class RecallIndex:
 class Recaller:
     """Решает, что из найденного показать сейчас, и считает встречи."""
 
-    def __init__(self, *, every_s: float = SHOW_EVERY_S, clock: Callable[[], float] = time.time) -> None:
-        self.every_s = every_s
+    def __init__(self, *, clock: Callable[[], float] = time.time) -> None:
         self._clock = clock
-        self._shown: dict[str, tuple[float, str]] = {}  # слово -> (когда показали, в какой реплике)
         self._counted: dict[str, str] = {}  # слово -> реплика, где посчитали встречу последний раз
 
     def pick(self, index: RecallIndex, text: str, *, commit: bool = True) -> tuple[list[RecallChip], list[int]]:
@@ -162,21 +159,14 @@ class Recaller:
         chips: list[RecallChip] = []
         counted: list[int] = []
         for e in index.find(text):
-            if norm in e.sentences or now - e.created_at < FRESH_S:
-                continue
-            new = self._counted.get(e.key) != norm
-            seen = e.seen + (1 if new else 0)
-            if new:
+            seen = e.seen
+            own_line = norm in e.sentences or now - e.created_at < FRESH_S  # там и сохраняли: не встреча
+            if not own_line and self._counted.get(e.key) != norm:
+                seen += 1
                 counted.extend(e.ids)
                 if commit:
                     self._counted[e.key] = norm
                     e.seen = seen
-            shown = self._shown.get(e.key)
-            if shown and shown[1] != norm and now - shown[0] < self.every_s:
-                continue
-            if len(chips) >= MAX_CHIPS:
-                continue
-            chips.append(RecallChip(e.word, e.translation, seen))
-            if commit and (shown is None or shown[1] != norm):
-                self._shown[e.key] = (now, norm)
+            if len(chips) < MAX_CHIPS:
+                chips.append(RecallChip(e.word, e.translation, seen))
         return chips, counted

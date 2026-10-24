@@ -1,7 +1,7 @@
 """Трудные слова (частотный список) и напоминание о сохранённых словах."""
 
 from lexoplay.rarity import LEVELS, bases, rank, tier
-from lexoplay.recall import FRESH_S, MAX_CHIPS, Recaller, RecallIndex, short_translation
+from lexoplay.recall import MAX_CHIPS, Recaller, RecallIndex, short_translation
 from lexoplay.store import SavedWord, Store
 from lexoplay.wordmode import game_names, reader_views
 
@@ -73,7 +73,7 @@ def test_recall_finds_saved_words_forms_and_phrases():
     assert short_translation("очень-очень длинный перевод этого слова") .endswith("…")
 
 
-def test_recaller_throttles_skips_source_and_counts():
+def test_recaller_always_shows_saved_words_and_counts_new_lines():
     t = [OLD + 3600]
     idx = RecallIndex(
         [
@@ -84,23 +84,20 @@ def test_recaller_throttles_skips_source_and_counts():
     )
     r = Recaller(clock=lambda: t[0])
     chips, ids = r.pick(idx, "Despair and dread. So eerie.", commit=False)
-    assert [c.word for c in chips] == ["despair", "eerie"] and ids == [3, 1]
+    assert [c.word for c in chips] == ["despair", "dread", "eerie"] and ids == [3, 1]  # dread видно, но не встреча
     chips, ids = r.pick(idx, "Despair and dread. So eerie.")
-    assert [(c.word, c.seen) for c in chips] == [("despair", 5), ("eerie", 1)] and ids == [3, 1]
+    assert [(c.word, c.seen) for c in chips] == [("despair", 5), ("dread", 0), ("eerie", 1)] and ids == [3, 1]
     # та же реплика ещё раз (F2 повторно): подсказки те же, встреча не считается второй раз
     chips, ids = r.pick(idx, "Despair and dread. So eerie.")
-    assert len(chips) == 2 and ids == []
-    # новая реплика через минуту: встреча считается, но подсказку не повторяем
+    assert len(chips) == 3 and ids == []
+    # новая реплика через минуту: подсказка снова есть, встреча считается
     t[0] += 60
     chips, ids = r.pick(idx, "Eerie silence.")
-    assert chips == [] and ids == [1]
-    # через 15 минут снова можно; dread уже не «только что»
-    t[0] += 15 * 60 + FRESH_S
-    chips, _ids = r.pick(idx, "Another eerie dread.")
-    assert [(c.word, c.seen) for c in chips] == [("eerie", 3), ("dread", 1)]
-    # та реплика, из которой слово сохраняли: не напоминаем
+    assert [(c.word, c.seen) for c in chips] == [("eerie", 2)] and ids == [1]
+    # та реплика, из которой слово сохраняли: подсказка есть (слово жёлтое в F3), но это не встреча
     t[0] += 3600
-    assert r.pick(idx, "This place is eerie.") == ([], [])
+    chips, ids = r.pick(idx, "This place is eerie.")
+    assert [c.word for c in chips] == ["eerie"] and ids == []
     many = RecallIndex([_w(w, "x", i) for i, w in enumerate(["alpha", "bravo", "charlie", "delta", "echo"], 10)])
     chips, ids = Recaller(clock=lambda: t[0]).pick(many, "alpha bravo charlie delta echo")
     assert len(chips) == MAX_CHIPS and len(ids) == 5
@@ -143,3 +140,11 @@ def test_word_spans_for_bold_examples():
     assert bold("She wasn't a blameless victim.", "Blameless") == ["blameless"]
     assert bold("Don't jump to conclusions.", "jump to", "jump to conclusions") == ["jump to conclusions"]
     assert bold("Nothing here.", "eerie", "eerie") == []
+
+
+def test_contractions_are_as_common_as_their_word():
+    from lexoplay.rarity import tier
+
+    for t in ("she'd", "she’d", "they've", "couldn't", "won't", "it'll", "we're"):
+        assert tier(t, "b2") == "common", t  # she'd не трудное слово, хотя в частотном списке далеко
+    assert tier("eerie", "b2") == "rare"

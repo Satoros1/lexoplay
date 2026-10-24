@@ -43,6 +43,10 @@ def norm(token: str) -> str:
     return clean(token.replace("’", "'").replace("‘", "'")).lower()
 
 
+_CONTRACTIONS = ("n't", "'d", "'ll", "'ve", "'re", "'m")
+_NOT_BASES = {"won't": "will", "can't": "can", "shan't": "shall", "ain't": "be"}
+
+
 def bases(word: str, *, irregular: bool = True) -> set[str]:
     """Словарные формы по окончаниям словоизменения (без -er/-est/-ly: bitter не bit)."""
     w = word
@@ -61,6 +65,10 @@ def bases(word: str, *, irregular: bool = True) -> set[str]:
         if len(base) > 2 and base[-1] == base[-2] and base[-1] not in "lsz":
             out.add(base[:-1])  # stopped -> stop
 
+    for tail in _CONTRACTIONS:  # she'd, they've, couldn't: слово как у she, they, could
+        if w.endswith(tail) and len(w) > len(tail):
+            out.add(_NOT_BASES.get(w, w[: -len(tail)]))
+            break
     n = len(w)
     if w.endswith("ies") and n > 4:
         out.add(w[:-3] + "y")
