@@ -62,7 +62,7 @@ def test_recall_finds_saved_words_forms_and_phrases():
             _w("eerie", "жуткий, зловещий; странный", 4, sentence="This place is eerie."),
             _w("Eerie", "жуткий", 5, lemma="eerie"),
             _w("the", "артикль", 6),  # служебные не напоминаем
-            _w("give sb a hand", "помочь", 7),  # с заполнителем не ищем
+            _w("give sb a hand", "помочь", 7),  # здесь его нет: нужно «give <кому-то> a hand»
         ]
     )
     found = [e.word for e in idx.find("He gave up, I see seeds. It's eerie. Gives me chills.")]
@@ -148,3 +148,37 @@ def test_contractions_are_as_common_as_their_word():
     for t in ("she'd", "she’d", "they've", "couldn't", "won't", "it'll", "we're"):
         assert tier(t, "b2") == "common", t  # she'd не трудное слово, хотя в частотном списке далеко
     assert tier("eerie", "b2") == "rare"
+
+
+def test_recall_sees_the_same_forms_as_f3_and_phrases_with_gaps():
+    idx = RecallIndex(
+        [
+            _w("give sb a hand", "помочь", 1),
+            _w("make up one's mind", "решиться", 2),
+            _w("pick up", "подбирать", 3),
+            _w("figure out", "понять", 4),
+            _w("stuck", "застрять", 5, lemma="stick"),
+            _w("eerie", "жуткий", 6),
+            _w("lie", "лгать", 7),
+            _w("terrible", "ужасный", 8),
+            _w("happy", "счастливый", 9),
+        ],
+        lexo={"hesitate": "колебаться", "get cold feet": "струсить", "eerie": "зловещий"},
+    )
+
+    def found(text: str) -> list[str]:
+        return [e.word for e in idx.find(text)]
+
+    assert found("Can you give me a hand?") == ["give sb a hand"]
+    assert found("She made up her mind.") == ["make up one's mind"]
+    assert found("Pick it up!") == ["pick up"]
+    assert found("I figured the whole thing out.") == ["figure out"]
+    assert found("It got stuck.") == ["stick"]  # неправильная форма
+    assert found("It's eerily quiet. You're lying! That was terribly rude, but I'm happier.") == [
+        "eerie", "lie", "terrible", "happy"
+    ]
+    assert found("He hesitated. Don't get cold feet now.") == ["hesitate", "get cold feet"]  # из словаря Lexo
+    eerie = next(e for e in idx.entries if e.word == "eerie")
+    assert eerie.translation == "жуткий" and eerie.ids == [6]  # своё сохранённое важнее записи из Lexo
+    lexo = next(e for e in idx.entries if e.word == "hesitate")
+    assert lexo.ids == [] and lexo.seen == 0

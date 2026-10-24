@@ -242,9 +242,15 @@ class LexoClient:
     async def create_deck(self, title: str) -> Deck:
         return Deck.from_json(await self._request("POST", "/desktop/decks", json={"title": title.strip()[:128]}))
 
-    async def vocab(self, since: str | None = None) -> tuple[list[str], str]:
+    async def vocab(self, since: str | None = None) -> tuple[list[str], str, dict[str, str]]:
+        """(словарные формы, время сервера, перевод по слову). Перевод отдаёт сервер с 0.6.27, старый: {}."""
         data = await self._request("GET", "/desktop/vocab", params={"since": since} if since else None, timeout=20)
-        return [str(x) for x in data.get("items", [])], str(data.get("server_time", ""))
+        translations = {
+            str(e.get("text") or "").strip().lower(): str(e.get("translation") or "").strip()
+            for e in data.get("entries") or []
+            if isinstance(e, dict) and e.get("text")
+        }
+        return [str(x) for x in data.get("items", [])], str(data.get("server_time", "")), translations
 
     # ------------------------------------------------------------------ игра
     async def translate(

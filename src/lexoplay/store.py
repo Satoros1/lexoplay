@@ -250,6 +250,9 @@ class Store:
             self._db.execute("ALTER TABLE words ADD COLUMN seen INTEGER NOT NULL DEFAULT 0")
             self._db.execute("ALTER TABLE words ADD COLUMN seen_at REAL NOT NULL DEFAULT 0")
         self._db.execute("CREATE INDEX IF NOT EXISTS words_exe_time ON words (exe, created_at)")
+        vocab_cols = {r[1] for r in self._db.execute("PRAGMA table_info(vocab)").fetchall()}
+        if "translation" not in vocab_cols:  # до 0.6.27: слова Lexo без перевода
+            self._db.execute("ALTER TABLE vocab ADD COLUMN translation TEXT")
         cols = {r[1] for r in self._db.execute("PRAGMA table_info(games)").fetchall()}
         for col, ddl in (
             ("deck_mode", "TEXT NOT NULL DEFAULT 'game'"),
@@ -424,16 +427,29 @@ class Store:
         with self._lock:
             return {r[0] for r in self._db.execute("SELECT word FROM vocab").fetchall()}
 
-    def vocab_add(self, words: list[str] | set[str]) -> None:
+    def vocab_add(self, words: list[str] | set[str], translations: dict[str, str] | None = None) -> None:
+        tr = translations or {}
         with self._lock:
             self._db.executemany("INSERT OR IGNORE INTO vocab (word) VALUES (?)", [(w,) for w in words])
+            self._db.executemany(
+                "UPDATE vocab SET translation = ? WHERE word = ?", [(t, w) for w, t in tr.items() if t and w in words]
+            )
             self._db.commit()
 
-    def vocab_replace(self, words: list[str] | set[str]) -> None:
+    def vocab_replace(self, words: list[str] | set[str], translations: dict[str, str] | None = None) -> None:
+        tr = translations or {}
         with self._lock:
             self._db.execute("DELETE FROM vocab")
-            self._db.executemany("INSERT OR IGNORE INTO vocab (word) VALUES (?)", [(w,) for w in words])
+            self._db.executemany(
+                "INSERT OR IGNORE INTO vocab (word, translation) VALUES (?, ?)", [(w, tr.get(w) or None) for w in words]
+            )
             self._db.commit()
+
+    def vocab_translations(self) -> dict[str, str]:
+        """Слова Lexo с переводом: для подсказки под переводом реплики."""
+        with self._lock:
+            rows = self._db.execute("SELECT word, translation FROM vocab WHERE translation IS NOT NULL AND translation != ''")
+            return {r[0]: r[1] for r in rows.fetchall()}
 
     # ------------------------------------------------------------------ lines: кеш и история
     _LINE_COLS = "id, exe, norm, speaker, source, translation, lang, created_at, seen_at, hits, star"

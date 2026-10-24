@@ -263,7 +263,7 @@ class App(QObject):
         self._busy_recall: list[RecallChip] = []  # сохранённые слова из неё: подсказки видны уже с точками
         self.recaller = Recaller()
         self._recall_index: RecallIndex | None = None
-        self._recall_stamp: tuple[int, int] = (-1, -1)
+        self._recall_stamp: tuple = ()
         self._names: dict[str, tuple[float, set[str]]] = {}  # exe -> (когда собрали, имена игры)
         self._last_input = 0.0  # когда игрок последний раз кликал или жал клавишу (monotonic)
         self._busy_since = 0.0  # когда начался текущий перевод
@@ -1146,11 +1146,13 @@ class App(QObject):
                 if isinstance(err, LexoError):
                     self._on_lexo_error(err)
                 return
-            items, server_time = result
+            items, server_time, translations = result
             if since is None:
-                self.vocab.replace(items, server_time)
+                if not translations and self.vocab.translations():
+                    translations = self.vocab.translations()  # старый сервер без переводов: не теряем уже полученные
+                self.vocab.replace(items, server_time, translations)
             else:
-                self.vocab.merge(items, server_time)
+                self.vocab.merge(items, server_time, translations)
             log.info("словарь Lexo: %s слов", len(self.vocab))
 
         self.run_bg(self.client.vocab(since), finished)
@@ -2329,9 +2331,10 @@ class App(QObject):
         if not self.settings.recall_words or not text or not text.strip():
             return []
         try:
-            stamp = self.store.words_stamp()
+            # свои сохранённые слова и словарь Lexo (бот): что в F3 жёлтое, то видно и под переводом
+            stamp = (self.store.words_stamp(), self.vocab.version)
             if self._recall_index is None or stamp != self._recall_stamp:
-                self._recall_index = RecallIndex(self.store.words_list(limit=5000))
+                self._recall_index = RecallIndex(self.store.words_list(limit=5000), lexo=self.vocab.translations())
                 self._recall_stamp = stamp
             if not len(self._recall_index):
                 return []

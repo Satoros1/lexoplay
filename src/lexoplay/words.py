@@ -56,6 +56,23 @@ IRREGULAR = {
     "mice": "mouse", "feet": "foot", "teeth": "tooth", "lives": "life", "wives": "wife",
     "knives": "knife", "better": "good", "best": "good", "worse": "bad", "worst": "bad",
 }
+# ещё неправильные формы: сохранил stick, в реплике stuck (и для жёлтого в F3, и для подсказки под переводом)
+IRREGULAR.update(
+    dict(
+        pair.split("=")
+        for pair in """
+stuck=stick struck=strike stung=sting swung=swing clung=cling flung=fling spun=spin dug=dig hung=hang
+stole=steal froze=freeze slid=slide bled=bleed sped=speed wept=weep swept=sweep crept=creep knelt=kneel
+leapt=leap lent=lend bent=bend lit=light spat=spit shot=shoot ridden=ride beaten=beat mistaken=mistake
+forgiven=forgive forbidden=forbid frozen=freeze stolen=steal blown=blow shown=show sunk=sink sank=sink
+shrunk=shrink shrank=shrink drunk=drink drank=drink rung=ring rang=ring sung=sing sang=sing sprung=spring
+sprang=spring swum=swim swam=swim sold=sell bound=bind became=become blew=blow slain=slay slew=slay
+dove=dive awoke=awake arose=arise arisen=arise overcame=overcome overtook=overtake overtaken=overtake
+withdrew=withdraw withdrawn=withdraw misunderstood=misunderstand undertook=undertake undertaken=undertake
+upheld=uphold foresaw=foresee foreseen=foresee lying=lie dying=die tying=tie vying=vie
+""".split()
+    )
+)
 
 
 def clean(token: str) -> str:
@@ -115,8 +132,14 @@ def forms(word: str) -> set[str]:
         add_base(w[:-3])
     if w.endswith("ily") and n > 4:
         out.add(w[:-3] + "y")
+        out.add(w[:-2] + "e")  # eerily -> eerie
     elif w.endswith("ly") and n > 4:
         out.add(w[:-2])
+        out.add(w[:-1] + "e")  # terribly -> terrible, gently -> gentle
+        if w.endswith("ically") and n > 7:
+            out.add(w[:-4])  # basically -> basic
+    if w.endswith("ying") and n == 5:
+        out.add(w[:-4] + "ie")  # lying -> lie
     return {f for f in out if f}
 
 

@@ -18,6 +18,13 @@ class Vocab:
         self._store = store
         self._lock = threading.Lock()
         self._words: set[str] = store.vocab_load()
+        self._tr: dict[str, str] = store.vocab_translations()
+        self.version = 0  # меняется с каждым обновлением: по нему пересобирается подсказка под переводом
+
+    def translations(self) -> dict[str, str]:
+        """Слово -> перевод (с сервера Lexo). Для подсказки «уже сохранял» под переводом реплики."""
+        with self._lock:
+            return dict(self._tr)
 
     def __len__(self) -> int:
         return len(self._words)
@@ -27,23 +34,29 @@ class Vocab:
             words = self._words
             return any(f in words for f in forms(word))
 
-    def add(self, *words: str) -> None:
+    def add(self, *words: str, translations: dict[str, str] | None = None) -> None:
         clean = {w.strip().lower() for w in words if w and w.strip()}
         if not clean:
             return
+        tr = {k: v for k, v in (translations or {}).items() if k in clean and v}
         with self._lock:
             self._words |= clean
-        self._store.vocab_add(clean)
+            self._tr.update(tr)
+            self.version += 1
+        self._store.vocab_add(clean, tr)
 
-    def replace(self, words: list[str], server_time: str) -> None:
+    def replace(self, words: list[str], server_time: str, translations: dict[str, str] | None = None) -> None:
         clean = {w.strip().lower() for w in words if w and w.strip()}
+        tr = {k: v for k, v in (translations or {}).items() if k in clean and v}
         with self._lock:
             self._words = clean
-        self._store.vocab_replace(clean)
+            self._tr = tr
+            self.version += 1
+        self._store.vocab_replace(clean, tr)
         self._store.set_meta("vocab_since", server_time or None)
 
-    def merge(self, words: list[str], server_time: str) -> None:
-        self.add(*words)
+    def merge(self, words: list[str], server_time: str, translations: dict[str, str] | None = None) -> None:
+        self.add(*words, translations=translations)
         if server_time:
             self._store.set_meta("vocab_since", server_time)
 

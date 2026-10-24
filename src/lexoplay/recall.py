@@ -11,20 +11,30 @@ from __future__ import annotations
 
 import re
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 
 from lexoplay.dedupe import normalize_text
 from lexoplay.rarity import bases
 from lexoplay.store import SavedWord, fold
-from lexoplay.words import is_stopword
+from lexoplay.words import forms, is_stopword
 
 FRESH_S = 120.0  # только что сохранил: напоминать рано
 MAX_CHIPS = 3
 TRANSLATION_CHARS = 32
 
 _TOKEN = re.compile(r"[A-Za-z]+(?:'[A-Za-z]+)?")
-_PLACEHOLDERS = frozenset("sb sth smb smth someone somebody something one's someone's".split())
+# заполнители в словарной форме выражения: give sb a hand, make up one's mind
+_SOMEONE = frozenset("sb smb sth smth someone somebody something".split())  # 1-3 любых слова
+_ONES = frozenset("one's someone's somebody's".split())  # my, your, his, Makoto's...
+_PLACEHOLDERS = _SOMEONE | _ONES
+_POSSESSIVE = frozenset("my your his her its our their".split())
+# отделяемая частица фразового глагола: pick it up, figure the whole thing out
+_PARTICLES = frozenset("up out off down in on away back over around through along apart together".split())
+_OBJECT_START = frozenset(
+    "it them him her me us you this that these those everything something someone everyone the a an his my your their our its".split()
+)
+MAX_GAP = 3
 
 
 def tokens(text: str) -> list[str]:
@@ -32,7 +42,36 @@ def tokens(text: str) -> list[str]:
 
 
 def variants(token: str) -> set[str]:
-    return {token} | bases(token)
+    """Словарные формы слова из реплики. Те же, по которым F3 подчёркивает слово жёлтым
+    (words.forms: stuck -> stick, eerily -> eerie, happier -> happy), и сокращения (she'd -> she)."""
+    return {token} | bases(token) | forms(token)
+
+
+def _match(parts: tuple[str, ...], toks: list[str], vars_: list[set[str]], i: int) -> int | None:
+    """Выражение parts с позиции i реплики: конец найденного (не включая) или None."""
+
+    def go(k: int, j: int) -> int | None:
+        if k == len(parts):
+            return j
+        p = parts[k]
+        if p in _SOMEONE:
+            for n in range(1, 4):
+                if j + n <= len(toks) and (end := go(k + 1, j + n)) is not None:
+                    return end
+            return None
+        if p in _ONES:
+            if j < len(toks) and (toks[j] in _POSSESSIVE or toks[j].endswith("'s")):
+                return go(k + 1, j + 1)
+            return None
+        if j < len(toks) and p in vars_[j] and (end := go(k + 1, j + 1)) is not None:
+            return end
+        if k > 0 and p in _PARTICLES and j < len(toks) and toks[j] in _OBJECT_START:
+            for gap in range(1, MAX_GAP + 1):  # pick it up: частица после дополнения
+                if j + gap < len(toks) and p in vars_[j + gap] and (end := go(k + 1, j + gap + 1)) is not None:
+                    return end
+        return None
+
+    return go(0, i)
 
 
 def word_spans(sentence: str, selection: str, lemma: str | None = None) -> list[tuple[int, int]]:
@@ -92,18 +131,27 @@ class _Entry:
     seen: int = 0
 
 
+def _parts(word: str) -> tuple[str, ...] | None:
+    """Слово или выражение для поиска; None: не напоминаем (служебное, короткое, начинается с заполнителя)."""
+    parts = tuple(tokens(word))
+    if not parts or parts[0] in _PLACEHOLDERS or all(p in _PLACEHOLDERS for p in parts):
+        return None
+    if len(parts) == 1 and (len(parts[0]) < 3 or is_stopword(parts[0])):
+        return None
+    return parts
+
+
 class RecallIndex:
     """Сохранённые слова, разложенные для быстрого поиска в реплике (и по словоформам: ran -> run)."""
 
-    def __init__(self, words: Iterable[SavedWord]) -> None:
+    def __init__(self, words: Iterable[SavedWord], lexo: Mapping[str, str] | None = None) -> None:
+        """words: сохранённые в LexoPlay; lexo: слова из словаря Lexo (бота) с переводом."""
         by_key: dict[str, _Entry] = {}
         for w in words:  # words_list отдаёт новые первыми: перевод берём у последнего сохранения
             if not w.translation or not w.translation.strip():
                 continue
-            parts = tuple(tokens(w.word))
-            if not parts or any(p in _PLACEHOLDERS for p in parts):
-                continue
-            if len(parts) == 1 and (len(parts[0]) < 3 or is_stopword(parts[0])):
+            parts = _parts(w.word)
+            if parts is None:
                 continue
             key = fold(" ".join(parts))
             e = by_key.get(key)
@@ -114,6 +162,13 @@ class RecallIndex:
                 e.sentences.add(normalize_text(w.sentence))
             e.created_at = max(e.created_at, w.created_at)
             e.seen = max(e.seen, w.seen)
+        for word, tr in (lexo or {}).items():  # из Lexo: встречи не считаем (их там нет)
+            parts = _parts(word)
+            if parts is None or not tr or not tr.strip():
+                continue
+            key = fold(" ".join(parts))
+            if key not in by_key:
+                by_key[key] = _Entry(key, word.strip(), short_translation(tr), parts)
         self.entries = list(by_key.values())
         # ищем от слова в реплике к словарной форме (gave up -> give up), а не наоборот: иначе
         # сохранённое seed нашлось бы в see
@@ -127,21 +182,22 @@ class RecallIndex:
     def find(self, text: str) -> list[_Entry]:
         """Какие сохранённые слова есть в реплике, по порядку. Выражение важнее слова внутри него."""
         toks = tokens(text)
-        forms = [variants(t) for t in toks]
+        vars_ = [variants(t) for t in toks]
         found: list[tuple[int, _Entry]] = []
         taken: set[int] = set()  # слова, вошедшие в найденное выражение
         seen: set[str] = set()
         for i in range(len(toks)):
-            cands = {id(e): e for f in forms[i] for e in self._first.get(f, ())}
+            cands = {id(e): e for f in vars_[i] for e in self._first.get(f, ())}
             for e in sorted(cands.values(), key=lambda x: -len(x.parts)):
                 n = len(e.parts)
-                if e.key in seen or i + n > len(toks) or (n == 1 and i in taken):
+                if e.key in seen or (n == 1 and i in taken):
                     continue
-                if all(e.parts[k] in forms[i + k] for k in range(1, n)):
+                end = _match(e.parts, toks, vars_, i) if n > 1 else (i + 1 if e.parts[0] in vars_[i] else None)
+                if end is not None:
                     seen.add(e.key)
                     found.append((i, e))
                     if n > 1:
-                        taken.update(range(i, i + n))
+                        taken.update(range(i, end))
         return [e for _i, e in sorted(found, key=lambda x: x[0])]
 
 
@@ -161,7 +217,7 @@ class Recaller:
         for e in index.find(text):
             seen = e.seen
             own_line = norm in e.sentences or now - e.created_at < FRESH_S  # там и сохраняли: не встреча
-            if not own_line and self._counted.get(e.key) != norm:
+            if e.ids and not own_line and self._counted.get(e.key) != norm:  # слова из Lexo не считаем: их нет в «Словах»
                 seen += 1
                 counted.extend(e.ids)
                 if commit:

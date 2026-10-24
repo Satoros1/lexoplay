@@ -170,9 +170,36 @@ def test_vocab_since_param():
         seen["since"] = req.url.params.get("since")
         return httpx.Response(200, json={"items": ["eerie", "make amends"], "server_time": "2026-10-19T10:00:00Z"})
 
-    items, t = run(client_with(handler).vocab("2026-10-18T00:00:00Z"))
+    items, t, tr = run(client_with(handler).vocab("2026-10-18T00:00:00Z"))
     assert items == ["eerie", "make amends"] and t.startswith("2026-10-19")
     assert seen["since"] == "2026-10-18T00:00:00Z"
+    assert tr == {}  # старый сервер: переводов нет
+
+
+def test_vocab_with_translations_feeds_recall(tmp_path):
+    from lexoplay.recall import Recaller, RecallIndex
+    from lexoplay.store import Store
+    from lexoplay.vocab import Vocab
+
+    body = {
+        "items": ["eerie", "make amends"],
+        "entries": [{"text": "eerie", "translation": "жуткий, зловещий"}, {"text": "make amends", "translation": "загладить вину"}],
+        "server_time": "2026-10-24T10:00:00Z",
+    }
+    items, t, tr = run(client_with(lambda req: httpx.Response(200, json=body)).vocab())
+    assert tr == {"eerie": "жуткий, зловещий", "make amends": "загладить вину"}
+    store = Store(tmp_path / "db.sqlite")
+    v = Vocab(store)
+    v.replace(items, t, tr)
+    v2 = Vocab(Store(tmp_path / "db.sqlite"))  # после перезапуска переводы на месте
+    assert v2.translations() == tr and v2.known("eeriest") is False and v2.known("eerie")
+    v2.merge(["hesitate"], "2026-10-24T11:00:00Z", {"hesitate": "колебаться"})
+    assert v2.translations()["hesitate"] == "колебаться" and v2.version == 1
+    idx = RecallIndex([], lexo=v2.translations())
+    chips, ids = Recaller().pick(idx, "He hesitated to make amends. So eerie.")
+    assert [(c.word, c.translation) for c in chips] == [
+        ("hesitate", "колебаться"), ("make amends", "загладить вину"), ("eerie", "жуткий")
+    ] and ids == []
 
 
 def test_lexo_translator_maps_errors_and_reports_usage():
