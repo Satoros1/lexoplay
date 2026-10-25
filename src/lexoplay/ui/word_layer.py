@@ -679,7 +679,7 @@ class WordLayer(QWidget):
         panel = self._panel
         if panel is not None and plan is not None:
             bg = QColor(STRIP_BG)
-            bg.setAlphaF(0.97)
+            bg.setAlphaF(1.0)  # текст игры под панелью не просвечивает и не мешает читать
             p.setPen(QPen(QColor(255, 255, 255, 30), 1))
             p.setBrush(bg)
             p.drawRoundedRect(panel, 14, 14)

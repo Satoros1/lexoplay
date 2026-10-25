@@ -101,7 +101,7 @@ def dialog_scene():  # type: ignore[no-untyped-def]
 PAGE = [
     "The last train had left an hour ago, and the station was empty except for the hum of the lights.",
     '"You came after all," Mira said, without looking up from the timetable.',
-    "I wanted to tell her that I almost didn't. That the closer I got, the more the place felt wrong.",
+    "I wanted to tell her that I almost didn't come. That the closer I got to the station, the more the whole place felt wrong to me.",
     "Somewhere down the tracks, a bell began to ring.",
 ]
 PAGE_RU = [
@@ -284,8 +284,9 @@ def windows(app, out: Path) -> None:  # type: ignore[no-untyped-def]
     ]
     for k, (sel, lemma, tr, ipa, pos, sent, sent_tr, seen) in enumerate(words):
         wid = store.word_add(SavedWord("midnight.exe", GAME, sel, lemma, tr, ipa, pos, sent, sent_tr, created_at=now - 3000 + k * 300))
-        if seen and isinstance(wid, int):
-            store.words_seen([wid] * 1, now)
+        store.words_mark_lexo([wid])  # ушли в карточки Lexo
+        for _ in range(seen):
+            store.words_seen([wid], now)
     for back, (n_lines, n_words, secs) in enumerate([(64, 9, 4200), (38, 5, 2700), (0, 0, 0), (51, 7, 3600), (72, 12, 5100), (27, 3, 1800), (44, 6, 3000)]):
         day = (date.today() - timedelta(days=back)).isoformat()
         store.stats_add(day, "midnight.exe", lines=n_lines, words=n_words, seconds=secs)
