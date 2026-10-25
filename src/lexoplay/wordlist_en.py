@@ -1096,3 +1096,14 @@ lithuania litre locomotive longing lsu mailed manny mantra mapped marcel mating 
 )
 
 WORDS = frozenset(RANKED)
+
+
+_RANK: dict[str, int] | None = None
+
+
+def rank_of(word: str) -> int | None:
+    """Место слова в частотном списке как есть (без поиска основы) или None."""
+    global _RANK
+    if _RANK is None:
+        _RANK = {w: i for i, w in enumerate(RANKED)}
+    return _RANK.get(word)

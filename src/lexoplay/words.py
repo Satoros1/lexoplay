@@ -88,8 +88,38 @@ def is_stopword(token: str) -> bool:
     return clean(token).lower() in STOPWORDS
 
 
+# Сравнительная степень с удвоением: big -> bigger. Только у этих: иначе bitter стал бы bit + er
+_DOUBLED_ADJ = frozenset("big hot sad fat thin wet red mad fit flat slim dim grim glad mad sad tan".split())
+
+
+def _rank(word: str) -> int | None:
+    from lexoplay.wordlist_en import rank_of
+
+    return rank_of(word)
+
+
+def _plausible(token: str, base: str, kind: str) -> bool:
+    """Правда ли token это форма base, а не своё слово (number не форма numb, morning не форма morn).
+
+    Смотрим на частотный список: частое слово само по себе важнее редкой основы, которая из него
+    получается отрезанием окончания. infl: -s, -ed, -ing (форма обычно реже основы, но бывает и
+    чаще: kids, used). deriv: -er, -est (сравнительная степень всегда реже основы). ly: наречия."""
+    rt, rb = _rank(token), _rank(base)
+    if rt is None:  # сама форма редкая (eerily, lured): верим окончанию
+        return True
+    if rb is None:  # частое слово из редкой «основы»: morning из morn, species из specie
+        return False
+    if kind == "infl":
+        return rt * 4 >= rb  # wedding (1573) не форма wed (11943), а kids (519) форма kid (1095)
+    if kind == "ly":  # наречие бывает и чаще прилагательного: quickly, exactly; но early не от ear
+        return rt * 5 >= rb
+    return rt > rb  # -er/-est: number (210) не форма numb (14295), corner не corn; happier (6445) форма happy (433)
+
+
 def forms(word: str) -> set[str]:
-    """Возможные словарные формы: did -> do, running -> run, cities -> city."""
+    """Словарные формы слова: did -> do, running -> run, cities -> city, happier -> happy.
+
+    Только правдоподобные (_plausible): number остаётся number, а не numb + er."""
     w = clean(word).lower()
     out = {w}
     if not w:
@@ -99,48 +129,49 @@ def forms(word: str) -> set[str]:
         out.add(w)
     if w in IRREGULAR:
         out.add(IRREGULAR[w])
+    cands: list[tuple[str, str]] = []  # (основа, infl|deriv)
 
-    def add_base(base: str) -> None:
+    def add_base(base: str, kind: str) -> None:
         if len(base) < 2:
             return
-        out.add(base)
-        out.add(base + "e")
+        cands.append((base, kind))
+        cands.append((base + "e", kind))
         if len(base) > 2 and base[-1] == base[-2] and base[-1] not in "lsz":
-            out.add(base[:-1])  # stopped -> stop
+            if kind == "infl" or base[:-1] in _DOUBLED_ADJ:
+                cands.append((base[:-1], kind))  # stopped -> stop, bigger -> big
 
     n = len(w)
     if w.endswith("ies") and n > 4:
-        out.add(w[:-3] + "y")
+        cands.append((w[:-3] + "y", "infl"))
     elif w.endswith("es") and n > 3:
-        out.add(w[:-2])
-        out.add(w[:-1])
+        cands += [(w[:-2], "infl"), (w[:-1], "infl")]
     elif w.endswith("s") and not w.endswith("ss") and n > 3:
-        out.add(w[:-1])
+        cands.append((w[:-1], "infl"))
     if w.endswith("ied") and n > 4:
-        out.add(w[:-3] + "y")
+        cands.append((w[:-3] + "y", "infl"))
     elif w.endswith("ed") and n > 3:
-        add_base(w[:-2])
+        add_base(w[:-2], "infl")
     if w.endswith("ing") and n > 4:
-        add_base(w[:-3])
-    if w.endswith("ier") and n > 4:
-        out.add(w[:-3] + "y")
-    elif w.endswith("er") and n > 4:
-        add_base(w[:-2])
-    if w.endswith("iest") and n > 5:
-        out.add(w[:-4] + "y")
-    elif w.endswith("est") and n > 5:
-        add_base(w[:-3])
-    if w.endswith("ily") and n > 4:
-        out.add(w[:-3] + "y")
-        out.add(w[:-2] + "e")  # eerily -> eerie
-    elif w.endswith("ly") and n > 4:
-        out.add(w[:-2])
-        out.add(w[:-1] + "e")  # terribly -> terrible, gently -> gentle
-        if w.endswith("ically") and n > 7:
-            out.add(w[:-4])  # basically -> basic
+        add_base(w[:-3], "infl")
     if w.endswith("ying") and n == 5:
-        out.add(w[:-4] + "ie")  # lying -> lie
-    return {f for f in out if f}
+        cands.append((w[:-4] + "ie", "infl"))  # lying -> lie
+    if w.endswith("ier") and n > 4:
+        cands.append((w[:-3] + "y", "deriv"))
+    elif w.endswith("er") and n > 4:
+        add_base(w[:-2], "deriv")
+    if w.endswith("iest") and n > 5:
+        cands.append((w[:-4] + "y", "deriv"))
+    elif w.endswith("est") and n > 5:
+        add_base(w[:-3], "deriv")
+    if w.endswith("ily") and n > 4:
+        cands += [(w[:-3] + "y", "ly"), (w[:-2] + "e", "ly")]  # happily -> happy, eerily -> eerie
+    elif w.endswith("ly") and n >= 6:  # короче это чаще своё слово: apply, reply, early, holy, ugly
+        cands.append((w[:-2], "ly"))  # quickly -> quick
+        cands.append((w[:-1] + "e", "ly"))  # terribly -> terrible, gently -> gentle
+        if w.endswith("ically") and n > 7:
+            cands.append((w[:-4], "ly"))  # basically -> basic
+    out.update(base for base, kind in cands if base and base != w and _plausible(w, base, kind))
+    return out
 
 
 def selection_text(tokens: list[str]) -> str:

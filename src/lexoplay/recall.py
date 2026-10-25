@@ -15,7 +15,7 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 
 from lexoplay.dedupe import normalize_text
-from lexoplay.rarity import bases
+from lexoplay.rarity import _CONTRACTIONS, _NOT_BASES
 from lexoplay.store import SavedWord, fold
 from lexoplay.words import forms, is_stopword
 
@@ -44,7 +44,12 @@ def tokens(text: str) -> list[str]:
 def variants(token: str) -> set[str]:
     """Словарные формы слова из реплики. Те же, по которым F3 подчёркивает слово жёлтым
     (words.forms: stuck -> stick, eerily -> eerie, happier -> happy), и сокращения (she'd -> she)."""
-    return {token} | bases(token) | forms(token)
+    out = {token} | forms(token)
+    for tail in _CONTRACTIONS:
+        if token.endswith(tail) and len(token) > len(tail):
+            out.add(_NOT_BASES.get(token, token[: -len(tail)]))
+            break
+    return out
 
 
 def _match(parts: tuple[str, ...], toks: list[str], vars_: list[set[str]], i: int) -> int | None:

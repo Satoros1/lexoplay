@@ -117,3 +117,32 @@ def test_vocab_known_and_persisted(tmp_path):
     v2.clear()
     assert len(v2) == 0 and v2.since is None
     store2.close()
+
+
+def test_forms_do_not_turn_common_words_into_rare_ones():
+    """number не форма numb, corner не corn, morning не morn: частое слово остаётся собой."""
+    for word, wrong in [
+        ("number", "numb"), ("corner", "corn"), ("hammer", "ham"), ("butter", "butt"), ("bitter", "bit"),
+        ("morning", "morn"), ("wedding", "wed"), ("sometimes", "sometime"), ("early", "ear"), ("apply", "app"),
+    ]:
+        assert wrong not in forms(word), word
+    for word, base in [
+        ("numbers", "number"), ("numbed", "numb"), ("happier", "happy"), ("bigger", "big"), ("faster", "fast"),
+        ("kids", "kid"), ("eerily", "eerie"), ("quickly", "quick"), ("terribly", "terrible"), ("stuck", "stick"),
+        ("lying", "lie"), ("deeply", "deep"),
+    ]:
+        assert base in forms(word), word
+
+
+def test_vocab_does_not_see_numb_in_number(tmp_path):
+    from lexoplay.recall import RecallIndex
+    from lexoplay.store import SavedWord, Store
+    from lexoplay.vocab import Vocab
+
+    v = Vocab(Store(tmp_path / "db.sqlite"))
+    v.add("numb")
+    assert v.known("numbed") and not v.known("number")  # F3 не подчёркивает number жёлтым
+    idx = RecallIndex([SavedWord("g", "G", "numb", None, "онемевший", id=1, created_at=1.0)])
+    line = "The true killer manipulated Hifumi to carry out a number of actions, and in the end...murdered him."
+    assert idx.find(line) == []  # и подсказки «numb · онемевший» под переводом нет
+    assert [e.word for e in idx.find("My hands went numb.")] == ["numb"]
