@@ -13,6 +13,8 @@ glossary: свои переводы имён и терминов для игры
 explains: разборы реплик (F7, кнопка «Разбор» в истории): второй раз открываются сразу и без запроса.
 lookups: значения слов (F3) своим ключом: тот же клик по тому же слову в той же реплике без запроса.
 stats: по дням и играм: сколько реплик переведено, слов сохранено, минут в игре.
+study_words: учёба (study.py): что с трудным словом (значение видно, под «?», знаешь) и его значение.
+study_days: учёба по дням: реплик прочитано по-английски, сколько раз подглядывал перевод, слов запомнилось.
 """
 
 from __future__ import annotations
@@ -103,6 +105,20 @@ CREATE TABLE IF NOT EXISTS stats (
     words INTEGER NOT NULL DEFAULT 0,
     seconds INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (day, exe)
+);
+CREATE TABLE IF NOT EXISTS study_words (
+    key TEXT PRIMARY KEY,
+    state TEXT NOT NULL DEFAULT 'new',
+    seen INTEGER NOT NULL DEFAULT 0,
+    passes INTEGER NOT NULL DEFAULT 0,
+    meaning TEXT NOT NULL DEFAULT '',
+    updated_at REAL NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS study_days (
+    day TEXT PRIMARY KEY,
+    lines INTEGER NOT NULL DEFAULT 0,
+    peeks INTEGER NOT NULL DEFAULT 0,
+    learned INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS game_notes (
     exe TEXT NOT NULL,
@@ -208,6 +224,18 @@ class SavedWord:
     @property
     def word(self) -> str:
         return self.lemma or self.selection
+
+
+@dataclass(slots=True)
+class StudyWord:
+    """Трудное слово в учёбе (study.py)."""
+
+    key: str  # словарная форма
+    state: str = "new"  # new: значение видно | test: под «?» | known: знаешь | skip: не учим (имя, мусор OCR)
+    seen: int = 0  # сколько раз значение было видно
+    passes: int = 0  # сколько раз «?» не открывал
+    meaning: str = ""  # последнее значение от модели: для реплик из кеша
+    updated_at: float = 0.0
 
 
 def fold(s: str | None) -> str:
@@ -929,6 +957,45 @@ class Store:
         with self._lock:
             row = self._db.execute("SELECT COALESCE(SUM(lines),0), COALESCE(SUM(words),0), COALESCE(SUM(seconds),0) FROM stats").fetchone()
         return int(row[0]), int(row[1]), int(row[2])
+
+    # ------------------------------------------------------------------ учёба
+    def study_words(self) -> list[StudyWord]:
+        with self._lock:
+            rows = self._db.execute("SELECT key, state, seen, passes, meaning, updated_at FROM study_words").fetchall()
+        return [StudyWord(r[0], r[1], int(r[2]), int(r[3]), r[4] or "", float(r[5])) for r in rows]
+
+    def study_put(self, words: list[StudyWord]) -> None:
+        if not words:
+            return
+        with self._lock:
+            self._db.executemany(
+                "INSERT INTO study_words (key, state, seen, passes, meaning, updated_at) VALUES (?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET state = excluded.state, seen = excluded.seen, "
+                "passes = excluded.passes, meaning = excluded.meaning, updated_at = excluded.updated_at",
+                [(w.key, w.state, w.seen, w.passes, w.meaning, w.updated_at) for w in words],
+            )
+            self._db.commit()
+
+    def study_day_add(self, day: str, *, lines: int = 0, peeks: int = 0, learned: int = 0) -> None:
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO study_days (day, lines, peeks, learned) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(day) DO UPDATE SET lines = lines + excluded.lines, "
+                "peeks = peeks + excluded.peeks, learned = learned + excluded.learned",
+                (day, lines, peeks, learned),
+            )
+            self._db.commit()
+
+    def study_days(self, since: str) -> dict[str, tuple[int, int, int]]:
+        """{день: (реплик по-английски, подглядываний, слов запомнилось)} начиная с since."""
+        with self._lock:
+            rows = self._db.execute("SELECT day, lines, peeks, learned FROM study_days WHERE day >= ?", (since,)).fetchall()
+        return {r[0]: (int(r[1]), int(r[2]), int(r[3])) for r in rows}
+
+    def study_known(self) -> int:
+        with self._lock:
+            row = self._db.execute("SELECT COUNT(*) FROM study_words WHERE state = 'known'").fetchone()
+        return int(row[0])
 
     def close(self) -> None:
         with self._lock:

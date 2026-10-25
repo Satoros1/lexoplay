@@ -93,8 +93,8 @@ def dialog_scene():  # type: ignore[no-untyped-def]
     d = ImageDraw.Draw(img)
     d.text((96, 503), NAME, font=_font(26, bold=True), fill=(255, 255, 255))
     f = _font(30)
-    d.text((88, 566), "I was reluctant to come here tonight, you know.", font=f, fill=(244, 242, 236))
-    d.text((88, 612), "This place feels eerie after dark.", font=f, fill=(244, 242, 236))
+    for (x, y), line in DIALOG_LINES:
+        d.text((x, y), line, font=f, fill=(244, 242, 236))
     return img
 
 
@@ -137,6 +137,24 @@ def page_scene():  # type: ignore[no-untyped-def]
     return img, rects
 
 
+DIALOG_LINES = [((88, 566), "I was reluctant to come here tonight, you know."), ((88, 612), "This place feels eerie after dark.")]
+
+
+def word_rects(word: str) -> tuple[int, int, int, int]:
+    """Где на сцене диалога нарисовано слово (x, y, w, h): для подсказок учёбы."""
+    from PIL import Image, ImageDraw
+
+    d = ImageDraw.Draw(Image.new("RGB", (W, H)))
+    f = _font(30)
+    for (x, y), line in DIALOG_LINES:
+        at = line.find(word)
+        if at >= 0:
+            left = x + d.textlength(line[:at], font=f)
+            box = d.textbbox((left, y), word, font=f)
+            return int(box[0]), int(box[1]), int(box[2] - box[0]), int(box[3] - box[1])
+    raise KeyError(word)
+
+
 def compose(scene, widget, path: Path) -> None:  # type: ignore[no-untyped-def]
     """Виджет LexoPlay (прозрачное окно) поверх сцены."""
     from PIL import Image
@@ -167,7 +185,7 @@ def main(out: Path) -> int:
     from lexoplay.geometry import Rect
     from lexoplay.recall import RecallChip
     from lexoplay.ui import theme
-    from lexoplay.ui.overlay import Overlay, PageView
+    from lexoplay.ui.overlay import GlossView, Overlay, PageView
     from lexoplay.ui.word_layer import WordLayer
     from lexoplay.wordmode import CardState, ExplainRow, ExplainState, reader_views
 
@@ -187,6 +205,19 @@ def main(out: Path) -> int:
     ov.show()
     pump(app)
     compose(scene, ov, out / "translate.png")
+    ov.hide_strip()
+
+    # 1б. учёба: перевод спрятан (Alt), над трудными словами значения, своё слово под «?»
+    def gloss(word: str, text: str, kind: str, **kw: object) -> GlossView:
+        x, y, w, h = word_rects(word)
+        return GlossView(Rect(x / W, y / H, w / W, h / H), text, kind, **kw)  # type: ignore[arg-type]
+
+    ov.study_hide = True
+    ov.show_text(region, LINE_RU)
+    ov.show_glosses([gloss("reluctant", "неохотно", "new"), gloss("eerie", "жуткий", "saved")])
+    pump(app)
+    compose(scene, ov, out / "study.png")
+    ov.study_hide = False
     ov.hide_strip()
 
     # 2. режим слов: карточка слова

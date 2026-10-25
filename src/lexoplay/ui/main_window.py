@@ -1038,6 +1038,38 @@ class ViewPage(QWidget):
             )
         )
         lay.addWidget(auto_box)
+
+        lay.addWidget(label("УЧЁБА", "section"))
+        study_box, stl = card_list()
+        self.study = Toggle(s.study_mode)
+        self.study.toggled.connect(self._study)
+        stl.addWidget(
+            setting_row(
+                "Читать по-английски самому",
+                f"Перевод реплики спрятан: держи Alt или наведи курсор на плашку, и он виден. Над трудными словами "
+                "мелко их значение, а когда слово встретилось несколько раз, вместо значения «?»: вспомни сам или наведи. "
+                f"Знакомые слова подсказок не получают. В игре включается и выключается клавишей {hk.study}. "
+                "Значения пишет модель твоего ключа Anthropic (вкладка «Ещё»), без ключа будут только сохранённые слова. "
+                "В играх с текстом на весь экран перевод как обычно.",
+                self.study,
+            )
+        )
+        self.level = QComboBox()
+        for code, text in (("a2", "A2: подсказок больше"), ("b1", "B1"), ("b2", "B2: только редкие слова")):
+            self.level.addItem(text, code)
+        self.level.setCurrentIndex(max(0, self.level.findData(s.study_level)))
+        self.level.setMinimumWidth(220)
+        self.level.activated.connect(self._level)
+        stl.addWidget(
+            setting_row(
+                "Мой уровень английского",
+                "Слова реже этого уровня получают подсказку. Уровень примерный, по частоте слова. Слова, "
+                "которые ты знаешь, отсеются сами через пару вечеров.",
+                self.level,
+                last=True,
+            )
+        )
+        lay.addWidget(study_box)
         self.size.valueChanged.connect(self._sliders)
         self.opacity.valueChanged.connect(self._sliders)
         self._save_timer = QTimer(self)
@@ -1131,10 +1163,20 @@ class ViewPage(QWidget):
             self.ctl.settings.auto_translate = on
             self.ctl.settings_changed()
 
+    def _study(self, on: bool) -> None:
+        if self.ctl.settings.study_mode != on:
+            self.ctl.settings.study_mode = on
+            self.ctl.settings_changed()
+
+    def _level(self) -> None:
+        self.ctl.settings.study_level = self.level.currentData()
+        self.ctl.settings_changed()
+
     def refresh(self) -> None:
-        self.auto.blockSignals(True)
-        self.auto.setChecked(self.ctl.settings.auto_translate)
-        self.auto.blockSignals(False)
+        for toggle, value in ((self.auto, self.ctl.settings.auto_translate), (self.study, self.ctl.settings.study_mode)):
+            toggle.blockSignals(True)
+            toggle.setChecked(value)
+            toggle.blockSignals(False)
 
     def _mode(self, code: str) -> None:
         self.ctl.settings.magpie_mode = code

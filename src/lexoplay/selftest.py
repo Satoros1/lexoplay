@@ -983,6 +983,159 @@ def _page_flow(out_dir: Path) -> Callable[[], tuple[str, object]]:
     return run
 
 
+def _dialog_frame(lines: list[str]):  # type: ignore[no-untyped-def]
+    """Кадр с окном диалога внизу: белый текст на тёмной плашке поверх сцены."""
+    from PIL import Image, ImageDraw, ImageFont
+
+    img = Image.new("RGB", (1000, 700), (52, 66, 84))
+    d = ImageDraw.Draw(img)
+    d.rectangle((50, 500, 950, 680), fill=(18, 18, 36))
+    font_path = Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts" / "arial.ttf"
+    font = ImageFont.truetype(str(font_path), 30) if font_path.exists() else ImageFont.load_default()
+    for i, line in enumerate(lines):
+        d.text((90, 540 + i * 56), line, fill=(245, 245, 240), font=font)
+    return img
+
+
+def _study_flow(out_dir: Path) -> Callable[[], tuple[str, object]]:
+    """Учёба: F2 прячет перевод, над трудными словами значения и «?»; Alt показывает перевод,
+    наведение открывает «?»; после реплики слова и день учёбы записаны; клавиша учёбы выключает."""
+
+    def run() -> tuple[str, object]:
+        import tempfile
+
+        from PySide6.QtWidgets import QApplication
+
+        app_q = QApplication.instance() or QApplication(sys.argv[:1])
+        from lexoplay.gcguard import install as install_gc
+
+        install_gc(app_q)
+        tmp = tempfile.mkdtemp(prefix="lexoplay-selftest-study-")
+        os.environ["LEXOPLAY_HOME"] = tmp
+        os.environ["ANTHROPIC_API_KEY"] = "sk-selftest"
+
+        from datetime import date as _date
+
+        from lexoplay.app import VK_MENU, Active, App
+        from lexoplay.bg import BackgroundLoop
+        from lexoplay.config import Settings
+        from lexoplay.geometry import Rect
+        from lexoplay.store import Game, Store, StudyWord
+        from lexoplay.translate import TranslateResult
+        from lexoplay.win import winapi
+
+        lines = ["The culprit tampered with the evidence.", "It was obviously a mistake, Makoto."]
+        frame = _dialog_frame(lines)
+        reqs: list[object] = []
+
+        class FakeTranslator:  # как свой ключ: значения слов приходят раньше перевода
+            async def translate(self, req):  # type: ignore[no-untyped-def]
+                reqs.append(req)
+                found = {w.lower(): {"culprit": "преступник", "tampered": "подделал"}.get(w.lower(), "что-то") for w in req.gloss_words}
+                if req.on_glosses:
+                    req.on_glosses(found)
+                return TranslateResult(source=req.text, translation="Преступник подделал улики. Это явно ошибка, Макото.", glosses=found)
+
+        def pump(cond: Callable[[], bool], seconds: float = 20.0) -> bool:
+            end = time.time() + seconds
+            while time.time() < end:
+                app_q.processEvents()
+                if cond():
+                    return True
+                time.sleep(0.02)
+            return cond()
+
+        store = Store(Path(tmp) / "local.db")
+        game = store.save_game(Game("studytest.exe", "Study Test", region=Rect(0.05, 0.71, 0.9, 0.26)))
+        store.study_put([StudyWord("culprit", "test", 4, 0, "преступник", 1.0)])  # уже под «?»
+        settings = Settings()
+        settings.study_mode = True
+        bg = BackgroundLoop("selftest-study")
+        app = App(app_q, settings, store, bg)
+        info: dict[str, object] = {}
+        real_key_down, real_cursor = winapi.key_down, winapi.cursor_pos
+        held = {"alt": False}
+        cursor = {"pos": (0, 0)}
+        winapi.key_down = lambda vk: held["alt"] and vk == VK_MENU  # type: ignore[assignment]
+        winapi.cursor_pos = lambda: cursor["pos"]  # type: ignore[assignment]
+        try:
+            app.start()
+            app.events.foreground.disconnect(app._on_foreground)
+            app.translator = FakeTranslator()  # type: ignore[assignment]
+            app.pipelines.clear()
+            app.display = Rect(60, 60, 1000, 700)
+            app.active = Active(0, os.getpid(), game.exe)
+            app._game_in_focus = lambda: True  # type: ignore[method-assign]
+            app._sync_geometry = lambda: app.display  # type: ignore[method-assign]
+            app._make_grab = lambda *_a: (lambda: frame)  # type: ignore[method-assign]
+            app.overlay.fade = False
+            app.overlay.set_display_rect(app.display)
+            frame.save(out_dir / "study-frame.png")
+            app.f2()
+            info["shown"] = pump(lambda: app.state == "idle" and app.overlay.text is not None and bool(app.overlay.glosses))
+            info["hidden"] = app.overlay.study_hide and not app.overlay.study_open
+            info["glosses"] = [(g.kind, g.shown) for g in app.overlay.glosses]
+            info["asked"] = list(getattr(reqs[0], "gloss_words", ())) if reqs else None
+            pill = app.overlay.strip_rect()
+            for _ in range(5):
+                app_q.processEvents()
+            app.overlay.grab().save(str(out_dir / "study-overlay.png"))
+            # Alt: перевод виден, отпустил: снова спрятан
+            held["alt"] = True
+            info["alt_open"] = pump(lambda: app.overlay.study_open, 3)
+            pump(lambda: False, 0.6)  # держал дольше STUDY_PEEK_S: подглядывал
+            app.overlay.grab().save(str(out_dir / "study-overlay-alt.png"))
+            info["full"] = app.overlay.strip_rect().w > (pill.w if pill else 0) * 2
+            held["alt"] = False
+            info["alt_closed"] = pump(lambda: not app.overlay.study_open, 3)
+            # курсор на «?» над culprit: значение открыто до конца реплики
+            d = app.display
+            mark = next((i for i, g in enumerate(app.overlay.glosses) if g.kind == "test"), None)
+            if mark is not None:
+                r = app.overlay.glosses[mark].rect
+                cursor["pos"] = (int(d.x + (r.x + r.w / 2) * d.w), int(d.y + (r.y + r.h / 2) * d.h))
+            info["mark_open"] = pump(lambda: any(g.kind == "test" and g.open for g in app.overlay.glosses), 3)
+            cursor["pos"] = (0, 0)
+            pump(lambda: False, 1.2)  # реплику читают: дольше MIN_SHOW_S
+            app._hide_strip()  # реплика сменилась
+            words = {w.key: (w.state, w.seen, w.meaning) for w in store.study_words()}
+            info["words"] = words
+            today = _date.today().isoformat()
+            info["day"] = store.study_days(today).get(today)
+            info["no_glosses_after"] = app.overlay.glosses == ()
+            # клавиша учёбы: выключили, следующий перевод обычный
+            app.toggle_study()
+            info["off"] = not app.settings.study_mode
+            app.f2()
+            info["plain"] = pump(lambda: app.state == "idle" and app.overlay.text is not None)
+            info["plain_visible"] = not app.overlay.study_hide and not app.overlay.glosses
+            app._hide_strip()
+        finally:
+            winapi.key_down, winapi.cursor_pos = real_key_down, real_cursor  # type: ignore[assignment]
+            app.shutdown()
+        words = info.get("words") or {}
+        ok = (
+            info.get("shown")
+            and info.get("hidden")
+            and ("new", "подделал") in (info.get("glosses") or [])
+            and ("test", "?") in (info.get("glosses") or [])
+            and info.get("alt_open")
+            and info.get("full")
+            and info.get("alt_closed")
+            and info.get("mark_open")
+            and words.get("culprit", ("",))[0] == "new"  # открыл «?»: значение снова видно пару встреч
+            and words.get("tampered", ("", 0))[:2] == ("new", 1)
+            and info.get("day") == (1, 1, 0)
+            and info.get("no_glosses_after")
+            and info.get("off")
+            and info.get("plain")
+            and info.get("plain_visible")
+        )
+        return ("ok" if ok else "fail"), info
+
+    return run
+
+
 def _own_key_flow(out_dir: Path) -> Callable[[], tuple[str, object]]:
     """Без Lexo, своим ключом: F3 → значение → «+ в мои слова» → слово в «Слова»; после привязки уходит в Lexo."""
 
@@ -1799,6 +1952,7 @@ def _qt_checks(out_dir: Path) -> None:
     _check("app_words_keep_game_input", _app_vs_game(out_dir))
     _check("app_own_key_flow", _own_key_flow(out_dir))
     _check("app_page_flow", _page_flow(out_dir))
+    _check("app_study_flow", _study_flow(out_dir))
 
 
 def run(report: str) -> int:

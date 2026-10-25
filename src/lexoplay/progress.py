@@ -80,6 +80,10 @@ class Progress:
     hours: list[int] = field(default_factory=lambda: [0] * 24)  # реплик по часу суток
     pos: list[tuple[str, str, int]] = field(default_factory=list)  # (ключ, подпись, слов)
     words_read: int = 0  # английских слов в прочитанных репликах
+    # учёба (study.py): сегодня и за 7 дней (реплик сам по-английски, подглядываний, слов запомнилось)
+    study_today: tuple[int, int, int] = (0, 0, 0)
+    study_week: tuple[int, int, int] = (0, 0, 0)
+    study_known: int = 0  # всего слов, которые учёба считает выученными
 
     @property
     def pages_read(self) -> int:
@@ -197,7 +201,18 @@ def progress(store: Store, goal: int, today: Callable[[], date] = date.today) ->
         hours=hours(store),
         pos=pos_breakdown(store),
         words_read=store.words_read(),
+        **study(store, now),
     )
+
+
+def study(store: Store, now: date) -> dict[str, object]:
+    raw = store.study_days((now - timedelta(days=6)).isoformat())
+    week = tuple(sum(v[i] for v in raw.values()) for i in range(3))
+    return {
+        "study_today": raw.get(now.isoformat(), (0, 0, 0)),
+        "study_week": week,
+        "study_known": store.study_known(),
+    }
 
 
 def minutes(seconds: int) -> str:

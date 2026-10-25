@@ -15,9 +15,9 @@ import logging
 from collections import deque
 import time
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
-from typing import Literal, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 
 from PIL import Image
 
@@ -29,6 +29,9 @@ from lexoplay.ocrscore import Quality, quality
 from lexoplay.preprocess import MODES, Prepared, changed, prepare, preview, thumbnail
 from lexoplay.textproc import Paragraph, Utterance, has_text, name_from, page_text, paragraphs, to_utterance
 from lexoplay.translate import ContextLine, TranslateRequest, TranslateResult, TranslationError, Translator
+
+if TYPE_CHECKING:
+    from lexoplay.study import Pick
 
 log = logging.getLogger(__name__)
 
@@ -77,6 +80,8 @@ class F2Outcome:
     quality: Quality | None = None
     preview: Image.Image | None = None  # цветная обрезка окна диалога для окна LexoPlay
     usage: tuple[int, int] | None = None  # токены своего ключа: (вход, выход)
+    picks: tuple[Pick, ...] = ()  # учёба: слова реплики с подсказками (study.pick)
+    glosses: dict[str, str] = field(default_factory=dict)  # учёба: их значения от модели (слово -> значение)
 
 
 PAGE_PARALLEL = 3  # столько абзацев страницы переводятся одновременно
@@ -149,6 +154,9 @@ class Target:
     session_id: str = ""
     glossary: dict[str, str] = field(default_factory=dict, hash=False)
     notes: str = field(default="", compare=False)  # справка по игре для промпта
+    # учёба: над какими словами реплики подсказки (study.pick по словам OCR) и уровень игрока для модели
+    study: Callable[[OcrResult], Sequence[Pick]] | None = field(default=None, compare=False)
+    study_level: str = field(default="B1", compare=False)
 
 
 class Pipeline:
@@ -347,9 +355,12 @@ class Pipeline:
         *,
         settle: float | None = None,
         on_source: Callable[[str], None] | None = None,
+        on_study: Callable[[str, OcrResult, tuple[Pick, ...], dict[str, str] | None], None] | None = None,
     ) -> F2Outcome:
         """settle: сколько ждать, пока текст допечатается (автоперевод ждёт дольше).
-        on_source: реплика прочитана и уходит в перевод (оригинал можно показать сразу)."""
+        on_source: реплика прочитана и уходит в перевод (оригинал можно показать сразу).
+        on_study: учёба (из фонового потока): (реплика, OCR, слова с подсказками, None) сразу, как слова выбраны,
+        и (…, значения от модели), как только модель их написала, ещё до перевода."""
         t0 = time.perf_counter()
         # соединение с сервером перевода открываем сразу, пока идут захват и OCR
         warm = getattr(self.translator, "warm", None)
@@ -385,6 +396,15 @@ class Pipeline:
             )
         if not has_text(utt.text):
             return F2Outcome("no_text", **seen)
+        picks: tuple[Pick, ...] = ()
+        if target.study is not None:
+            try:
+                picks = tuple(target.study(result))
+            except Exception:
+                log.exception("учёба: слова для подсказок не выбрались")
+        seen["picks"] = picks
+        if on_study is not None and picks:
+            on_study(utt.text, result, picks, None)
 
         known = self.memory.find(utt.text)
         if known is not None:
@@ -413,7 +433,10 @@ class Pipeline:
             game_exe=target.game_exe,
             glossary=dict(target.glossary),
             notes=target.notes,
+            gloss_words=tuple(dict.fromkeys(p.token for p in picks if p.ask)),
+            gloss_level=target.study_level,
             on_partial=on_partial,
+            on_glosses=(lambda found: on_study(utt.text, result, picks, found)) if on_study is not None and picks else None,
         )
         if on_source is not None:
             on_source(utt.text)
@@ -441,7 +464,8 @@ class Pipeline:
         if self.cache is not None and target.game_exe:
             self.cache.add(target.game_exe, self.target_lang, rec)
         timings["total"] = time.perf_counter() - t0
-        return F2Outcome("translated", record=rec, usage=getattr(res, "usage", None), **seen)
+        glosses = dict(getattr(res, "glosses", None) or {})
+        return F2Outcome("translated", record=rec, usage=getattr(res, "usage", None), glosses=glosses, **seen)
 
     def _known(self, target: Target, text: str) -> tuple[LineRecord | None, bool]:
         """Перевод абзаца без запроса: (запись, из кеша на диске)."""

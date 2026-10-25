@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from PySide6.QtCore import QEasingCurve, QRectF, Qt, QTimer, QVariantAnimation
 from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPainter, QPaintEvent, QPen
@@ -39,6 +39,7 @@ class _Strip:
     text: str | None  # None: идёт перевод (точки)
     original: str | None
     recall: tuple[RecallChip, ...] = ()  # сохранённые слова из этой реплики: строка подсказок под переводом
+    hidden: bool = False  # учёба: перевод спрятан, вместо плашки маленькая «Alt · перевод»
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +60,9 @@ class _RecallRow:
 
 
 RECALL_LABEL = "уже сохранял"
+STUDY_HINT = "Alt · перевод"  # учёба: перевод спрятан, виден по Alt или наведению
+GLOSS_MIN_PX = 11.0
+GLOSS_MAX_PX = 22.0
 PAGE_FADE_S = 0.18  # новый перевод абзаца проявляется за столько
 PAGE_MIN_PX = 12.0
 PAGE_SAME_SIZE = 0.8  # общий кегль страницы не мельче стольких от кегля игры
@@ -72,6 +76,23 @@ class PageView:
     line_h: float  # высота строки оригинала в долях окна: от неё размер шрифта перевода
     text: str | None  # None: ещё переводится (точки)
     error: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class GlossView:
+    """Учёба: подсказка над словом в окне диалога игры."""
+
+    rect: Rect  # слово в долях окна игры (как region)
+    text: str  # значение
+    kind: str  # new: значение видно | test: «?», вспомни сам | saved: «?» сохранённого слова
+    label: str = ""  # сохранённое выражение целиком: видно, когда «?» открыт
+    open: bool = False  # «?» открыт наведением
+
+    @property
+    def shown(self) -> str:
+        if self.kind == "new" or self.open:
+            return f"{self.label} · {self.text}" if self.label and self.open else self.text
+        return "?"
 
 
 def _qt_placer(widget: QWidget, rect: Rect) -> None:
@@ -146,6 +167,10 @@ class Overlay(QWidget):
         self._page_timer = QTimer(self)
         self._page_timer.setInterval(16)
         self._page_timer.timeout.connect(self._page_tick)
+        # учёба: подсказки над словами игры, перевод спрятан, пока не держат Alt и не наводят на плашку
+        self._glosses: tuple[GlossView, ...] = ()
+        self.study_hide = False
+        self._study_open = False
         self.winId()  # создать нативное окно заранее
         if on_native:
             on_native(int(self.winId()))
@@ -228,11 +253,91 @@ class Overlay(QWidget):
 
     def hide_strip(self) -> None:
         if self.strip_visible and self.isVisible() and self.fade and not self._muted:
-            self._ghost = _Strip(self._region, self._text, self._original, self._recall)
+            self._ghost = self._shown()
             self._fade_to(0.0, FADE_OUT_MS)
         self._text, self._busy, self._original, self._recall = None, False, None, ()
+        self._glosses, self._study_open = (), False  # подсказки принадлежат реплике
         self._dots_timer.stop()
         self._refresh()
+
+    # --- учёба ---
+    @property
+    def glosses(self) -> tuple[GlossView, ...]:
+        return self._glosses
+
+    def show_glosses(self, glosses: Sequence[GlossView]) -> None:
+        glosses = tuple(glosses)
+        if glosses != self._glosses:
+            self._glosses = glosses
+            self._refresh()
+
+    def set_study_open(self, on: bool) -> None:
+        """Учёба: перевод виден (держат Alt или курсор на плашке) или снова спрятан."""
+        if self._study_open != on:
+            self._study_open = on
+            self.update()
+
+    @property
+    def study_open(self) -> bool:
+        return self._study_open
+
+    def _gloss_font(self, size: float, *, bold: bool = False) -> QFont:
+        f = QFont(self.font_family or FONT_FAMILY)
+        f.setPixelSize(max(1, round(size)))
+        f.setWeight(QFont.Weight.DemiBold if bold else QFont.Weight.Medium)
+        return f
+
+    def gloss_boxes(self) -> list[tuple[int, QRectF, QRectF, QFont]]:
+        """(номер подсказки, плашка значения, слово, шрифт) в пикселях окна. Плашка над словом по центру;
+        соседние в одной строке не налезают друг на друга."""
+        w, h = float(self.width()), float(self.height())
+        bounds = Rect(0, 0, w, h)
+        items: list[tuple[int, QRectF, QRectF, QFont]] = []
+        for i, g in enumerate(self._glosses):
+            text = g.shown
+            if not text:
+                continue
+            r = denormalize(g.rect, bounds)
+            word_h = max(8.0, r.h)
+            size = max(GLOSS_MIN_PX, min(GLOSS_MAX_PX, word_h * 0.5)) * self.font_scale
+            font = self._gloss_font(size, bold=text == "?")
+            fm = QFontMetricsF(font)
+            pad = size * (0.55 if text == "?" else 0.42)
+            bw = fm.horizontalAdvance(text) + 2 * pad
+            bh = fm.height() + size * 0.1
+            bx = r.x + r.w / 2 - bw / 2
+            by = r.y - bh - max(1.0, word_h * 0.05)
+            if by < 2:
+                by = r.bottom + 2  # над словом места нет: под ним
+            items.append((i, QRectF(bx, by, bw, bh), QRectF(r.x, r.y, r.w, r.h), font))
+        items.sort(key=lambda it: (round(it[1].y() / max(1.0, it[1].height())), it[1].x()))
+        out: list[tuple[int, QRectF, QRectF, QFont]] = []
+        for i, box, word, font in items:
+            prev = out[-1][1] if out else None
+            if prev is not None and abs(prev.y() - box.y()) < box.height() * 0.6 and box.x() < prev.right() + 4:
+                box.moveLeft(prev.right() + 4)
+            box.moveLeft(max(2.0, min(box.x(), w - box.width() - 2)))
+            out.append((i, box, word, font))
+        return out
+
+    def gloss_at(self, nx: float, ny: float) -> int | None:
+        """Подсказка под точкой (в долях окна игры): над её словом или на самом слове."""
+        x, y = nx * self.width(), ny * self.height()
+        for i, box, word, _font in self.gloss_boxes():
+            if box.adjusted(-3, -3, 3, 3).contains(x, y) or word.adjusted(-2, -2, 2, 2).contains(x, y):
+                return i
+        return None
+
+    def strip_hit(self, nx: float, ny: float, margin: float = 6.0) -> bool:
+        """Курсор на плашке перевода: на спрятанной «Alt · перевод» или на открытом переводе."""
+        if not self.strip_visible:
+            return False
+        x, y = nx * self.width(), ny * self.height()
+        state = self._shown()
+        rects = [self._strip_geometry(state)[0]]
+        if self.study_hide:
+            rects.append(self._strip_geometry(replace(state, hidden=not state.hidden))[0])
+        return any(r.adjusted(-margin, -margin, margin, margin).contains(x, y) for r in rects)
 
     # --- страница (текст на весь экран) ---
     @property
@@ -443,7 +548,7 @@ class Overlay(QWidget):
         return Rect(box.x(), box.y(), box.width(), box.height())
 
     def _shown(self) -> _Strip:
-        return _Strip(self._region, self._text, self._original, self._recall)
+        return _Strip(self._region, self._text, self._original, self._recall, self.study_hide and not self._study_open)
 
     def toast(self, text: str, ms: int = 2400) -> None:
         self._toast = text
@@ -456,7 +561,7 @@ class Overlay(QWidget):
 
     def _refresh(self) -> None:
         need = (
-            (not self._muted and (self.strip_visible or self._ghost is not None or bool(self._page)))
+            (not self._muted and (self.strip_visible or self._ghost is not None or bool(self._page) or bool(self._glosses)))
             or self._toast is not None
         )
         if need:
@@ -498,6 +603,8 @@ class Overlay(QWidget):
             cw = max(200.0, min(w - 16, custom.w * w))
             region = Rect(max(8.0, min(custom.x * w, w - 8 - cw)), region.y, cw, region.h)
         original = self._original_shown(strip_state)
+        if strip_state.hidden:
+            return self._hint_geometry(strip_state, region, px, font, small, w, h)
 
         def measure(size: float, f: QFont, value: str) -> tuple[QRectF, QFontMetricsF]:
             f.setPixelSize(max(1, round(size)))
@@ -524,16 +631,7 @@ class Overlay(QWidget):
             recall = self._layout_recall(strip_state.recall, region.w - 2 * pad_x, px, family)
             recall_h = recall.height + px * 0.45
         strip_h = br.height() + orig_h + recall_h + 2 * pad_y
-        gap = max(6.0, px * 0.4)
-        if custom is not None:
-            y = max(4.0, min(custom.y * h, h - strip_h - 4))
-            strip = Rect(region.x, y, region.w, strip_h)
-        elif self.strip_place == "top":
-            strip = Rect(region.x, max(8.0, h * 0.03), region.w, strip_h)
-        elif self.strip_place == "below" and region.bottom + gap + strip_h <= h:
-            strip = Rect(region.x, region.bottom + gap, region.w, strip_h)
-        else:
-            strip = place_strip(region, strip_h, bounds, gap=gap)
+        strip = self._place(region, strip_h, px, w, h)
         box = QRectF(strip.x, strip.y, strip.w, strip.h)
         orig_rect = None
         top = strip.y + pad_y
@@ -551,6 +649,37 @@ class Overlay(QWidget):
                 recall.height,
             )
         return box, font, text_rect, small, orig_rect, recall
+
+    def _place(self, region: Rect, strip_h: float, px: float, w: float, h: float) -> Rect:
+        """Где плашка высотой strip_h: своё место игры, вверху экрана, под или над окном диалога."""
+        gap = max(6.0, px * 0.4)
+        custom = self.strip_custom
+        if custom is not None:
+            y = max(4.0, min(custom.y * h, h - strip_h - 4))
+            return Rect(region.x, y, region.w, strip_h)
+        if self.strip_place == "top":
+            return Rect(region.x, max(8.0, h * 0.03), region.w, strip_h)
+        if self.strip_place == "below" and region.bottom + gap + strip_h <= h:
+            return Rect(region.x, region.bottom + gap, region.w, strip_h)
+        return place_strip(region, strip_h, Rect(0, 0, w, h), gap=gap)
+
+    def _hint_geometry(
+        self, strip_state: _Strip, region: Rect, px: float, font: QFont, small: QFont, w: float, h: float
+    ) -> tuple[QRectF, QFont, QRectF, QFont, QRectF | None, _RecallRow | None]:
+        """Учёба: перевод спрятан. Вместо плашки маленькая «Alt · перевод» на её месте, по центру."""
+        size = max(12.0, px * 0.74)
+        font.setPixelSize(round(size))
+        font.setWeight(QFont.Weight.Medium)
+        fm = QFontMetricsF(font)
+        busy = strip_state.text is None
+        text_w = size * 2.6 if busy else fm.horizontalAdvance(STUDY_HINT)
+        pad_x, pad_y = size * 0.9, size * 0.42
+        bw, bh = text_w + 2 * pad_x, fm.height() + 2 * pad_y
+        strip = self._place(region, bh, px, w, h)
+        x = max(4.0, min(region.x + (region.w - bw) / 2, w - bw - 4))
+        box = QRectF(x, strip.y, bw, bh)
+        text_rect = QRectF(x + pad_x, strip.y + pad_y, text_w, fm.height())
+        return box, font, text_rect, small, None, None
 
     @staticmethod
     def _layout_recall(chips: tuple[RecallChip, ...], width: float, px: float, family: str) -> _RecallRow:
@@ -607,6 +736,8 @@ class Overlay(QWidget):
         p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
         if self._page and not self._muted and not self._peek:
             self._paint_page(p)
+        if self._glosses and not self._muted and not self._page:
+            self._paint_glosses(p)
         strip = self._shown() if self.strip_visible else self._ghost
         if strip is not None and self._alpha > 0.0 and not self._muted:
             p.setOpacity(max(0.0, min(1.0, self._alpha)))
@@ -627,6 +758,15 @@ class Overlay(QWidget):
         radius = min(12.0, box.height() / 2)
         p.drawRoundedRect(box, radius, radius)
         p.setClipRect(box)  # пока плашка растёт, новая строка проявляется вместе с ней
+        if strip.hidden:
+            if strip.text is None:
+                self._paint_dots(p, text_rect, font)
+            else:
+                p.setFont(font)
+                p.setPen(TEXT_MUTED)
+                p.drawText(text_rect, int(Qt.AlignmentFlag.AlignCenter), STUDY_HINT)
+            p.setClipping(False)
+            return
         original = self._original_shown(strip)
         if orig_rect is not None and original:
             p.setFont(small)
@@ -677,6 +817,35 @@ class Overlay(QWidget):
             if c.count:
                 p.setPen(TEXT_MUTED)
                 p.drawText(QRectF(x, r.y(), max(0.0, r.right() - x), r.height()), left, "  " + c.count)
+
+    def _paint_glosses(self, p: QPainter) -> None:
+        """Значения над словами: светлые (новое слово), «?» бирюзовый (вспомни сам), «?» жёлтый (твоё слово)."""
+        bg = QColor(STRIP_BG)
+        bg.setAlphaF(0.86)
+        for i, box, word, font in self.gloss_boxes():
+            g = self._glosses[i]
+            color = QColor(KNOWN) if g.kind == "saved" else QColor(ACCENT)
+            line = QColor(color)
+            line.setAlphaF(0.85 if g.kind == "new" or g.open else 0.6)
+            pen = QPen(line, max(1.5, font.pixelSize() * 0.1))
+            if g.kind != "new" and not g.open:
+                pen.setStyle(Qt.PenStyle.DotLine)
+            p.setPen(pen)
+            y = word.bottom() + 1.5
+            p.drawLine(word.left() + 1, y, word.right() - 1, y)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(bg)
+            radius = box.height() / 2
+            p.drawRoundedRect(box, radius, radius)
+            p.setFont(font)
+            text = g.shown
+            if text == "?":
+                p.setPen(color)
+            elif g.kind == "saved":
+                p.setPen(QColor(KNOWN))
+            else:
+                p.setPen(QColor("#ECE9E0"))
+            p.drawText(box, int(Qt.AlignmentFlag.AlignCenter), text)
 
     def _paint_dots(self, p: QPainter, text_rect: QRectF, font: QFont) -> None:
         """Идёт перевод: три точки, яркая бежит слева направо."""

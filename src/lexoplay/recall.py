@@ -186,9 +186,13 @@ class RecallIndex:
 
     def find(self, text: str) -> list[_Entry]:
         """Какие сохранённые слова есть в реплике, по порядку. Выражение важнее слова внутри него."""
+        return [e for _i, _end, e in self.spans(text)]
+
+    def spans(self, text: str) -> list[tuple[int, int, _Entry]]:
+        """Как find, но с местом в реплике: (первое слово, конец не включая, запись) по tokens(text)."""
         toks = tokens(text)
         vars_ = [variants(t) for t in toks]
-        found: list[tuple[int, _Entry]] = []
+        found: list[tuple[int, int, _Entry]] = []
         taken: set[int] = set()  # слова, вошедшие в найденное выражение
         seen: set[str] = set()
         for i in range(len(toks)):
@@ -200,10 +204,10 @@ class RecallIndex:
                 end = _match(e.parts, toks, vars_, i) if n > 1 else (i + 1 if e.parts[0] in vars_[i] else None)
                 if end is not None:
                     seen.add(e.key)
-                    found.append((i, e))
+                    found.append((i, end, e))
                     if n > 1:
                         taken.update(range(i, end))
-        return [e for _i, e in sorted(found, key=lambda x: x[0])]
+        return sorted(found, key=lambda x: x[0])
 
 
 class Recaller:

@@ -453,6 +453,20 @@ class ProgressPage(QWidget):
         rl.addLayout(row)
         lay.addWidget(self.read_box)
 
+        # учёба: сколько читал сам, без перевода
+        self.study_box, sl = card()
+        sl.setContentsMargins(16, 12, 16, 12)
+        srow = QHBoxLayout()
+        srow.setSpacing(12)
+        cap = QLabel()
+        cap.setPixmap(icon("study", theme.GREEN, 22).pixmap(22, 22))
+        srow.addWidget(cap, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.study_text = label("", None, wrap=True)
+        self.study_text.setTextFormat(Qt.TextFormat.RichText)
+        srow.addWidget(self.study_text, 1)
+        sl.addLayout(srow)
+        lay.addWidget(self.study_box)
+
         lay.addWidget(label("ЦЕЛЬ НА ДЕНЬ", "section"))
         goal_box, gl = card_list()
         self.goal = QComboBox()
@@ -551,6 +565,7 @@ class ProgressPage(QWidget):
         book = f", это примерно {count(pages, 'страница', 'страницы', 'страниц')} книги" if pages else ""
         num = f"{pr.words_read:,}".replace(",", "\u00a0")
         self.read_text.setText(f"Прочитано по-английски: <b>{num}</b> {plural_words(pr.words_read)}{book}.")
+        self._show_study(pr)
         self._show_activity()
         self.hours.set_hours(pr.hours)
         self.hours_note.setText(hours_note(pr.hours))
@@ -559,6 +574,24 @@ class ProgressPage(QWidget):
         self._show_pos()
         lines, words, seconds = pr.totals
         self.totals.setText(f"Всего с LexoPlay: реплик {lines}, новых слов {words}, в играх {minutes(seconds)}.")
+
+    def _show_study(self, pr: Progress) -> None:
+        lines, peeks, learned = pr.study_today
+        week_lines, week_peeks, _week_learned = pr.study_week
+        self.study_box.setVisible(bool(week_lines or pr.study_known or getattr(self.ctl.settings, "study_mode", False)))
+        if lines:
+            peek = f", перевод подглядывал {count(peeks, 'раз', 'раза', 'раз')}" if peeks else ", ни разу не подглядывал перевод"
+            head = f"Учёба сегодня: сам по-английски <b>{count(lines, 'реплика', 'реплики', 'реплик')}</b>{peek}."
+        elif week_lines:
+            share = round(100 * (week_lines - week_peeks) / week_lines)
+            head = f"Учёба за неделю: сам по-английски {count(week_lines, 'реплика', 'реплики', 'реплик')}, без перевода {share}%."
+        else:
+            hk = getattr(getattr(self.ctl.settings, "hotkeys", None), "study", "") or "F8"
+            head = f"Учёба: в игре нажми {hk}, и реплики читаешь сам, с подсказками над трудными словами."
+        tail = ""
+        if learned or pr.study_known:
+            tail = f" Слов запомнилось: <b>{learned}</b> сегодня, {pr.study_known} всего."
+        self.study_text.setText(head + tail)
 
     def _show_activity(self) -> None:
         pr = self.pr
