@@ -898,6 +898,8 @@ def _page_flow(out_dir: Path) -> Callable[[], tuple[str, object]]:
         info: dict[str, object] = {}
         try:
             app.start()
+            # настоящего окна игры нет: смена фокуса на CI (консоль, рабочий стол) не должна убирать перевод
+            app.events.foreground.disconnect(app._on_foreground)
             app.translator = FakeTranslator()  # type: ignore[assignment]
             app.pipelines.clear()
             app.display = Rect(60, 60, 1000, 700)
