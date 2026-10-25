@@ -2312,8 +2312,8 @@ class App(QObject):
             self.overlay.update()
             return
         line = self.current
-        if not self.overlay.strip_visible or line is None or game is None or line.exe != game.exe:
-            return
+        if self.state != "idle" or not self.overlay.strip_visible or line is None or game is None or line.exe != game.exe:
+            return  # перевода на экране нет (или он ещё в пути): учёба начнётся со следующей реплики
         self.overlay.study_hide = True
         text = line.sentence
         picks = self._study_picker(game)(line.ocr)

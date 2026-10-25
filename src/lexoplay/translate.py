@@ -301,7 +301,7 @@ def split_glosses(raw: str) -> tuple[str, str | None, bool]:
     """Ответ модели -> (ответ без строки значений, строка значений «## ...» или None, дописана ли она)."""
     m = _GLOSS_LINE.search(raw)
     if m is None:
-        if raw.lstrip().startswith("#"):
+        if raw.strip() == "#":
             return "", None, False  # «#» уже пришёл, второй ещё нет: строка значений дописывается
         return raw, None, False
     line = m.group(0)
