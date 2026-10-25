@@ -61,6 +61,7 @@ class _RecallRow:
 RECALL_LABEL = "уже сохранял"
 PAGE_FADE_S = 0.18  # новый перевод абзаца проявляется за столько
 PAGE_MIN_PX = 12.0
+PAGE_SAME_SIZE = 0.8  # общий кегль страницы не мельче стольких от кегля игры
 
 
 @dataclass(frozen=True, slots=True)
@@ -286,12 +287,15 @@ class Overlay(QWidget):
             self.update()
 
     def page_boxes(self) -> list[tuple[QRectF, QRectF, QFont]]:
-        """(фон абзаца, где текст, шрифт) в пикселях окна, для каждого абзаца по порядку."""
+        """(фон абзаца, где текст, шрифт) в пикселях окна, для каждого абзаца по порядку.
+
+        Шрифт на странице один для всех абзацев: самый мелкий из тех, что влезли, но не мельче
+        PAGE_SAME_SIZE от кегля игры. Абзац, которому и так тесно, мельчает сам по себе."""
         w, h = float(self.width()), float(self.height())
         bounds = Rect(0, 0, w, h)
         family = self.font_family or FONT_FAMILY
         rects = [denormalize(b.rect, bounds) for b in self._page]
-        out: list[tuple[QRectF, QRectF, QFont]] = []
+        plans = []
         for i, (b, r) in enumerate(zip(self._page, rects, strict=True)):
             line_px = max(8.0, b.line_h * h)
             # рамка слова от OCR примерно с кегль игры: перевод того же размера, что и оригинал
@@ -301,24 +305,41 @@ class Overlay(QWidget):
             # вниз можно занять место до следующего абзаца: русский текст обычно длиннее английского
             below = rects[i + 1].y - pad * 1.4 if i + 1 < len(rects) else h - pad
             room = max(r.h, below - r.y)
-            font = QFont(family)
-            font.setWeight(QFont.Weight.Bold if self.font_bold else QFont.Weight.Medium)
             value = b.text if b.text is not None else "…"
             if b.error:
                 value = "Не перевелось: " + b.error
-            size = px
-            while True:
-                font.setPixelSize(max(1, round(size)))
-                br = QFontMetricsF(font).boundingRect(QRectF(0, 0, text_w, 100000), Qt.TextFlag.TextWordWrap, value)
-                if br.height() <= room or size <= PAGE_MIN_PX:
-                    break
-                size = max(PAGE_MIN_PX, size * 0.92)
+            plans.append((b, r, line_px, px, pad, text_w, room, value, self._fit_page(family, value, text_w, room, px)))
+        fitted = [plan[8] for plan in plans if plan[0].text is not None]
+        base = [plan[3] for plan in plans]
+        common = max(min(fitted), min(base) * PAGE_SAME_SIZE) if fitted else None
+        out: list[tuple[QRectF, QRectF, QFont]] = []
+        for b, r, line_px, _px, pad, text_w, _room, value, size in plans:
+            if common is not None:
+                size = min(size, common)
+            font = self._page_font(family, size)
+            br = QFontMetricsF(font).boundingRect(QRectF(0, 0, text_w, 100000), Qt.TextFlag.TextWordWrap, value)
             text_h = br.height() if b.text is not None else max(r.h, line_px)
             box_h = max(r.h, text_h)
             text_rect = QRectF(r.x, r.y, text_w, box_h)
             box = QRectF(r.x - pad, r.y - pad * 0.7, text_w + 2 * pad, box_h + pad * 1.4)
-            out.append((box, text_rect, QFont(font)))
+            out.append((box, text_rect, font))
         return out
+
+    def _page_font(self, family: str, size: float) -> QFont:
+        font = QFont(family)
+        font.setWeight(QFont.Weight.Bold if self.font_bold else QFont.Weight.Medium)
+        font.setPixelSize(max(1, round(size)))
+        return font
+
+    def _fit_page(self, family: str, value: str, width: float, room: float, size: float) -> float:
+        """Кегль, при котором перевод абзаца влезает в его место (не мельче PAGE_MIN_PX)."""
+        while True:
+            br = QFontMetricsF(self._page_font(family, size)).boundingRect(
+                QRectF(0, 0, width, 100000), Qt.TextFlag.TextWordWrap, value
+            )
+            if br.height() <= room or size <= PAGE_MIN_PX:
+                return size
+            size = max(PAGE_MIN_PX, size * 0.92)
 
     def _paint_page(self, p: QPainter) -> None:
         now = time.monotonic()

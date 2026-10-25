@@ -35,6 +35,12 @@ jobs:
           pytest -q 2>&1 | Tee-Object -FilePath selftest/logs/pytest.txt
           exit $LASTEXITCODE
 
+      # Снимки для README: настоящие виджеты поверх нарисованных сцен, со шрифтами Windows
+      - name: README screenshots (best effort)
+        continue-on-error: true
+        run: |
+          python packaging/readme_shots.py selftest/readme 2>&1 | Tee-Object -FilePath selftest/logs/readme-shots.txt
+
       # На серверной Windows английского OCR может не быть. Пробуем поставить, но не падаем:
       # без него самопроверка пометит OCR как warn.
       - name: English OCR language pack (best effort)
