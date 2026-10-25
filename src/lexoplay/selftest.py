@@ -923,11 +923,25 @@ def _page_flow(out_dir: Path) -> Callable[[], tuple[str, object]]:
             info["second"] = pump(lambda: app.state == "idle" and len(app.overlay.page) == 4 and all(v.text for v in app.overlay.page))
             info["calls_total"] = len(calls)
             # F3 на странице: режим слов по абзацу
+            def state() -> dict:
+                return {
+                    "page": app.overlay.page_visible,
+                    "muted": app.overlay.muted,
+                    "live": app.page_live,
+                    "busy": app.state,
+                    "open": app.word_layer.is_open,
+                    "current": app.current is not None,
+                }
+
+            info["before_f3"] = state()
             app.f3()
             info["words_open"] = pump(lambda: app.word_layer.is_open, 5)
             info["words_sentence"] = app.word_ctx.line.sentence[:40] if app.word_ctx else ""
+            info["in_f3"] = state()
+            app.word_layer.grab().save(str(out_dir / "page-words.png"))
             app._close_words("esc")
             pump(lambda: not app.word_layer.is_open and not app.overlay.muted, 3)  # перевод страницы вернулся
+            info["after_f3"] = state()
             info["back_after_words"] = not app.overlay.muted and app.overlay.page_visible
             # Alt: оригинал виден, перевод не рисуется (подсказка в углу может и остаться)
             boxes = [b for b, _t, _f in app.overlay.page_boxes()]

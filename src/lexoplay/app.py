@@ -2366,7 +2366,8 @@ class App(QObject):
             return
         self._set_busy()  # проверки смены реплики пока молчат сами (state busy), наблюдатель не трогаем
         token = self.token
-        self.overlay.show_busy(game.region)
+        if not game.page:  # у страницы перевод поверх абзацев остаётся на месте
+            self.overlay.show_busy(game.region)
         target = self._target(game, session.id)
         grab = self._make_grab(self.active, game, display)
 
@@ -3400,6 +3401,9 @@ class App(QObject):
         self._give_focus_back(reason)
         log.debug("режим слов закрыт: %s", reason)
         if self.overlay.strip_visible:
+            return
+        if self.page_live and self._page_out is not None:
+            self._watch_line(self._page_out.text, self._page_out.thumb)  # страница: следим за новыми абзацами дальше
             return
         watcher = self.watcher
         keep = reason in ("esc", "outside", "idle", "hotkey")
