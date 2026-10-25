@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import deque
 import time
 import uuid
 from collections.abc import Awaitable, Callable
@@ -27,7 +28,7 @@ from lexoplay.ocrfuse import fuse
 from lexoplay.ocrscore import Quality, quality
 from lexoplay.preprocess import MODES, Prepared, changed, prepare, preview, thumbnail
 from lexoplay.textproc import Paragraph, Utterance, has_text, name_from, page_text, paragraphs, to_utterance
-from lexoplay.translate import ContextLine, TranslateRequest, TranslationError, Translator
+from lexoplay.translate import ContextLine, TranslateRequest, TranslateResult, TranslationError, Translator
 
 log = logging.getLogger(__name__)
 
@@ -79,6 +80,17 @@ class F2Outcome:
 
 
 PAGE_PARALLEL = 3  # столько абзацев страницы переводятся одновременно
+FAST_AFTER = 6  # столько чтений всеми способами подряд без пользы от других: дальше читаем одним
+FULL_EVERY = 8  # и всё равно раз в столько чтений проверяем все способы (вдруг сцена сменилась)
+FAST_RATIO = 0.85  # одним способом прочитано хотя бы так чисто: иначе дочитываем всеми
+PAGE_TYPE_WAIT = 2.5  # последний абзац ещё печатается (без точки в конце): ждём до стольких секунд
+PAGE_TYPE_STEP = 0.35
+_ENDS = (".", "!", "?", "…", '"', "”", "»", ")", "~", "*")
+
+
+def _typing(paras: list[Paragraph]) -> bool:
+    """Последний абзац выглядит недопечатанным: нет знака конца фразы."""
+    return bool(paras) and not paras[-1].text.rstrip().endswith(_ENDS)
 
 
 @dataclass(slots=True)
@@ -171,6 +183,10 @@ class Pipeline:
         self._debug = debug
         self.cache = cache
         self.parallel_ok = True  # читать способами OCR одновременно; выключается, если движок не тянет
+        # Способ OCR для игры уже подобран и раз за разом выигрывает, а другие ничего не добавляют:
+        # читаем только им (быстрее F2 и меньше нагрузка). Каждое FULL_EVERY-е чтение всё равно всеми
+        self._explored: deque[bool] = deque(maxlen=FAST_AFTER)  # True: другие способы что-то дали
+        self._fast_reads = 0
         self._warm_task: asyncio.Future | None = None
 
     async def _grab(self, grab: Grab) -> Image.Image:
@@ -255,9 +271,21 @@ class Pipeline:
         реплики): только способом, который подошёл игре, и своим движком OCR (slot), чтобы
         проверка не ждала F2 и не мешала ему."""
         first = target.ocr_mode if target.ocr_mode in MODES else MODES[0]
+        fast = None
+        if explore and self._fast_ok(target):
+            self._fast_reads += 1
+            result = await self._read(frame, target.region, first, slot=slot)
+            q = quality(result, self.source_lang)
+            if q.ok and q.ratio >= FAST_RATIO:
+                fast = Reading(result, None, first, q)
+                fast.tried = {first: str(q), "одним способом": "да"}
+            else:
+                self._explored.clear()  # прочиталось хуже обычного: снова всеми способами
         if not explore:
             result = await self._read(frame, target.region, first, slot=slot)
             reading = Reading(result, None, first, quality(result, self.source_lang))
+        elif fast is not None:
+            reading = fast
         else:
             modes = [first] + [m for m in MODES if m != first]
             got = await self._read_all(frame, target.region, modes)
@@ -279,10 +307,20 @@ class Pipeline:
                 reading.tried["+слов"] = str(added)
             if mode != first or added:
                 log.info("OCR: способы %s, выбран %s, добавлено слов из других: %s", reading.tried, mode, added)
+            self._explored.append(bool(mode != first or added))
         if target.name_region is not None:
             name_res = await self._read(frame, target.name_region, reading.mode, slot=slot, tag="name")
             reading.name_text = name_from(name_res)
         return reading
+
+    def _fast_ok(self, target: Target) -> bool:
+        """Можно ли читать одним способом: он подобран и последние FAST_AFTER раз другие ничего не дали."""
+        if target.ocr_mode not in MODES or len(self._explored) < FAST_AFTER or any(self._explored):
+            return False
+        if self._fast_reads and self._fast_reads % FULL_EVERY == 0:
+            self._fast_reads += 1
+            return False  # плановая проверка всеми способами
+        return True
 
     def context_for(self, target: Target, text: str) -> list[LineRecord]:
         """Прошлые реплики для перевода: из этой сессии, а в её начале ещё и из истории игры.
@@ -450,6 +488,9 @@ class Pipeline:
         reading = await self.recognize(frame, target)
         timings["ocr"] = time.perf_counter() - t1
         paras = paragraphs(reading.result)
+        if _typing(paras):
+            frame, reading, paras = await self._wait_typing(grab, target, frame, reading, paras)
+            timings["typing"] = time.perf_counter() - t1 - timings["ocr"]
         out = PageOutcome(
             "translated",
             ocr=reading.result,
@@ -527,9 +568,63 @@ class Pipeline:
             if on_blocks is not None:
                 on_blocks(list(blocks))
 
+        def keep(i: int, res: TranslateResult) -> None:
+            b = blocks[i]
+            rec = LineRecord(str(uuid.uuid4()), b.speaker, res.source, res.translation, normalize_text(b.source))
+            b.record = rec
+            self.memory.add(rec)
+            if self.cache is not None and target.game_exe:
+                self.cache.add(target.game_exe, self.target_lang, rec)
+            out.translated += 1
+
         warm_task = getattr(self, "_warm_task", None)
         if warm_task is not None and not warm_task.done():
             await asyncio.wait({warm_task}, timeout=0.15)
+        batch = getattr(self.translator, "translate_batch", None)
+        if batch is not None and len(pending) >= 2:
+            # все новые абзацы одним запросом: промпт и контекст один раз, абзацы друг друга видят
+            above = [ContextLine(x.speaker, x.record.source, x.record.translation) for x in blocks if x.record]
+            ctx = ([ContextLine(r.speaker, r.source, r.translation) for r in earlier] + above)[-self._context_size :]
+            reqs = [
+                TranslateRequest(
+                    text=blocks[i].source,
+                    speaker=blocks[i].speaker,
+                    game=target.game_title,
+                    target_lang=self.target_lang,
+                    source_lang=self.source_lang,
+                    context=tuple(ctx),
+                    line_id=str(uuid.uuid4()),
+                    session_id=target.session_id,
+                    game_exe=target.game_exe,
+                    glossary=dict(target.glossary),
+                    notes=target.notes,
+                )
+                for i in pending
+            ]
+            try:
+                results, usage = await batch(
+                    reqs, (lambda k, text: on_partial(pending[k], text)) if on_partial is not None else None
+                )
+            except TranslationError as exc:
+                for i in pending:
+                    blocks[i].error = str(exc)
+                errors.append((str(exc), getattr(exc, "code", "error")))
+                results, usage = [], None
+            except Exception:
+                log.exception("перевод страницы одним запросом упал, перевожу по абзацам")
+                results, usage = [None] * len(pending), None
+            if usage:
+                used[0] += usage[0]
+                used[1] += usage[1]
+            for i, res in zip(pending, results, strict=False):
+                if res is not None:
+                    keep(i, res)
+            if on_blocks is not None and any(r is not None for r in results):
+                on_blocks(list(blocks))
+            if not errors:
+                pending = [i for i in pending if blocks[i].record is None]  # не нашлись в ответе: по одному
+            else:
+                pending = []
         await asyncio.gather(*(one(i) for i in pending))
         timings["translate"] = time.perf_counter() - t2
         timings["total"] = time.perf_counter() - t0
@@ -539,6 +634,36 @@ class Pipeline:
         elif errors:
             out.message, out.code = errors[0]
         return out
+
+    async def _wait_typing(
+        self, grab: Grab, target: Target, frame: Image.Image, reading: Reading, paras: list[Paragraph]
+    ) -> tuple[Image.Image, Reading, list[Paragraph]]:
+        """Последний абзац ещё печатается по буквам: не переводим его кусок, ждём, пока перестанет расти.
+
+        Иначе перевёлся бы обрывок, а через секунду весь абзац ещё раз (два запроса вместо одного)."""
+        last = (len(paras), paras[-1].text)
+        grew = False
+        steps = max(1, int(PAGE_TYPE_WAIT / PAGE_TYPE_STEP))
+        for _ in range(steps):
+            await self._sleep(PAGE_TYPE_STEP)
+            try:
+                nxt = await self._grab(grab)
+            except CaptureError:
+                break
+            quick = await self.recognize(nxt, target, explore=False)
+            now = paragraphs(quick.result)
+            if not now:
+                break
+            sig = (len(now), now[-1].text)
+            if sig == last:  # перестал расти
+                break
+            grew, last, frame, paras = True, sig, nxt, now
+            if not _typing(now):
+                break
+        if grew:  # дочитываем последний кадр как следует (всеми способами)
+            reading = await self.recognize(frame, target)
+            paras = paragraphs(reading.result)
+        return frame, reading, paras
 
     async def scan(self, grab: Grab, target: Target) -> ScanOutcome:
         """Для F3: дождаться стабильного кадра и распознать, без запроса перевода."""

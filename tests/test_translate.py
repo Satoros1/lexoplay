@@ -44,8 +44,10 @@ def test_prompt_contains_context_and_speaker():
     user = build_user(req)
     assert '<line speaker="Mira">You\'re late.</line>\n<translation>Ты опоздал.</translation>' in user
     assert user.strip().endswith('Translate this line:\n<line speaker="Old Man">Back again?</line>')
-    glossed = build_user(TranslateRequest(text="Hi", speaker=None, game="g", glossary={"Monokuma": "Монокума"}))
-    assert "<glossary>\nMonokuma => Монокума\n</glossary>" in glossed and glossed.endswith("<line>Hi</line>")
+    req = TranslateRequest(text="Hi", speaker=None, game="g", glossary={"Monokuma": "Монокума"})
+    glossed = build_system(req)  # постоянная часть: кешируется вместе с промптом
+    assert "<glossary>\nMonokuma => Монокума\n</glossary>" in glossed
+    assert "<glossary>" not in build_user(req) and build_user(req).endswith("<line>Hi</line>")
     assert clean_translation("<translation>Привет.</translation>") == "Привет."
     assert clean_translation("<transl", partial=True) == ""
 
@@ -195,11 +197,12 @@ def test_falls_back_without_effort_then_to_low_effort():
         return _ok(http, _sse("Готово"))
 
     tr = _sdk_translator(handler)
-    res = asyncio.run(tr.translate(TranslateRequest("Done", None, "G")))
-    assert res.translation == "Готово"
+    long_line = "Done with the investigation, let's head to the trial room right now."  # не короткая: с раздумьями
+    res = asyncio.run(tr.translate(TranslateRequest(long_line, None, "G")))
+    assert res.translation == "Готово."  # точка как у оригинала
     assert seen[1]["thinking"] == {"type": "disabled"} and "output_config" not in seen[1]  # без effort
     assert seen[2]["output_config"] == {"effort": "low"} and "thinking" not in seen[2]
-    asyncio.run(tr.translate(TranslateRequest("Again", None, "G")))
+    asyncio.run(tr.translate(TranslateRequest(long_line + " Again.", None, "G")))
     assert seen[3]["output_config"] == {"effort": "low"}  # запомнили, больше не пробуем
 
 
@@ -421,3 +424,63 @@ def test_line_continuing_previous_box_keeps_leading_dots():
     assert fix_start("...Fever Time will activate.", "Начнётся Фивер-тайм.") == "...Начнётся Фивер-тайм."
     assert fix_start("…and then", "...а потом") == "...а потом"
     assert fix_start("Fever Time will activate.", "Начнётся Фивер-тайм.") == "Начнётся Фивер-тайм."
+
+
+def test_usage_counts_prompt_cache_at_its_price():
+    from types import SimpleNamespace
+
+    from lexoplay import translate as T
+
+    T.PROMPT_CACHE.__init__()
+    msg = SimpleNamespace(usage=SimpleNamespace(input_tokens=300, cache_read_input_tokens=3000, cache_creation_input_tokens=0, output_tokens=40))
+    assert T.usage_of(msg) == (300 + 300, 40)  # 3000 из кеша по цене 300 обычных
+    first = SimpleNamespace(usage=SimpleNamespace(input_tokens=300, cache_read_input_tokens=0, cache_creation_input_tokens=3000, output_tokens=40))
+    assert T.usage_of(first) == (300 + 3750, 40)  # запись в кеш дороже
+    old = SimpleNamespace(usage=SimpleNamespace(input_tokens=500, output_tokens=10))  # старый SDK без полей кеша
+    assert T.usage_of(old) == (500, 10)
+    stats = T.PROMPT_CACHE.as_dict()
+    assert stats["requests"] == 3 and stats["input_cache_read"] == 3000 and 0.4 < stats["hit_share"] < 0.45
+
+
+def test_short_line_goes_without_long_thinking_and_whole_scene():
+    http = _http()
+    seen = []
+
+    def handler(req):
+        seen.append(json.loads(req.content))
+        return _ok(http, _sse("Чего?"))
+
+    ctx = tuple(ContextLine("Mondo", f"Line number {i} of the scene.", f"Реплика {i}.") for i in range(10))
+    tr = _sdk_translator(handler)
+    asyncio.run(tr.translate(TranslateRequest("Huh?", "Mondo Owada", "DR", context=ctx)))
+    body = seen[0]
+    assert body["output_config"] == {"effort": "low"}
+    user = body["messages"][0]["content"]
+    assert "Line number 9" in user and "Line number 6" not in user  # три последние реплики
+    asyncio.run(tr.translate(TranslateRequest("I was reluctant to come here tonight, you know.", "Mira", "DR", context=ctx)))
+    assert seen[1]["output_config"] == {"effort": "medium"} and "Line number 2" in seen[1]["messages"][0]["content"]
+
+
+def test_page_paragraphs_in_one_request():
+    http = _http()
+    seen = []
+
+    def handler(req):
+        seen.append(json.loads(req.content))
+        return _ok(http, _sse("¶1 Утро выдалось холодным.\n¶2 «Ты опоздал», сказала она.\n", "@@\n¶1 The morning was cold.\n¶2 \"You're late,\" she said."))
+
+    tr = _sdk_translator(handler)
+    reqs = [
+        TranslateRequest("The rnorning was cold.", None, "Fate"),
+        TranslateRequest("\"You're late,\" she said.", None, "Fate"),
+    ]
+    parts = []
+    results, usage = asyncio.run(tr.translate_batch(reqs, lambda i, t: parts.append((i, t))))
+    assert [r.translation for r in results] == ["Утро выдалось холодным.", "«Ты опоздал», сказала она."]
+    assert results[0].source == "The morning was cold."  # OCR поправлен
+    assert len(seen) == 1 and 'n="2"' in seen[0]["messages"][0]["content"]
+    assert {i for i, _t in parts} <= {0, 1}
+    # модель пропустила абзац: он вернётся None, его переведут отдельно
+    from lexoplay.translate import split_batch
+
+    assert split_batch("¶1 Раз.\n¶3 Три.", 3)[0] == ["Раз.", None, "Три."]

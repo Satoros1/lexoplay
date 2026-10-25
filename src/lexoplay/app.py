@@ -79,6 +79,7 @@ from lexoplay.textproc import Paragraph, Utterance, page_text, paragraphs, strip
 from lexoplay.translate import (
     NOTES_MAX_CHARS,
     NOTES_SAMPLE_LINES,
+    PROMPT_CACHE,
     AnthropicTranslator,
     ContextLine,
     LexoTranslator,
@@ -645,6 +646,7 @@ class App(QObject):
             "state": self.state,
             "failed_hotkeys": sorted(k for k in self._failed_keys if not k.startswith("warned:")),
             "translator": type(self.translator).__name__ if self.translator else None,
+            "prompt_cache": PROMPT_CACHE.as_dict(),  # срабатывает ли кеш промпта своего ключа
         }
 
     # ------------------------------------------------------------------ прогресс

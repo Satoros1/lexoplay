@@ -130,6 +130,10 @@ class OwnUsage:
             parts.append(f"из кеша бесплатно: {d.cached}")
         if d.words:
             parts.append(f"слов: {d.words}")
+        from lexoplay.translate import PROMPT_CACHE
+
+        if PROMPT_CACHE.requests >= 3:
+            parts.append(f"кеш промпта: {round(PROMPT_CACHE.hit_share * 100)}% входа")
         cost = d.cost(model)
         tokens = d.tokens_in + d.tokens_out
         tail = f"примерно {money(cost)} ({tokens:,} токенов)".replace(",", " ") if cost is not None else f"{tokens:,} токенов".replace(",", " ")

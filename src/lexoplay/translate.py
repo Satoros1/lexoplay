@@ -19,7 +19,7 @@ import logging
 import re
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Protocol
 
 log = logging.getLogger(__name__)
@@ -144,6 +144,15 @@ def clean_notes(text: str) -> str | None:
 
 
 MAX_TOKENS = 1024
+SHORT_WORDS = 4  # реплика не длиннее стольких слов: короткая («Huh?», «W-wait!», «I see.»)
+SHORT_CHARS = 40
+SHORT_CONTEXT = 3  # короткой реплике хватает трёх прошлых (кто говорит и с кем, ты или вы)
+
+
+def is_short(text: str) -> bool:
+    """«Huh?», «Yeah...», «W-wait!», «Makoto, wait!»: перевод без раздумий и без всей сцены."""
+    t = text.strip()
+    return bool(t) and len(t) <= SHORT_CHARS and len(re.findall(r"[^\W\d_]+(?:['’-][^\W\d_]+)*", t)) <= SHORT_WORDS
 MAX_TOKENS_THINKING = 4096  # thinking тратит те же max_tokens, что и ответ
 
 
@@ -219,8 +228,16 @@ def build_system(req: TranslateRequest) -> str:
         source=lang_name(req.source_lang),
         game=(req.game or "unknown").replace('"', "'"),
         examples=examples_block(req.target_lang),
-        notes=notes_block(req.notes),
+        notes=notes_block(req.notes) + glossary_block(req.glossary),
     )
+
+
+def glossary_block(glossary: dict[str, str]) -> str:
+    """Глоссарий игры постоянный: в системной части он кешируется вместе с промптом."""
+    if not glossary:
+        return ""
+    rows = "\n".join(f"{k} => {v}" for k, v in glossary.items())
+    return "\n\nGlossary of this game (always use these names and terms):\n<glossary>\n" + rows + "\n</glossary>"
 
 
 def _attr(value: str) -> str:
@@ -233,15 +250,11 @@ def _line(speaker: str | None, text: str) -> str:
 
 
 def build_user(req: TranslateRequest) -> str:
-    """Глоссарий, прошлые реплики с их переводами (от старых к новым) и сама реплика.
+    """Прошлые реплики с их переводами (от старых к новым) и сама реплика (глоссарий в системной части).
 
     Прошлые реплики не только для понимания сцены: по ним модель держит те же имена,
     пол персонажей и «ты/вы», что уже звучали в переводе."""
     parts = []
-    if req.glossary:
-        parts.append("<glossary>")
-        parts += [f"{k} => {v}" for k, v in req.glossary.items()]
-        parts.append("</glossary>")
     if req.context:
         parts.append("<earlier_lines>")
         for c in req.context:
@@ -335,6 +348,22 @@ def fix_punctuation(source: str, translation: str) -> str:
 
 
 _QUOTES = "\"'«»“”„`"
+_QUOTE_PAIRS = {'"': '"', "'": "'", "«": "»", "“": "”", "„": "“", "`": "`"}
+
+
+def unwrap_quotes(text: str, source: str | None = None) -> str:
+    """Модель обернула весь ответ в кавычки: снять. Но «Ты опоздал», сказала она. остаётся как есть:
+    кавычка там часть фразы, а не обёртка."""
+    t = text.strip()
+    src = (source or "").strip()
+    quoted_source = bool(src) and src[0] in _QUOTES and src[-1] in _QUOTES
+    while len(t) >= 2 and not quoted_source:
+        close = _QUOTE_PAIRS.get(t[0])
+        inner = t[1:-1]
+        if close is None or t[-1] != close or close in inner or t[0] in inner:
+            break
+        t = inner.strip()
+    return t
 _LABEL = re.compile(r"^(translation|перевод)\s*:\s*", re.I)
 
 
@@ -595,9 +624,11 @@ def clean_translation(
                 t = t[len(prefix) :].lstrip()
         t = drop_speaker_name(t, speaker)
     if not partial:
-        t = drop_tail_noise(t.strip(_QUOTES).strip(), target_lang)
+        t = drop_tail_noise(unwrap_quotes(t, source), target_lang)
     else:
-        t = t.lstrip(_QUOTES)
+        lead = (source or "").lstrip()[:1]
+        if not (lead and lead in _QUOTES):  # оригинал начинается с кавычки: в переводе она своя, не обёртка
+            t = t.lstrip(_QUOTES)
     return no_dash(t) if not partial else t.replace("—", ",")
 
 
@@ -632,6 +663,9 @@ class AnthropicTranslator:
         self._last_used = 0.0
 
     def _params(self, req: TranslateRequest) -> dict:
+        short = is_short(req.text)
+        if short and len(req.context) > SHORT_CONTEXT:
+            req = replace(req, context=req.context[-SHORT_CONTEXT:])  # «Huh?» не нужна вся сцена
         params: dict = {
             "model": self._model,
             "max_tokens": MAX_TOKENS,
@@ -640,7 +674,8 @@ class AnthropicTranslator:
             "messages": [{"role": "user", "content": build_user(req)}],
         }
         if self._mode == "think":
-            params["output_config"] = {"effort": "medium"}
+            # короткую реплику обдумывать незачем: быстрее и дешевле, а перевод тот же
+            params["output_config"] = {"effort": "low" if short else "medium"}
             params["max_tokens"] = MAX_TOKENS_THINKING
         elif self._mode == "off":
             params["thinking"] = {"type": "disabled"}
@@ -758,20 +793,180 @@ class AnthropicTranslator:
             log.warning("пустой перевод: stop_reason=%s, ответ=%r", stop, raw[:200])
         raise TranslationError("Модель не прислала перевод, попробуй ещё раз.")
 
+    async def translate_batch(
+        self, reqs: list[TranslateRequest], on_partial: Callable[[int, str], None] | None = None
+    ) -> tuple[list[TranslateResult | None], tuple[int, int] | None]:
+        """Новые абзацы страницы одним запросом: промпт один раз на всех, а модель видит их вместе.
+
+        (результаты по порядку, токены). None у абзаца: в ответе его не нашлось, переведи отдельно."""
+        a = self._anthropic
+        first = reqs[0]
+        joined = replace(first, text="\n".join(r.text for r in reqs), speaker=None, on_partial=None)
+        for _attempt in range(3):
+            params = self._params(joined)
+            params["messages"] = [{"role": "user", "content": build_batch_user(reqs)}]
+            params["max_tokens"] = params["max_tokens"] + 500 * len(reqs)
+            buf, shown = "", {}
+            try:
+                async with self._client.messages.stream(**params) as stream:
+                    async for chunk in stream.text_stream:
+                        buf += chunk
+                        if on_partial is None or SOURCE_MARK in buf:
+                            continue
+                        parts, _src = split_batch(buf, len(reqs))
+                        for i, part in enumerate(parts):
+                            if not part:
+                                continue
+                            r = reqs[i]
+                            text = clean_translation(part, r.speaker, partial=True, target_lang=r.target_lang, source=r.text)
+                            if text and shown.get(i) != text:
+                                shown[i] = text
+                                try:
+                                    on_partial(i, text)
+                                except Exception:
+                                    log.debug("on_partial упал", exc_info=True)
+                    final = await stream.get_final_message()
+                self._last_used = time.monotonic()
+            except a.BadRequestError as exc:
+                msg = str(exc).lower()
+                if self._mode == "think" and ("effort" in msg or "output_config" in msg):
+                    self._mode = "off"
+                    continue
+                if self._mode == "off" and "thinking" in msg:
+                    self._mode = "low"
+                    continue
+                raise friendly_error(a, exc, self._model) from exc
+            except Exception as exc:
+                raise friendly_error(a, exc, self._model) from exc
+            break
+        else:
+            raise TranslationError("Модель не приняла запрос перевода страницы.")
+        for c in first.context:
+            learn_names(c.source, c.translation, first.target_lang)
+        for k, v in first.glossary.items():
+            learn_names(k, v, first.target_lang)
+        parts, sources = split_batch(buf, len(reqs))
+        out: list[TranslateResult | None] = []
+        for r, part, src in zip(reqs, parts, sources, strict=True):
+            if not part:
+                out.append(None)
+                continue
+            text = clean_translation(part, r.speaker, target_lang=r.target_lang, source=r.text)
+            text = fix_latin_names(fix_start(r.text, fix_punctuation(r.text, text)), r.target_lang)
+            if not text:
+                out.append(None)
+                continue
+            learn_names(r.text, text, r.target_lang)
+            out.append(TranslateResult(source=pick_source(r.text, src), translation=text))
+        missing = sum(1 for x in out if x is None)
+        if missing:
+            log.info("страница одним запросом: %s из %s абзацев не нашлись в ответе", missing, len(reqs))
+        return out, usage_of(final)
+
+
+_PARA_MARK = re.compile(r"(?m)^\s*¶\s*(\d+)\s*[.:)]?\s*")
+
+
+def build_batch_user(reqs: list[TranslateRequest]) -> str:
+    """Несколько абзацев страницы в одном запросе: контекст общий, абзацы пронумерованы."""
+    first = reqs[0]
+    parts = []
+    if first.context:
+        parts.append("<earlier_lines>")
+        for c in first.context:
+            parts.append(_line(c.speaker, c.source))
+            parts.append(f"<translation>{c.translation}</translation>")
+        parts.append("</earlier_lines>")
+    parts.append(
+        "This time translate several paragraphs of the same page, in order. They follow each other, so read them "
+        "together. Reply with each translation on its own line, starting with its number: ¶1 ..., ¶2 ... "
+        "Then a line with @@ and the same paragraphs as the game really shows them, numbered the same way."
+    )
+    parts.append("Translate these paragraphs:")
+    for i, r in enumerate(reqs, 1):
+        who = f' speaker="{_attr(r.speaker)}"' if r.speaker else ""
+        parts.append(f'<line n="{i}"{who}>{r.text}</line>')
+    return "\n".join(parts)
+
+
+def split_batch(raw: str, n: int) -> tuple[list[str | None], list[str | None]]:
+    """Ответ «¶1 ... ¶2 ... @@ ¶1 ...» -> (переводы по номерам, исправленные оригиналы по номерам)."""
+    tr_part, src_part = (raw.split(SOURCE_MARK, 1) + [""])[:2] if SOURCE_MARK in raw else (raw, "")
+
+    def by_number(text: str) -> list[str | None]:
+        out: list[str | None] = [None] * n
+        marks = list(_PARA_MARK.finditer(text))
+        for k, m in enumerate(marks):
+            i = int(m.group(1)) - 1
+            end = marks[k + 1].start() if k + 1 < len(marks) else len(text)
+            chunk = text[m.end() : end].strip()
+            if 0 <= i < n and chunk and out[i] is None:
+                out[i] = chunk
+        return out
+
+    return by_number(tr_part), by_number(src_part)
+
 
 def _short(exc: Exception) -> str:
     msg = getattr(exc, "message", None) or str(exc)
     return str(msg)[:160]
 
 
+CACHE_WRITE_PRICE = 1.25  # запись в кеш промпта дороже обычного входа
+CACHE_READ_PRICE = 0.1  # чтение из кеша: десятая часть цены входа
+
+
+class PromptCacheStats:
+    """Сколько входа пришло из кеша промпта Anthropic. Кеш работает, только если постоянная часть
+    промпта не короче порога модели: по этим цифрам видно, срабатывает ли он (и в отчёте тоже)."""
+
+    def __init__(self) -> None:
+        self.requests = 0
+        self.plain = 0  # вход без кеша
+        self.read = 0  # из кеша
+        self.write = 0  # записано в кеш
+
+    def add(self, plain: int, read: int, write: int) -> None:
+        self.requests += 1
+        self.plain += plain
+        self.read += read
+        self.write += write
+
+    @property
+    def hit_share(self) -> float:
+        total = self.plain + self.read + self.write
+        return self.read / total if total else 0.0
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "requests": self.requests,
+            "input_plain": self.plain,
+            "input_cache_read": self.read,
+            "input_cache_write": self.write,
+            "hit_share": round(self.hit_share, 3),
+        }
+
+
+PROMPT_CACHE = PromptCacheStats()
+
+
 def usage_of(message: object) -> tuple[int, int] | None:
+    """(вход, выход) в токенах по цене обычного входа: прочитанное из кеша стоит 0.1, записанное 1.25.
+
+    Так счётчик расходов не завышает цену, когда кеш работает, и не занижает, когда пишет."""
     u = getattr(message, "usage", None)
     if u is None:
         return None
     try:
-        return int(getattr(u, "input_tokens", 0) or 0), int(getattr(u, "output_tokens", 0) or 0)
+        plain = int(getattr(u, "input_tokens", 0) or 0)
+        read = int(getattr(u, "cache_read_input_tokens", 0) or 0)
+        write = int(getattr(u, "cache_creation_input_tokens", 0) or 0)
+        out = int(getattr(u, "output_tokens", 0) or 0)
     except (TypeError, ValueError):
         return None
+    PROMPT_CACHE.add(plain, read, write)
+    log.info("токены: вход %s, из кеша промпта %s, в кеш %s, выход %s", plain, read, write, out)
+    return plain + round(write * CACHE_WRITE_PRICE) + round(read * CACHE_READ_PRICE), out
 
 
 def friendly_error(a, exc: BaseException, model: str) -> TranslationError:  # type: ignore[no-untyped-def]

@@ -390,3 +390,91 @@ def test_page_without_text_and_with_failed_paragraph():
     p, grab, _ = make(_page(("Only one paragraph here.", 0.1)), FakeTranslator(fail="лимит"))
     out = run(p.run_page(grab, Target("Fate", PAGE)))
     assert out.kind == "error" and out.message == "лимит" and out.blocks[0].error == "лимит"
+
+
+class BatchTranslator(FakeTranslator):
+    def __init__(self, drop: int | None = None) -> None:
+        super().__init__()
+        self.batches: list[list[str]] = []
+        self.drop = drop
+
+    async def translate_batch(self, reqs, on_partial=None):
+        self.batches.append([r.text for r in reqs])
+        if on_partial:
+            on_partial(0, "RU…")
+        out = [TranslateResult(source=r.text, translation=f"RU:{r.text}") for r in reqs]
+        if self.drop is not None:
+            out[self.drop] = None
+        return out, (100, 20)
+
+
+def test_page_new_paragraphs_go_in_one_request():
+    page = _page(("The morning was cold and grey.", 0.10), ("You're late, she said.", 0.20), ("I nodded.", 0.30))
+    tr = BatchTranslator()
+    p, grab, _ = make(page, tr)
+    partial = []
+    out = run(p.run_page(grab, Target("Fate", PAGE), on_partial=lambda i, t: partial.append(i)))
+    assert tr.batches == [["The morning was cold and grey.", "You're late, she said.", "I nodded."]]
+    assert tr.requests == [] and out.translated == 3 and out.usage == (100, 20) and partial == [0]
+    # один абзац модель пропустила: его переводят отдельно
+    tr2 = BatchTranslator(drop=1)
+    p2, grab2, _ = make(page, tr2)
+    out2 = run(p2.run_page(grab2, Target("Fate", PAGE)))
+    assert [r.text for r in tr2.requests] == ["You're late, she said."] and all(b.record for b in out2.blocks)
+
+
+class TypingOcr:
+    """Последний абзац печатается по буквам: каждое чтение чуть длиннее, потом перестаёт расти."""
+
+    def __init__(self, steps: list[OcrResult]) -> None:
+        self.steps = steps
+        self.calls = 0
+
+    async def recognize(self, prepared):
+        i = min(self.calls // 3, len(self.steps) - 1)  # F2 читает тремя способами сразу
+        self.calls += 1
+        return self.steps[i]
+
+
+def test_page_waits_for_typing_paragraph():
+    done = ("The morning was cold and grey.", 0.10)
+    steps = [
+        _page(done, ("You're late, she", 0.20)),
+        _page(done, ("You're late, she said without", 0.20)),
+        _page(done, ("You're late, she said without turning.", 0.20)),
+    ]
+    tr = FakeTranslator()
+    p = Pipeline(TypingOcr(steps), tr, LineMemory(), sleep=no_sleep, run_sync=direct)
+    p.parallel_ok = False
+    out = run(p.run_page(lambda: frame("x"), Target("Fate", PAGE)))
+    assert [r.text for r in tr.requests] == ["The morning was cold and grey.", "You're late, she said without turning."]
+    assert out.blocks[-1].source.endswith("turning.") and "typing" in out.timings
+
+
+def test_reliable_ocr_mode_reads_alone_and_rechecks_now_and_then(monkeypatch):
+    import lexoplay.pipeline as pl
+
+    real_prepare = pl.prepare
+
+    class _Tagged:
+        def __init__(self, prep, mode):
+            self.prep, self._mode = prep, mode
+
+    monkeypatch.setattr(pl, "prepare", lambda f, r, *, mode="normal", binarize=False: _Tagged(real_prepare(f, r, mode=mode), mode))
+    clean = result("Makoto Naegi", "My view became warped, twisted, and strange.")
+    ocr = ModeOcr({"normal": clean, "pixel": result("My v1ew bec4me"), "color": clean})
+    p = Pipeline(ocr, FakeTranslator(), LineMemory(), sleep=no_sleep, run_sync=direct)
+    target = Target("DR", REGION, ocr_mode="normal")
+    counts = []
+    for _ in range(pl.FAST_AFTER + pl.FULL_EVERY + 1):
+        ocr.modes.clear()
+        run(p.recognize(frame("x"), target))
+        counts.append(len(ocr.modes))
+    assert counts[: pl.FAST_AFTER] == [3] * pl.FAST_AFTER  # сначала всеми способами
+    assert counts[pl.FAST_AFTER] == 1  # способ надёжен: одним
+    assert 3 in counts[pl.FAST_AFTER + 1 :]  # и время от времени снова всеми
+    # другой способ добавил слова: снова читаем всеми
+    p._explored.append(True)  # noqa: SLF001
+    ocr.modes.clear()
+    run(p.recognize(frame("x"), target))
+    assert len(ocr.modes) == 3
