@@ -827,6 +827,132 @@ def _app_vs_game(out_dir: Path) -> Callable[[], tuple[str, object]]:
     return run
 
 
+def _page_frame(paragraphs: list[str]):  # type: ignore[no-untyped-def]
+    """Кадр «текст на весь экран» (NVL): белые абзацы на тёмной сцене, между абзацами пустая строка."""
+    import textwrap
+
+    from PIL import Image, ImageDraw, ImageFont
+
+    img = Image.new("RGB", (1000, 700), (24, 28, 38))
+    d = ImageDraw.Draw(img)
+    font_path = Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts" / "arial.ttf"
+    font = ImageFont.truetype(str(font_path), 24) if font_path.exists() else ImageFont.load_default()
+    y = 70
+    for para in paragraphs:
+        for line in textwrap.wrap(para, 62):
+            d.text((90, y), line, fill=(240, 238, 230), font=font)
+            y += 32
+        y += 30
+    return img
+
+
+def _page_flow(out_dir: Path) -> Callable[[], tuple[str, object]]:
+    """Текст на весь экран: F2 переводит абзацы поверх них, новый абзац переводится один, F3 по абзацу, F4 убирает."""
+
+    def run() -> tuple[str, object]:
+        import tempfile
+
+        from PySide6.QtWidgets import QApplication
+
+        app_q = QApplication.instance() or QApplication(sys.argv[:1])
+        from lexoplay.gcguard import install as install_gc
+
+        install_gc(app_q)
+        tmp = tempfile.mkdtemp(prefix="lexoplay-selftest-page-")
+        os.environ["LEXOPLAY_HOME"] = tmp
+        os.environ["ANTHROPIC_API_KEY"] = "sk-selftest"
+
+        from lexoplay.app import Active, App
+        from lexoplay.bg import BackgroundLoop
+        from lexoplay.config import Settings
+        from lexoplay.geometry import Rect
+        from lexoplay.store import Game, Store
+        from lexoplay.translate import TranslateResult
+
+        paras = [
+            "The morning was cold. I stood at the gate for a long time, unable to bring myself to step inside.",
+            "\"You are late,\" she said without even turning around.",
+            "I nodded and followed her through the courtyard, where the air smelled of dust and old rain.",
+        ]
+        frames = {"now": _page_frame(paras)}
+        calls: list[str] = []
+
+        class FakeTranslator:
+            async def translate(self, req):  # type: ignore[no-untyped-def]
+                calls.append(req.text)
+                return TranslateResult(source=req.text, translation=f"Перевод абзаца {len(calls)}: {req.text[:24]}")
+
+        def pump(cond: Callable[[], bool], seconds: float = 20.0) -> bool:
+            end = time.time() + seconds
+            while time.time() < end:
+                app_q.processEvents()
+                if cond():
+                    return True
+                time.sleep(0.02)
+            return cond()
+
+        store = Store(Path(tmp) / "local.db")
+        game = store.save_game(Game("pagetest.exe", "Page Test", region=Rect(0.03, 0.03, 0.94, 0.94), text_mode="page"))
+        bg = BackgroundLoop("selftest-page")
+        app = App(app_q, Settings(), store, bg)
+        info: dict[str, object] = {}
+        try:
+            app.start()
+            app.translator = FakeTranslator()  # type: ignore[assignment]
+            app.pipelines.clear()
+            app.display = Rect(60, 60, 1000, 700)
+            app.active = Active(0, os.getpid(), game.exe)
+            app._game_in_focus = lambda: True  # type: ignore[method-assign]
+            app._sync_geometry = lambda: app.display  # type: ignore[method-assign]
+            app._make_grab = lambda *_a: (lambda: frames["now"])  # type: ignore[method-assign]
+            app.overlay.fade = False
+            frames["now"].save(out_dir / "page-frame.png")
+            app.f2()
+            done = pump(lambda: app.state == "idle" and app.overlay.page_visible and all(v.text for v in app.overlay.page))
+            info["first"] = done
+            info["blocks"] = len(app.overlay.page)
+            info["calls_first"] = len(calls)
+            info["texts"] = [b.source[:30] for b in app._page_blocks]
+            for _ in range(5):
+                app_q.processEvents()
+            app.overlay.grab().save(str(out_dir / "page-overlay.png"))
+            # игрок кликнул: на странице добавился абзац. Переводится только он
+            frames["now"] = _page_frame([*paras, "Something about this place felt wrong."])
+            app.f2(auto=True)
+            info["second"] = pump(lambda: app.state == "idle" and len(app.overlay.page) == 4 and all(v.text for v in app.overlay.page))
+            info["calls_total"] = len(calls)
+            # F3 на странице: режим слов по абзацу
+            app.f3()
+            info["words_open"] = pump(lambda: app.word_layer.is_open, 5)
+            info["words_sentence"] = app.word_ctx.line.sentence[:40] if app.word_ctx else ""
+            app._close_words("esc")
+            pump(lambda: not app.word_layer.is_open, 3)
+            # Alt: оригинал виден, перевод не рисуется
+            app.overlay.set_peek(True)
+            shot = app.overlay.grab().toImage()
+            info["peek_clear"] = all(
+                shot.pixelColor(x, y).alpha() == 0 for y in range(0, shot.height(), 25) for x in range(0, shot.width(), 25)
+            )
+            app.overlay.set_peek(False)
+            app._hide_strip()  # F4
+            info["hidden"] = not app.overlay.page_visible and not app.page_live
+        finally:
+            app.shutdown()
+        ok = (
+            info.get("first")
+            and info.get("blocks") == 3
+            and info.get("calls_first") == 3
+            and info.get("second")
+            and info.get("calls_total") == 4
+            and info.get("words_open")
+            and info.get("peek_clear")
+            and info.get("hidden")
+        )
+        return ("ok" if ok else "fail"), info
+
+    return run
+
+
 def _own_key_flow(out_dir: Path) -> Callable[[], tuple[str, object]]:
     """Без Lexo, своим ключом: F3 → значение → «+ в мои слова» → слово в «Слова»; после привязки уходит в Lexo."""
 
@@ -1642,6 +1768,7 @@ def _qt_checks(out_dir: Path) -> None:
     _check("app_word_flow", _app_flow(out_dir))
     _check("app_words_keep_game_input", _app_vs_game(out_dir))
     _check("app_own_key_flow", _own_key_flow(out_dir))
+    _check("app_page_flow", _page_flow(out_dir))
 
 
 def run(report: str) -> int:

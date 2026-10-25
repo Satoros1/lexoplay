@@ -106,6 +106,11 @@ user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
 user32.GetAsyncKeyState.restype = ctypes.c_short
 
 
+def key_down(vk: int) -> bool:
+    """Зажата ли клавиша сейчас (в любом окне)."""
+    return bool(user32.GetAsyncKeyState(vk) & 0x8000)
+
+
 def modifiers_down() -> int:
     """Какие Ctrl, Shift, Alt, Win зажаты сейчас: в битах MOD_* (для действий на кнопках мыши)."""
     from lexoplay.hotkeys import MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN

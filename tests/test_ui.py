@@ -7,7 +7,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 QtWidgets = pytest.importorskip("PySide6.QtWidgets")
 
-from PySide6.QtCore import QPoint, QPointF, Qt  # noqa: E402
+from PySide6.QtCore import QPoint, QPointF, QRectF, Qt  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
 
 from lexoplay.geometry import Rect  # noqa: E402
@@ -538,8 +538,9 @@ def test_games_page_deck_choice_and_pick(window, qapp):
     from PySide6.QtWidgets import QComboBox, QPushButton
 
     combos = w.games.findChildren(QComboBox)
-    assert combos, "у привязанного ПК у игры есть выбор колоды"
-    combo = combos[0]
+    decks = [c for c in combos if isinstance(c.itemData(0), tuple)]
+    assert decks, "у привязанного ПК у игры есть выбор колоды"
+    combo = decks[0]
     idx = next(i for i in range(combo.count()) if combo.itemData(i) and combo.itemData(i)[0] == "deck")
     combo.activated.emit(idx)
     g = ctl.store.get_game("dr1_us.exe")
@@ -547,6 +548,11 @@ def test_games_page_deck_choice_and_pick(window, qapp):
     pick = next(b for b in w.games.findChildren(QPushButton) if "Выделить" in b.text())
     pick.click()
     assert ctl.picked == ["dr1_us.exe"]
+    # текст на весь экран (NVL): переключатель у игры
+    mode = next(c for c in w.games.findChildren(QComboBox) if c.itemData(0) == "dialog")
+    assert mode.currentData() == "dialog"
+    mode.setCurrentIndex(1)
+    assert ctl.store.get_game("dr1_us.exe").text_mode == "page"
 
 
 def test_keys_page_capture_and_conflict(window, qapp):
@@ -1272,3 +1278,41 @@ def test_game_notes_dialog_shows_progress_and_saves_edit(window, qapp):
     assert "Поправлена тобой" in dlg2.status.text()
     dlg.deleteLater()
     dlg2.deleteLater()
+
+
+def test_page_overlay_covers_each_paragraph_and_peeks(qapp):
+    from lexoplay.ui.overlay import Overlay, PageView
+
+    ov = Overlay()
+    ov.fade = False
+    ov.resize(1280, 720)
+    long_ru = "Я кивнул и пошёл за ней через двор, где пахло пылью и старым дождём, а небо было серым и низким, " * 3
+    views = [
+        PageView(Rect(0.1, 0.12, 0.8, 0.09), 0.045, "Утро выдалось холодным. Я долго стоял у ворот."),
+        PageView(Rect(0.1, 0.27, 0.8, 0.045), 0.045, None),  # ещё переводится
+        PageView(Rect(0.1, 0.36, 0.8, 0.09), 0.045, long_ru),  # длинный: шрифт мельче, но в пределах до низа
+    ]
+    ov.show_page(views)
+    assert ov.page_visible and not ov.strip_visible
+    boxes = ov.page_boxes()
+    for (box, text_rect, font), v in zip(boxes, views, strict=True):
+        r = QRectF(v.rect.x * 1280, v.rect.y * 720, v.rect.w * 1280, v.rect.h * 720)
+        assert box.contains(r)  # английский абзац закрыт целиком
+        assert font.pixelSize() >= 12
+    assert boxes[0][0].bottom() < boxes[1][0].top()  # абзацы не налезают друг на друга
+    assert boxes[2][2].pixelSize() <= boxes[0][2].pixelSize()
+    ov.show()
+    qapp.processEvents()
+
+    def painted() -> int:
+        img = ov.grab().toImage()
+        return sum(1 for y in range(0, img.height(), 8) for x in range(0, img.width(), 8) if img.pixelColor(x, y).alpha() > 0)
+
+    assert painted() > 100
+    ov.set_peek(True)  # держат Alt: виден оригинал
+    assert painted() == 0
+    ov.set_peek(False)
+    ov.show_busy(Rect(0.05, 0.78, 0.9, 0.18))  # плашка диалога убирает страницу
+    assert not ov.page_visible
+    ov.hide_strip()
+    ov.close()

@@ -186,3 +186,40 @@ def test_text_box_arrow_after_last_sentence_is_dropped():
     assert drop_tail_noise("Wait... why") == "Wait... why"  # настоящее слово
     assert drop_tail_noise("Hmm... huh") == "Hmm... huh"
     assert drop_tail_noise("You are... Mr. Togami") == "You are... Mr. Togami"
+
+
+def _nvl_line(text: str, y: float, w: float = 0.8, x: float = 0.1):  # type: ignore[no-untyped-def]
+    from lexoplay.geometry import Rect
+    from lexoplay.ocr_model import Line, Word
+
+    words = text.split()
+    ww = w / len(words)
+    return Line(tuple(Word(t, Rect(x + i * ww, y, ww * 0.9, 0.03)) for i, t in enumerate(words)))
+
+
+def test_full_screen_text_splits_into_paragraphs():
+    from lexoplay.ocr_model import OcrResult
+    from lexoplay.textproc import page_text, paragraphs
+
+    page = OcrResult(
+        (
+            _nvl_line("The morning was cold. I stood at the gate for a long", 0.10),
+            _nvl_line("time, unable to go in.", 0.14, w=0.35),  # короткая строка с точкой: конец абзаца
+            _nvl_line('"You\'re late," she said without even turning around.', 0.22, w=0.75),  # пустое место
+            _nvl_line("Rin: Hurry up, we don't have all day.", 0.26, w=0.6),  # реплика с именем
+            _nvl_line("I nodded and followed her inside, where the air", 0.30, w=0.78),
+            _nvl_line("smelled of dust. lij", 0.34, w=0.3),
+        )
+    )
+    paras = paragraphs(page)
+    assert [p.text for p in paras] == [
+        "The morning was cold. I stood at the gate for a long time, unable to go in.",
+        '"You\'re late," she said without even turning around.',
+        "Hurry up, we don't have all day.",
+        "I nodded and followed her inside, where the air smelled of dust.",
+    ]
+    assert paras[2].speaker == "Rin" and paras[0].speaker is None
+    assert abs(paras[0].rect.y - 0.10) < 1e-9 and abs(paras[0].rect.bottom - 0.17) < 1e-9
+    assert abs(paras[0].line_h - 0.03) < 1e-9 and len(paras[0].lines) == 2
+    assert page_text(paras).count("\n") == 3
+    assert paragraphs(OcrResult()) == []

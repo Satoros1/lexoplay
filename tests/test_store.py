@@ -67,3 +67,15 @@ def test_game_notes_roundtrip(tmp_path):
     rec = s.game_notes("dr1_us.exe", "ru")
     assert rec is not None and rec.status == "off" and rec.edited
     assert s.game_notes("dr1_us.exe", "en") is None  # у другого языка своя справка
+
+
+def test_text_mode_roundtrip(tmp_path):
+    from lexoplay.store import Game, Store
+
+    s = Store(tmp_path / "db.sqlite")
+    g = s.save_game(Game("Fate.exe", "Fate", Rect(0.05, 0.05, 0.9, 0.85)))
+    assert g.text_mode == "dialog" and not s.get_game("fate.exe").page
+    s.save_game(g.with_(text_mode="page"))
+    assert s.get_game("fate.exe").page
+    s.save_game(g.with_(text_mode="weird"))
+    assert s.get_game("fate.exe").text_mode == "dialog"

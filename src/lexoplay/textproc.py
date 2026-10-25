@@ -11,6 +11,7 @@ import re
 from dataclasses import dataclass
 
 from lexoplay.dedupe import normalize_text, similarity
+from lexoplay.geometry import Rect
 from lexoplay.ocr_model import Line, OcrResult, Word
 
 REPEAT_SAME = 0.85  # так похожи две копии текста (OCR читает их чуть по-разному)
@@ -306,3 +307,79 @@ def strip_speaker(text: str, speakers: list[str] | tuple[str, ...] | set[str] = 
         if 2 <= len(words) <= 3 and all(w[:1].isupper() for w in words) and m.group(2)[:1].isupper():
             return m.group(2).strip()
     return t
+
+
+# ------------------------------------------------------------------ текст на весь экран (NVL)
+PARA_GAP = 0.55  # пустое место между строками больше стольких высот строки: новый абзац
+PARA_INDENT = 1.2  # строка начинается правее абзаца на столько высот строки: красная строка
+PARA_SHORT = 0.8  # прошлая строка короче стольких ширин абзаца и кончается точкой: абзац кончился
+
+
+@dataclass(frozen=True, slots=True)
+class Paragraph:
+    """Абзац страницы: текст, говорящий (если «Имя: ...»), рамка в долях кадра и его строки."""
+
+    text: str
+    speaker: str | None
+    rect: Rect
+    lines: tuple[Line, ...]
+
+    @property
+    def line_h(self) -> float:
+        """Высота строки (в долях кадра): от неё размер шрифта перевода поверх абзаца."""
+        return _line_h(list(self.lines)) or (self.rect.h / max(1, len(self.lines)))
+
+
+def _line_h(lines: list[Line]) -> float:
+    hs = sorted(ln.rect.h for ln in lines if ln.rect.h > 0)
+    return hs[len(hs) // 2] if hs else 0.0
+
+
+def paragraphs(result: OcrResult) -> list[Paragraph]:
+    """Страница визуальной новеллы (NVL) по абзацам.
+
+    Абзацы в таких играх разделены пустой строкой, красной строкой или просто короткой последней
+    строкой с точкой. Переводим и показываем перевод по абзацам: новый абзац переводится сам по
+    себе, а старые на странице остаются переведёнными."""
+    lines = [ln for ln in result.lines if ln.words and has_text(ln.text)]
+    if not lines:
+        return []
+    lines.sort(key=lambda ln: (round(ln.rect.y, 3), ln.rect.x))
+    h = _line_h(lines) or 0.02
+    page_left = min(ln.rect.x for ln in lines)
+    page_w = max(ln.rect.right for ln in lines) - page_left
+    groups: list[list[Line]] = [[lines[0]]]
+    for ln in lines[1:]:
+        cur = groups[-1]
+        prev = cur[-1]
+        left = min(x.rect.x for x in cur)
+        gap = ln.rect.y - prev.rect.bottom
+        prev_text = prev.text.rstrip()
+        ended = prev_text[-1:] in ".!?…\"”»"
+        short = page_w > 0 and prev.rect.right - page_left < PARA_SHORT * page_w
+        opens = ln.text.lstrip()[:1] in "\"“«「『(" or _NAME_COLON.match(ln.text) is not None  # реплика: «"...» или «Rin: ...»
+        new = gap > PARA_GAP * h or (ended and (ln.rect.x - left > PARA_INDENT * h or short or opens))
+        if new:
+            groups.append([ln])
+        else:
+            cur.append(ln)
+    out: list[Paragraph] = []
+    for g in groups:
+        text = drop_tail_noise(join_lines([ln.text for ln in g]))
+        if not has_text(text):
+            continue
+        speaker = None
+        m = _NAME_BRACKETS.match(text) or _NAME_COLON.match(text)
+        if m and has_text(m.group(1)) and m.group(2).strip():
+            speaker, text = m.group(1).strip(), m.group(2).strip()
+        x1 = min(ln.rect.x for ln in g)
+        y1 = min(ln.rect.y for ln in g)
+        x2 = max(ln.rect.right for ln in g)
+        y2 = max(ln.rect.bottom for ln in g)
+        out.append(Paragraph(text, speaker, Rect(x1, y1, x2 - x1, y2 - y1), tuple(g)))
+    return out
+
+
+def page_text(paras: list[Paragraph]) -> str:
+    """Весь текст страницы: по нему следим, не появился ли новый абзац."""
+    return "\n".join(p.text for p in paras)

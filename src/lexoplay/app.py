@@ -69,13 +69,13 @@ from lexoplay.lookup import (
 from lexoplay.ocr_model import OcrResult
 from lexoplay.ocrscore import Quality
 from lexoplay.outbox import Outbox
-from lexoplay.pipeline import CaptureError, F2Outcome, Pipeline, ScanOutcome, Target
+from lexoplay.pipeline import CaptureError, F2Outcome, PageBlock, PageOutcome, Pipeline, ScanOutcome, Target
 from lexoplay.preprocess import MODE_NAMES, is_black, thumbnail
 from lexoplay.rarity import LEVEL_NAMES, LEVELS
 from lexoplay.recall import RecallChip, Recaller, RecallIndex
 from lexoplay.session import GameSession, Sessions
 from lexoplay.store import Game, GameNotes, SavedWord, Store, StoredLine, Task
-from lexoplay.textproc import Utterance, strip_speaker, to_utterance
+from lexoplay.textproc import Paragraph, Utterance, page_text, paragraphs, strip_speaker, to_utterance
 from lexoplay.translate import (
     NOTES_MAX_CHARS,
     NOTES_SAMPLE_LINES,
@@ -92,7 +92,7 @@ from lexoplay.translate import (
 )
 from lexoplay.ui.freeze_frame import FreezeFrame
 from lexoplay.ui.main_window import AccountStatus, MainWindow, UpdateState
-from lexoplay.ui.overlay import Overlay
+from lexoplay.ui.overlay import Overlay, PageView
 from lexoplay.ui.region_picker import RegionPicker
 from lexoplay.ui.theme import app_icon
 from lexoplay.ui.word_layer import WordLayer
@@ -132,6 +132,9 @@ WORDS_VKS = {0x1B, 0x0D, 0x25, 0x26, 0x27, 0x28, 0x52, 0x31, 0x32, 0x33, 0x34, 0
 KNOWN_CLICK_GRABBERS = {"dr1_us.exe", "dr2_us.exe"}
 FREEZE_GRACE_S = 1.5  # сколько после сворачивания игры фокус может прыгать сам (в окне)
 FREEZE_GRACE_FULL_S = 3.5  # полноэкранной: она ещё меняет режим экрана
+PAGE_REGION_H = 0.45  # выделили больше стольких по высоте и ширине 0.5: похоже на текст на весь экран (NVL)
+PEEK_MS = 50  # как часто смотреть, не держат ли Alt (оригинал под переводом страницы)
+VK_MENU = 0x12
 PREWARM_MS = 3000  # через столько после запуска окно LexoPlay собирается заранее (если игра не идёт)
 NOTES_RETRY_S = 600.0  # справка по игре не собралась (сеть, лимит): снова не раньше чем через 10 минут
 NOTES_RECHECK_S = 1800.0  # раз в полчаса смотрим, не появились ли герои, которых в справке нет
@@ -176,6 +179,7 @@ class CurrentLine:
     record: LineRecord | None
     at: float
     thumb: Image.Image | None = None
+    region: Rect | None = None  # текст на весь экран: абзац, с которым открыт режим слов
 
     @property
     def sentence(self) -> str:
@@ -258,6 +262,12 @@ class App(QObject):
         self.last_read: dict[str, LastRead] = {}
         self.update = UpdateState()
         self.auto_live = False  # автоперевод идёт: игрок нажал F2, пока не нажмёт F4
+        # текст на весь экран (NVL): перевод поверх абзацев, дописывается сам, пока не нажмёшь F4
+        self.page_live = False
+        self._page_blocks: list[PageBlock] = []
+        self._page_partial: dict[int, str] = {}
+        self._page_out: PageOutcome | None = None
+        self._page_hint = False
         self._auto_hint = False
         self._busy_source: str | None = None  # реплика, которая сейчас переводится (для оригинала над переводом)
         self._busy_recall: list[RecallChip] = []  # сохранённые слова из неё: подсказки видны уже с точками
@@ -323,6 +333,9 @@ class App(QObject):
         self._hotkeys_paused = False
         self._failed_keys: set[str] = set()
 
+        self._peek_timer = QTimer(self)  # держат Alt: виден оригинал под переводом страницы
+        self._peek_timer.setInterval(PEEK_MS)
+        self._peek_timer.timeout.connect(self._peek_tick)
         self.watch_timer = QTimer(self)
         self.watch_timer.setInterval(WATCH_IDLE_MS)
         self.watch_timer.timeout.connect(self._watch_tick)
@@ -855,7 +868,10 @@ class App(QObject):
         return game
 
     def save_game(self, game: Game) -> None:
+        before = self.store.get_game(game.exe)
         self.store.save_game(game)
+        if before is not None and before.text_mode != game.text_mode and self.active and self.active.exe == game.exe.lower():
+            self._hide_strip()  # переключили окно диалога и текст на весь экран: старый перевод не к месту
         self._set_status()
 
     def forget_game(self, exe: str) -> None:
@@ -1575,7 +1591,11 @@ class App(QObject):
             return
         game = self.store.get_game(self.active.exe)
         if game:
-            self.store.save_game(game.with_(region=region, name_region=name_region, strip_pos=strip))
+            mode = game.text_mode
+            if region.h >= PAGE_REGION_H and region.w >= 0.5 and name_region is None and mode != "page":
+                mode = "page"  # обвели почти весь экран: это текст на весь экран, перевод поверх абзацев
+                self.overlay.toast("Похоже на текст на весь экран: перевод будет поверх абзацев. Поменять: «Игры»", 5000)
+            self.store.save_game(game.with_(region=region, name_region=name_region, strip_pos=strip, text_mode=mode))
             self.overlay.strip_custom = strip
             log.info("область диалога %s: %s, плашка перевода: %s", game.exe, region.to_dict(), strip.to_dict() if strip else "по умолчанию")
         self._return_to_game()
@@ -1748,7 +1768,11 @@ class App(QObject):
             return
         if self._after_thaw("f2", lambda: self.f2(auto=auto)):
             return
-        if self.overlay.strip_visible and not auto:
+        if self.overlay.page_visible and not auto:
+            if self.watcher is None or not self.watcher.acted:
+                self._hide_strip()  # F2 ещё раз: перевод страницы убрать
+                return
+        elif self.overlay.strip_visible and not auto:
             if self.watcher is None or not self.watcher.acted:
                 self._hide_strip()  # ничего не нажимал: F2 просто прячет перевод (и останавливает автоперевод)
                 return
@@ -1770,6 +1794,9 @@ class App(QObject):
             return
         display = self._sync_geometry()
         if display is None:
+            return
+        if game.page:
+            self._f2_page(game, pipeline, display, auto=auto)
             return
         session = self.sessions.touch(game.exe, game.title)
         self._set_busy()
@@ -1851,6 +1878,200 @@ class App(QObject):
         log.warning("F2/F3 не вернулись за %s с: снимаем «занято»", self._busy_timer.interval() // 1000)
         self._hide_strip()
         self.overlay.toast("Перевод не пришёл. Нажми ещё раз", 3500)
+
+    # ------------------------------------------------------------------ текст на весь экран (NVL)
+    def _f2_page(self, game: Game, pipeline: Pipeline, display: Rect, *, auto: bool) -> None:
+        """Перевод страницы: поверх каждого абзаца. Потом новые абзацы переводятся сами (page_live)."""
+        assert self.active is not None
+        session = self.sessions.touch(game.exe, game.title)
+        self._set_busy()
+        token = self.token
+        self._stop_watch(keep_input=True)
+        self._busy_since = time.monotonic()
+        self.input.start()
+        self.geom_timer.start()
+        if self.settings.debug:
+            self.dump.new_shot()
+        if not self.overlay.page_visible:
+            self.overlay.toast("Перевожу страницу…", 1500)
+        target = self._target(game, session.id)
+
+        def blocks(bs: list[PageBlock], t: int = token) -> None:
+            self.bridge.call.emit(lambda: self._show_page_blocks(t, bs))
+
+        def partial(i: int, text: str, t: int = token) -> None:
+            self.bridge.call.emit(lambda: self._show_page_partial(t, i, text))
+
+        coro = pipeline.run_page(
+            self._make_grab(self.active, game, display),
+            target,
+            on_blocks=blocks,
+            on_partial=partial,
+            settle=AUTO_SETTLE_S if auto else None,
+        )
+        fut = self.bg.submit(coro)
+        fut.add_done_callback(lambda f, t=token: self.bridge.call.emit(lambda: self._on_page_done(f, t)))
+
+    def _page_views(self) -> list[PageView]:
+        lang = self.settings.target_lang
+        views = []
+        for i, b in enumerate(self._page_blocks):
+            if b.record is not None:
+                text: str | None = tidy_saved(b.record.translation, b.speaker, b.record.speaker, target_lang=lang)
+            else:
+                text = self._page_partial.get(i)
+            views.append(PageView(b.rect, b.line_h, text, None if b.record is not None or text else b.error))
+        return views
+
+    def _show_page_blocks(self, token: int, bs: list[PageBlock]) -> None:
+        if token != self.token or not self._game_in_focus():
+            return
+        old = {b.source: i for i, b in enumerate(self._page_blocks)}
+        # дописанные куски перевода переносим на тот же абзац (номера могли сдвинуться)
+        partial = {}
+        for i, b in enumerate(bs):
+            j = old.get(b.source)
+            if b.record is None and j is not None and j in self._page_partial:
+                partial[i] = self._page_partial[j]
+        self._page_blocks, self._page_partial = list(bs), partial
+        self.overlay.show_page(self._page_views())
+
+    def _show_page_partial(self, token: int, i: int, text: str) -> None:
+        if token != self.token or i >= len(self._page_blocks) or not text:
+            return
+        self._page_partial[i] = text
+        self.overlay.show_page(self._page_views())
+
+    def _on_page_done(self, fut: concurrent.futures.Future, token: int) -> None:
+        if token != self.token:
+            return
+        self._set_idle()
+        try:
+            out: PageOutcome = fut.result()
+        except Exception as exc:
+            log.exception("перевод страницы упал")
+            self._hide_strip()
+            self.overlay.toast(f"Ошибка: {exc}")
+            return
+        log.info(
+            "страница %s: абзацев %s, переведено %s, %s %s",
+            out.kind,
+            len(out.blocks),
+            out.translated,
+            out.code or "",
+            {k: round(v, 3) for k, v in out.timings.items()},
+        )
+        if not self._game_in_focus() or not self.active:
+            self._hide_strip()
+            return
+        game = self.store.get_game(self.active.exe)
+        if game is not None:
+            self._remember_reading(game, out.ocr_mode, out.quality, out.preview, out.text)
+        if out.kind == "no_text":
+            self.overlay.hide_page()
+            self._page_blocks, self._page_partial, self._page_out = [], {}, None
+            if self.page_live:
+                self._watch_wait("", out.thumb)  # страница пустая (сменилась сцена): ждём текст
+            else:
+                self.overlay.toast(f"Текст не найден. {self.settings.hotkeys.reselect}, чтобы выделить область заново")
+            return
+        if out.kind == "error":
+            self._page_error(out)
+            return
+        if game is None:
+            return
+        own = isinstance(self.translator, AnthropicTranslator)
+        for k in range(out.translated):
+            self.sessions.line_translated(game.exe)
+            if own:
+                self.own_usage.add("line", out.usage if k == 0 else None, self.settings.model)
+        if out.translated:
+            self._stat(game.exe, lines=out.translated)
+        self._page_blocks, self._page_partial, self._page_out = list(out.blocks), {}, out
+        self.overlay.show_page(self._page_views())
+        last = out.paragraphs[-1] if out.paragraphs else None
+        if out.ocr is not None and last is not None:
+            self.current = self._paragraph_line(game.exe, last, out.blocks[-1], out.thumb)
+        self.page_live = True
+        self._peek_timer.start()
+        self._watch_line(out.text, out.thumb, settle=True)
+        if out.message:
+            self.overlay.toast(out.message, 3500)
+        elif not self._page_hint:
+            self._page_hint = True
+            hk = self.settings.hotkeys
+            self.overlay.toast(
+                f"Перевод поверх текста, новые абзацы переведутся сами. Держи Alt: оригинал. {hk.hide}: убрать", 5000
+            )
+
+    def _page_error(self, out: PageOutcome) -> None:
+        if out.code in ("device_revoked", "unauthorized"):
+            self._hide_strip()
+            self._auth_lost(out.message or "Привязка снята.")
+        elif out.code == "update_required":
+            self._hide_strip()
+            self._on_lexo_error(LexoError(426, "update_required", out.message or "Вышла новая версия LexoPlay."))
+        else:
+            self._hide_strip()
+            if out.code == "offline":
+                self.lexo_offline = True
+                self._update_tray()
+            self.overlay.toast(out.message or "Не получилось перевести страницу", 4000)
+
+    @staticmethod
+    def _paragraph_line(exe: str, para: Paragraph, block: PageBlock | None, thumb: Image.Image | None) -> CurrentLine:
+        pad = para.line_h * 0.4
+        region = Rect(para.rect.x - pad, para.rect.y - pad, para.rect.w + 2 * pad, para.rect.h + 2 * pad)
+        return CurrentLine(
+            exe,
+            OcrResult(para.lines),
+            Utterance(para.speaker, para.text),
+            block.record if block is not None else None,
+            time.time(),
+            thumb,
+            region=region,
+        )
+
+    def _page_line(
+        self, game: Game, *, pipeline: Pipeline | None, ocr: OcrResult | None = None, thumb: Image.Image | None = None
+    ) -> CurrentLine | None:
+        """Режим слов на странице: абзац под курсором (иначе последний)."""
+        if ocr is not None:
+            paras = paragraphs(ocr)
+            blocks: list[PageBlock | None] = [None] * len(paras)
+            if pipeline is not None:
+                target = self._target(game, glossary=False)
+                for i, para in enumerate(paras):
+                    rec, _cached = pipeline._known(target, para.text)  # noqa: SLF001
+                    blocks[i] = PageBlock(para.rect, para.text, para.speaker, record=rec)
+        elif self._page_out is not None:
+            paras = self._page_out.paragraphs
+            blocks = list(self._page_out.blocks)
+            thumb = self._page_out.thumb
+        else:
+            return None
+        if not paras:
+            return None
+        pick = len(paras) - 1
+        pos = winapi.cursor_pos()
+        d = self.display
+        if pos is not None and d is not None and d.w > 0 and d.h > 0:
+            x, y = (pos[0] - d.x) / d.w, (pos[1] - d.y) / d.h
+            for i, para in enumerate(paras):
+                r = para.rect
+                if r.x - 0.01 <= x <= r.right + 0.01 and r.y - 0.01 <= y <= r.bottom + 0.01:
+                    pick = i
+                    break
+        return self._paragraph_line(game.exe, paras[pick], blocks[pick] if pick < len(blocks) else None, thumb)
+
+    def _peek_tick(self) -> None:
+        """Держат Alt (в игре): перевод страницы прячется, виден оригинал."""
+        if not self.overlay.page_visible:
+            self._peek_timer.stop()
+            self.overlay.set_peek(False)
+            return
+        held = self._game_in_focus() and winapi.key_down(VK_MENU)
+        self.overlay.set_peek(held)
 
     def _on_f2_done(self, fut: concurrent.futures.Future, info: tuple[int, bool]) -> None:
         token, auto = info
@@ -1937,6 +2158,10 @@ class App(QObject):
             self._set_idle()
         if not keep_auto:
             self.auto_live = False
+            self.page_live = False
+            self._page_blocks, self._page_partial, self._page_out = [], {}, None
+            self.overlay.hide_page()
+            self._peek_timer.stop()
         self.overlay.hide_strip()
         if not self.word_layer.is_open:
             self._stop_watch()
@@ -1950,15 +2175,15 @@ class App(QObject):
             self.watcher = None
             return
         gated = self.input.start()  # не включился Raw Input: следим без него, как раньше
-        self.watcher = LineWatcher(text, thumb, gated=gated, settle_for=SETTLE_S if settle else 0.0)
+        self.watcher = LineWatcher(text, thumb, gated=gated, settle_for=SETTLE_S if settle else 0.0, page=self.page_live)
         self._start_watch()
 
     def _watch_wait(self, last_text: str, thumb: Image.Image | None) -> None:
         """Автоперевод: перевода на экране нет, ждём, когда в окне диалога появится новая реплика."""
-        if thumb is None or not self.auto_live:
+        if thumb is None or not (self.auto_live or self.page_live):
             return
         gated = self.input.start()
-        self.watcher = LineWatcher(last_text, thumb, gated=gated, waiting=True)
+        self.watcher = LineWatcher(last_text, thumb, gated=gated, waiting=True, page=self.page_live)
         self._start_watch()
 
     def _start_watch(self) -> None:
@@ -2014,7 +2239,12 @@ class App(QObject):
         if self._frozen or time.monotonic() < self._thaw_until:
             return  # игра свёрнута или разворачивается: смотреть не на что, реплика та же
         watcher = self.watcher
-        watching = self.overlay.strip_visible or self.word_layer.is_open or bool(watcher and watcher.waiting)
+        watching = (
+            self.overlay.strip_visible
+            or self.overlay.page_visible
+            or self.word_layer.is_open
+            or bool(watcher and watcher.waiting)
+        )
         if not watching or watcher is None or self.state != "idle" or self._watch_pending or not self.active:
             return
         self._set_watch_pace(hot=watcher.hot)
@@ -2035,7 +2265,10 @@ class App(QObject):
             if pipeline is None:
                 return "gone", thumb  # перечитать текст нечем: как раньше, по пикселям
             reading = await pipeline.recognize(img, target, explore=False, slot=WATCH_OCR_SLOT)
-            text = to_utterance(reading.result, reading.name_text).text
+            if watcher.page:
+                text = page_text(paragraphs(reading.result))
+            else:
+                text = to_utterance(reading.result, reading.name_text).text
             verdict = watcher.check(text, thumb)
             log.debug("проверка реплики: похожесть %s, %r", watcher.last_score, text[:80])
             if verdict:
@@ -2063,6 +2296,14 @@ class App(QObject):
         if self._frozen or time.monotonic() < self._thaw_until:
             return  # кадр снят, пока игру сворачивали или разворачивали: он ничего не говорит о реплике
         last = self.watcher.norm if self.watcher else ""
+        if self.page_live:
+            # страница: добавился абзац или страница сменилась. Перевод старых абзацев остаётся,
+            # новый переведётся (уже переведённые возьмутся из памяти без запроса)
+            self._close_words("changed")
+            self.current = None
+            if self._game_in_focus():
+                self.f2(auto=True)
+            return
         auto = self.auto_live and self.settings.auto_translate and self._game_in_focus()
         # реплика сменилась (игрок кликнул в игру): старый перевод и подчёркивания убираем
         self._close_words("changed")
@@ -2112,8 +2353,10 @@ class App(QObject):
         if (
             cur is not None
             and cur.exe == game.exe
-            and (self.overlay.strip_visible or time.time() - cur.at < FRESH_OCR_S)
+            and (self.overlay.strip_visible or self.overlay.page_visible or time.time() - cur.at < FRESH_OCR_S)
         ):
+            if game.page:
+                cur = self._page_line(game, pipeline=None) or cur  # абзац под курсором
             self._open_words(game, session, cur)
             if explain:
                 self._request_explain()
@@ -2149,6 +2392,8 @@ class App(QObject):
                 self.overlay.toast(scan.message or hint)
                 return
             line = CurrentLine(game.exe, scan.ocr, scan.utterance, scan.record, time.time(), scan.thumb)
+            if game.page:
+                line = self._page_line(game, pipeline=pipeline, ocr=scan.ocr, thumb=scan.thumb) or line
             self.current = line
             g = self.store.get_game(game.exe)
             s = self.sessions.get(game.exe)
@@ -2382,7 +2627,7 @@ class App(QObject):
         if shot is not None:
             self.freeze_frame.show_image(*shot)  # сначала снимок: слой слов откроется поверх него
         self.word_layer.open(
-            self.display, game.region, views, strip=self.overlay.strip_rect(),
+            self.display, line.region or game.region, views, strip=self.overlay.strip_rect(),
             speaker=self._line_speaker(line), translation=translation,
         )  # fmt: skip
         self.overlay.mute_strip(True)  # перевод теперь в панели: плашка под ней не мигает поверх

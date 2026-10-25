@@ -49,6 +49,12 @@ MIN_LETTERS = 3  # меньше букв в ожидании: шум рамки 
 OCR_EVERY = 0.45  # перечитывать текст не чаще, пока игрок ничего не нажимал (или нет Raw Input)
 OCR_EVERY_HOT = 0.2  # сразу после клика или клавиши: реплика вот-вот сменится
 BIG_CHANGE = 0.012  # доля пикселей: текст стёрся или окно диалога закрылось, а не мигнула стрелка
+PAGE_SAME = 0.8  # текст на весь экран: абзац с такой похожестью тот же (OCR чуть плавает)
+
+
+def _paras(text: str) -> list[str]:
+    """Абзацы страницы (page_text делит их переводом строки), нормализованные."""
+    return [n for n in (normalize_text(x) for x in text.split("\n")) if n]
 
 
 def grown(old: str, new: str) -> bool:
@@ -89,8 +95,13 @@ class LineWatcher:
         waiting: bool = False,
         settle_for: float = 0.0,
         clock: Callable[[], float] = time.monotonic,
+        page: bool = False,
     ) -> None:
         self.norm = normalize_text(text)
+        # текст на весь экран: сравниваем по абзацам. Добавился короткий абзац к длинной странице:
+        # для реплики это «та же», а для страницы новый абзац, его надо перевести
+        self.page = page
+        self._paras = _paras(text) if page else []
         self._settle_until = clock() + settle_for
         self.waiting = waiting  # перевода на экране нет: ждём, когда появится новая реплика
         self._gated = gated
@@ -145,6 +156,8 @@ class LineWatcher:
 
     def check(self, text: str, thumb: Image.Image | None = None) -> str | None:
         """Новый текст окна диалога → None (та же реплика), "new" или "gone"."""
+        if self.page and not self.waiting:
+            return self._check_page(text, thumb)
         now = normalize_text(text)
         letters = sum(1 for c in now if c.isalpha())
         if not self.by_input:
@@ -185,6 +198,28 @@ class LineWatcher:
             return "new"
         self._strikes += 1
         return "new" if self._strikes >= 2 else None
+
+    def _check_page(self, text: str, thumb: Image.Image | None) -> str | None:
+        now = _paras(text)
+        same = len(now) == len(self._paras) and all(
+            similarity(a, b) >= PAGE_SAME for a, b in zip(now, self._paras, strict=True)
+        )
+        if not self.by_input:  # игрок ничего не нажимал: только новый абзац, допечатавшийся сам
+            grew = len(now) > len(self._paras) and all(
+                similarity(a, b) >= PAGE_SAME for a, b in zip(now, self._paras, strict=False)
+            )
+            return "grown" if grew else None
+        if not now:
+            self._strikes += 1
+            if self._strikes >= 2:
+                return "gone"
+            return "gone" if thumb is not None and thumb_diff(self.baseline, thumb) >= BIG_CHANGE else None
+        self._strikes = 0
+        if same:
+            if thumb is not None:
+                self.baseline = thumb
+            return None
+        return "new"
 
     def line_changed(self, text: str, thumb: Image.Image | None = None) -> bool:
         """Новый текст окна диалога → True, если перевод пора убрать."""

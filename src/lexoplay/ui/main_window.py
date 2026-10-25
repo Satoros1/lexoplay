@@ -278,7 +278,8 @@ class GamesPage(QWidget):
             top.addWidget(label("сейчас в игре", "chip"), 0, Qt.AlignmentFlag.AlignTop)
         col.addLayout(top)
         if g.region is not None:
-            state = label(f"{g.exe} · окно диалога выделено", "muted")
+            what = "область текста выделена" if g.page else "окно диалога выделено"
+            state = label(f"{g.exe} · {what}", "muted")
         else:
             state = label(f"{g.exe} · окно диалога ещё не выделено: открой игру и нажми {self.ctl.settings.hotkeys.translate}", "warn")
         state.setWordWrap(True)
@@ -294,6 +295,12 @@ class GamesPage(QWidget):
         read = self.ctl.get_last_read(g.exe) if g.region is not None else None
         if read is not None:
             col.addLayout(self._last_read(read))
+        mode_row = QHBoxLayout()
+        mode_row.setSpacing(8)
+        mode_row.addWidget(label("Текст в игре", "muted"))
+        mode_row.addWidget(self._mode_combo(g), 0)
+        mode_row.addStretch(1)
+        col.addLayout(mode_row)
         if linked:
             deck_row = QHBoxLayout()
             deck_row.setSpacing(8)
@@ -371,6 +378,30 @@ class GamesPage(QWidget):
         fresh = self.ctl.store.get_game(g.exe) or g
         self.ctl.save_game(fresh.with_(ocr_mode=None, binarize=False))
         self.refresh()
+
+    TEXT_MODES = (
+        ("dialog", "Окно диалога", "Реплики в окне внизу (или сбоку): перевод в плашке над ним"),
+        ("page", "Текст на весь экран", "Текст абзацами по всему экрану (NVL): перевод поверх каждого абзаца, "
+         "новые абзацы переводятся сами. Держи Alt, чтобы увидеть оригинал"),
+    )
+
+    def _mode_combo(self, g: Game) -> QComboBox:
+        combo = QComboBox()
+        for i, (key, title, tip) in enumerate(self.TEXT_MODES):
+            combo.addItem(title, key)
+            combo.setItemData(i, tip, Qt.ItemDataRole.ToolTipRole)
+        combo.setCurrentIndex(1 if g.page else 0)
+        combo.setToolTip(self.TEXT_MODES[1 if g.page else 0][2])
+
+        def changed(_i: int) -> None:
+            fresh = self.ctl.store.get_game(g.exe) or g
+            mode = str(combo.currentData())
+            if mode != fresh.text_mode:
+                self.ctl.save_game(fresh.with_(text_mode=mode))
+                combo.setToolTip(self.TEXT_MODES[combo.currentIndex()][2])
+
+        combo.currentIndexChanged.connect(changed)
+        return combo
 
     def _deck_combo(self, g: Game) -> QComboBox:
         combo = QComboBox()

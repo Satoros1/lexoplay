@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
@@ -58,6 +59,18 @@ class _RecallRow:
 
 
 RECALL_LABEL = "уже сохранял"
+PAGE_FADE_S = 0.18  # новый перевод абзаца проявляется за столько
+PAGE_MIN_PX = 12.0
+
+
+@dataclass(frozen=True, slots=True)
+class PageView:
+    """Абзац страницы (текст на весь экран) и его перевод поверх него."""
+
+    rect: Rect  # абзац в долях окна игры (как region)
+    line_h: float  # высота строки оригинала в долях окна: от неё размер шрифта перевода
+    text: str | None  # None: ещё переводится (точки)
+    error: str | None = None
 
 
 def _qt_placer(widget: QWidget, rect: Rect) -> None:
@@ -125,6 +138,13 @@ class Overlay(QWidget):
         self._toast_timer = QTimer(self)
         self._toast_timer.setSingleShot(True)
         self._toast_timer.timeout.connect(self._clear_toast)
+        # текст на весь экран (NVL): перевод поверх каждого абзаца вместо плашки
+        self._page: tuple[PageView, ...] = ()
+        self._page_born: dict[int, float] = {}  # абзац -> когда пришёл его перевод (для проявления)
+        self._peek = False  # держат Alt: виден оригинал под переводом
+        self._page_timer = QTimer(self)
+        self._page_timer.setInterval(16)
+        self._page_timer.timeout.connect(self._page_tick)
         self.winId()  # создать нативное окно заранее
         if on_native:
             on_native(int(self.winId()))
@@ -144,6 +164,8 @@ class Overlay(QWidget):
         return self._recall
 
     def show_busy(self, region: Rect, original: str | None = None, recall: Sequence[RecallChip] = ()) -> None:
+        if self._page:
+            self.hide_page()
         appearing = not self.strip_visible
         self._region, self._text, self._busy = region, None, True
         self._original = original if original and original.strip() else None
@@ -211,6 +233,114 @@ class Overlay(QWidget):
         self._dots_timer.stop()
         self._refresh()
 
+    # --- страница (текст на весь экран) ---
+    @property
+    def page_visible(self) -> bool:
+        return bool(self._page)
+
+    @property
+    def page(self) -> tuple[PageView, ...]:
+        return self._page
+
+    def show_page(self, blocks: Sequence[PageView]) -> None:
+        """Перевод поверх абзацев. Плашка в это время не нужна: перевод прямо на месте текста."""
+        old = self._page
+        blocks = tuple(blocks)
+        now = time.monotonic()
+        born: dict[int, float] = {}
+        for i, b in enumerate(blocks):
+            same = i < len(old) and old[i].text is not None and old[i].text == b.text
+            if b.text is not None:
+                # уже был виден тот же перевод: без проявления; новый перевод проявляется
+                born[i] = self._page_born.get(i, 0.0) if same else (0.0 if not self.fade else now)
+        self._page, self._page_born = blocks, born
+        if self._text is not None or self._busy:
+            self._text, self._busy, self._original, self._recall = None, False, None, ()
+        if any(b.text is None for b in blocks):
+            if not self._dots_timer.isActive():
+                self._dots_timer.start()
+        self._page_timer.start()
+        self._refresh()
+
+    def hide_page(self) -> None:
+        self._page, self._page_born, self._peek = (), {}, False
+        self._page_timer.stop()
+        self._refresh()
+
+    def set_peek(self, on: bool) -> None:
+        """Пока держат клавишу: перевод не рисуем, виден оригинал игры."""
+        if self._peek != on:
+            self._peek = on
+            self.update()
+
+    @property
+    def peeking(self) -> bool:
+        return self._peek
+
+    def _page_tick(self) -> None:
+        now = time.monotonic()
+        if any(now - t < PAGE_FADE_S for t in self._page_born.values()):
+            self.update()
+        elif not any(b.text is None for b in self._page):
+            self._page_timer.stop()
+            self.update()
+
+    def page_boxes(self) -> list[tuple[QRectF, QRectF, QFont]]:
+        """(фон абзаца, где текст, шрифт) в пикселях окна, для каждого абзаца по порядку."""
+        w, h = float(self.width()), float(self.height())
+        bounds = Rect(0, 0, w, h)
+        family = self.font_family or FONT_FAMILY
+        rects = [denormalize(b.rect, bounds) for b in self._page]
+        out: list[tuple[QRectF, QRectF, QFont]] = []
+        for i, (b, r) in enumerate(zip(self._page, rects, strict=True)):
+            line_px = max(8.0, b.line_h * h)
+            px = max(PAGE_MIN_PX, min(44.0, line_px * 0.8)) * self.font_scale
+            pad = max(4.0, line_px * 0.28)
+            text_w = max(60.0, r.w)
+            # вниз можно занять место до следующего абзаца: русский текст обычно длиннее английского
+            below = rects[i + 1].y - pad * 1.4 if i + 1 < len(rects) else h - pad
+            room = max(r.h, below - r.y)
+            font = QFont(family)
+            font.setWeight(QFont.Weight.Bold if self.font_bold else QFont.Weight.Medium)
+            value = b.text if b.text is not None else "…"
+            if b.error:
+                value = "Не перевелось: " + b.error
+            size = px
+            while True:
+                font.setPixelSize(max(1, round(size)))
+                br = QFontMetricsF(font).boundingRect(QRectF(0, 0, text_w, 100000), Qt.TextFlag.TextWordWrap, value)
+                if br.height() <= room or size <= PAGE_MIN_PX:
+                    break
+                size = max(PAGE_MIN_PX, size * 0.92)
+            text_h = br.height() if b.text is not None else max(r.h, line_px)
+            box_h = max(r.h, text_h)
+            text_rect = QRectF(r.x, r.y, text_w, box_h)
+            box = QRectF(r.x - pad, r.y - pad * 0.7, text_w + 2 * pad, box_h + pad * 1.4)
+            out.append((box, text_rect, QFont(font)))
+        return out
+
+    def _paint_page(self, p: QPainter) -> None:
+        now = time.monotonic()
+        bg = QColor(STRIP_BG)
+        bg.setAlphaF(1.0)  # английский под переводом не должен просвечивать (оригинал виден по Alt)
+        for i, (b, (box, text_rect, font)) in enumerate(zip(self._page, self.page_boxes(), strict=True)):
+            born = self._page_born.get(i)
+            alpha = 1.0 if born is None or born <= 0 else max(0.0, min(1.0, (now - born) / PAGE_FADE_S))
+            p.setOpacity(1.0)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(bg)
+            radius = min(10.0, box.height() / 4)
+            p.drawRoundedRect(box, radius, radius)
+            if b.text is None and not b.error:
+                self._paint_dots(p, QRectF(text_rect.x(), text_rect.y(), text_rect.width(), font.pixelSize() * 1.3), font)
+                continue
+            p.setOpacity(alpha)
+            p.setFont(font)
+            p.setPen(TEXT_MUTED if b.error else TEXT)
+            value = ("Не перевелось: " + b.error) if b.error else (b.text or "")
+            p.drawText(text_rect, int(Qt.TextFlag.TextWordWrap | Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop), value)
+        p.setOpacity(1.0)
+
     # --- плавность ---
     def _box(self, box: QRectF) -> QRectF:
         """Где рисовать плашку сейчас: если её размер поменялся, она доезжает до нового за BOX_MS."""
@@ -272,7 +402,8 @@ class Overlay(QWidget):
             self._refresh()
 
     def _tick_dots(self) -> None:
-        if not self._busy or self._text is not None:
+        page_busy = any(b.text is None and not b.error for b in self._page)
+        if (not self._busy or self._text is not None) and not page_busy:
             self._dots_timer.stop()
             return
         self._dots = (self._dots + 1) % 3
@@ -302,7 +433,10 @@ class Overlay(QWidget):
         self._refresh()
 
     def _refresh(self) -> None:
-        need = (not self._muted and (self.strip_visible or self._ghost is not None)) or self._toast is not None
+        need = (
+            (not self._muted and (self.strip_visible or self._ghost is not None or bool(self._page)))
+            or self._toast is not None
+        )
         if need:
             if not self.isVisible():
                 self._placer(self, self._display)
@@ -449,6 +583,8 @@ class Overlay(QWidget):
             return
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        if self._page and not self._muted and not self._peek:
+            self._paint_page(p)
         strip = self._shown() if self.strip_visible else self._ghost
         if strip is not None and self._alpha > 0.0 and not self._muted:
             p.setOpacity(max(0.0, min(1.0, self._alpha)))

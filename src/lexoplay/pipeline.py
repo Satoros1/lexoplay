@@ -26,7 +26,7 @@ from lexoplay.ocr_model import OcrResult
 from lexoplay.ocrfuse import fuse
 from lexoplay.ocrscore import Quality, quality
 from lexoplay.preprocess import MODES, Prepared, changed, prepare, preview, thumbnail
-from lexoplay.textproc import Utterance, has_text, name_from, to_utterance
+from lexoplay.textproc import Paragraph, Utterance, has_text, name_from, page_text, paragraphs, to_utterance
 from lexoplay.translate import ContextLine, TranslateRequest, TranslationError, Translator
 
 log = logging.getLogger(__name__)
@@ -76,6 +76,40 @@ class F2Outcome:
     quality: Quality | None = None
     preview: Image.Image | None = None  # цветная обрезка окна диалога для окна LexoPlay
     usage: tuple[int, int] | None = None  # токены своего ключа: (вход, выход)
+
+
+PAGE_PARALLEL = 3  # столько абзацев страницы переводятся одновременно
+
+
+@dataclass(slots=True)
+class PageBlock:
+    """Абзац страницы (NVL) и его перевод. record None: ещё переводится (или не вышло: error)."""
+
+    rect: Rect
+    source: str
+    speaker: str | None
+    record: LineRecord | None = None
+    cached: bool = False
+    error: str | None = None
+    line_h: float = 0.03  # высота строки абзаца в долях кадра
+
+
+@dataclass(slots=True)
+class PageOutcome:
+    kind: Literal["translated", "no_text", "error"]
+    blocks: list[PageBlock] = field(default_factory=list)
+    ocr: OcrResult | None = None
+    thumb: Image.Image | None = None
+    text: str = ""  # весь текст страницы: по нему следим за новыми абзацами
+    message: str | None = None
+    code: str | None = None
+    timings: dict[str, float] = field(default_factory=dict)
+    ocr_mode: str | None = None
+    quality: Quality | None = None
+    preview: Image.Image | None = None
+    translated: int = 0  # сколько абзацев перевели запросом (остальные из памяти и кеша)
+    usage: tuple[int, int] | None = None
+    paragraphs: list[Paragraph] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -370,6 +404,141 @@ class Pipeline:
             self.cache.add(target.game_exe, self.target_lang, rec)
         timings["total"] = time.perf_counter() - t0
         return F2Outcome("translated", record=rec, usage=getattr(res, "usage", None), **seen)
+
+    def _known(self, target: Target, text: str) -> tuple[LineRecord | None, bool]:
+        """Перевод абзаца без запроса: (запись, из кеша на диске)."""
+        known = self.memory.find(text)
+        if known is not None:
+            return known, False
+        if self.cache is not None and target.game_exe:
+            try:
+                stored = self.cache.find(target.game_exe, self.target_lang, text)
+            except Exception:
+                log.exception("кеш переводов недоступен")
+                stored = None
+            if stored is not None:
+                self.memory.add(stored)
+                return stored, True
+        return None, False
+
+    async def run_page(
+        self,
+        grab: Grab,
+        target: Target,
+        on_blocks: Callable[[list[PageBlock]], None] | None = None,
+        on_partial: Callable[[int, str], None] | None = None,
+        *,
+        settle: float | None = None,
+    ) -> PageOutcome:
+        """Текст на весь экран (NVL): страница по абзацам, переводятся только новые абзацы.
+
+        Уже переведённые берутся из памяти и кеша, поэтому новый абзац внизу страницы стоит один
+        запрос. on_blocks: абзацы со всем, что уже известно (сразу и после каждого перевода),
+        on_partial(номер абзаца, кусок перевода): перевод дописывается."""
+        t0 = time.perf_counter()
+        warm = getattr(self.translator, "warm", None)
+        self._warm_task = asyncio.ensure_future(warm()) if warm is not None else None
+        timings: dict[str, float] = {}
+        try:
+            frame = await self.stable_frame(grab, target.region, settle, target.ocr_mode)
+        except CaptureError as exc:
+            return PageOutcome("error", message=f"Не получилось захватить окно игры ({exc}).")
+        timings["capture"] = time.perf_counter() - t0
+        if self._debug:
+            self._debug("frame", frame)
+        t1 = time.perf_counter()
+        reading = await self.recognize(frame, target)
+        timings["ocr"] = time.perf_counter() - t1
+        paras = paragraphs(reading.result)
+        out = PageOutcome(
+            "translated",
+            ocr=reading.result,
+            thumb=thumbnail(frame, target.region),
+            text=page_text(paras),
+            timings=timings,
+            ocr_mode=reading.mode,
+            quality=reading.quality,
+            preview=preview(frame, target.region),
+            paragraphs=paras,
+        )
+        if self._debug:
+            self._debug("ocr", {"raw": reading.result.raw_text, "paragraphs": [p.text for p in paras], "mode": reading.mode})
+        if not paras:
+            out.kind = "no_text"
+            return out
+        blocks = [PageBlock(p.rect, p.text, p.speaker, line_h=p.line_h) for p in paras]
+        for b in blocks:
+            b.record, b.cached = self._known(target, b.source)
+        out.blocks = blocks
+        if on_blocks is not None:
+            on_blocks(list(blocks))
+        pending = [i for i, b in enumerate(blocks) if b.record is None]
+        if not pending:
+            timings["total"] = time.perf_counter() - t0
+            return out
+        earlier = self.context_for(target, out.text)
+        gate = asyncio.Semaphore(PAGE_PARALLEL)
+        used = [0, 0]
+        errors: list[tuple[str, str]] = []
+        t2 = time.perf_counter()
+
+        async def one(i: int) -> None:
+            b = blocks[i]
+            # контекст: прошлые реплики и абзацы этой страницы выше (те, что уже переведены)
+            above = [ContextLine(x.speaker, x.record.source, x.record.translation) for x in blocks[:i] if x.record]
+            ctx = [ContextLine(r.speaker, r.source, r.translation) for r in earlier] + above
+            line_id = str(uuid.uuid4())
+            req = TranslateRequest(
+                text=b.source,
+                speaker=b.speaker,
+                game=target.game_title,
+                target_lang=self.target_lang,
+                source_lang=self.source_lang,
+                context=tuple(ctx[-self._context_size :]),
+                line_id=line_id,
+                session_id=target.session_id,
+                game_exe=target.game_exe,
+                glossary=dict(target.glossary),
+                notes=target.notes,
+                on_partial=(lambda text, i=i: on_partial(i, text)) if on_partial is not None else None,
+            )
+            async with gate:
+                try:
+                    res = await self.translator.translate(req)
+                except TranslationError as exc:
+                    b.error = str(exc)
+                    errors.append((str(exc), getattr(exc, "code", "error")))
+                    return
+                except Exception:
+                    log.exception("переводчик упал на абзаце")
+                    b.error = "Перевод не получился, подробности в логе."
+                    errors.append((b.error, "error"))
+                    return
+            rec = LineRecord(line_id, b.speaker, res.source, res.translation, normalize_text(b.source))
+            b.record = rec
+            self.memory.add(rec)
+            if self.cache is not None and target.game_exe:
+                self.cache.add(target.game_exe, self.target_lang, rec)
+            u = getattr(res, "usage", None)
+            if u:
+                used[0] += u[0]
+                used[1] += u[1]
+            out.translated += 1
+            if on_blocks is not None:
+                on_blocks(list(blocks))
+
+        warm_task = getattr(self, "_warm_task", None)
+        if warm_task is not None and not warm_task.done():
+            await asyncio.wait({warm_task}, timeout=0.15)
+        await asyncio.gather(*(one(i) for i in pending))
+        timings["translate"] = time.perf_counter() - t2
+        timings["total"] = time.perf_counter() - t0
+        out.usage = (used[0], used[1]) if any(used) else None
+        if errors and not any(b.record for b in blocks):
+            out.kind, out.message, out.code = "error", errors[0][0], errors[0][1]
+        elif errors:
+            out.message, out.code = errors[0]
+        return out
 
     async def scan(self, grab: Grab, target: Target) -> ScanOutcome:
         """Для F3: дождаться стабильного кадра и распознать, без запроса перевода."""

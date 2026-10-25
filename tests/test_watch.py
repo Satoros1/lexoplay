@@ -181,3 +181,19 @@ def test_ocr_miss_without_big_change_waits():
     same = thumbnail(frame(LINE), REGION)
     assert w.check("", same) is None  # OCR ничего не прочитал, а окно то же: проверим ещё раз
     assert w.check("", same) == "gone"
+
+
+def test_page_notices_a_short_new_paragraph():
+    """Текст на весь экран: к длинной странице добавился короткий абзац, это новый текст для перевода."""
+    page = "The morning was cold and grey, and I stood at the gate for a long time.\n\"You're late,\" she said."
+    clock = Clock()
+    w = LineWatcher(page, thumbnail(frame("x"), REGION), clock=clock, page=True)
+    # тот же текст, OCR чуть ошибся: страница та же
+    assert w.check("The morning was cold and grey, and I stood at the gate for a long tirne.\n\"You're late,\" she said.") is None
+    assert w.check(page + "\nI nodded.") == "new"  # для реплики это было бы «та же»
+    plain = LineWatcher(page, thumbnail(frame("x"), REGION), clock=clock)
+    assert plain.check(page + "\nI nodded.") is None
+    # без действий игрока: только допечатавшийся абзац
+    gated = LineWatcher(page, thumbnail(frame("x"), REGION), clock=clock, page=True, gated=True, settle_for=3.0)
+    assert gated.check(page + "\nI nodded.") == "grown"
+    assert gated.check("Completely different page of text here.") is None

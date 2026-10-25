@@ -348,3 +348,45 @@ def test_old_version_translations_are_not_reused(tmp_path):
     out = run(p.run(lambda: frame("x"), Target("DR", REGION, game_exe="dr.exe")))
     assert out.kind == "translated" and len(tr.requests) == 1  # старый неудачный перевод переведён заново
     store.close()
+
+
+def _page(*paras: tuple[str, float]) -> OcrResult:
+    """Страница NVL: (текст абзаца, y) -> строки с рамками; абзацы разделены пустым местом."""
+    lines = []
+    for text, y in paras:
+        words = text.split()
+        ww = 0.7 / len(words)
+        lines.append(Line(tuple(Word(w, Rect(0.1 + i * ww, y, ww * 0.9, 0.03)) for i, w in enumerate(words))))
+    return OcrResult(tuple(lines))
+
+
+PAGE = Rect(0.05, 0.05, 0.9, 0.85)
+
+
+def test_page_translates_only_new_paragraphs():
+    first = _page(("The morning was cold and grey.", 0.10), ("You're late, she said.", 0.20))
+    p, grab, _ = make(first)
+    seen: list[list] = []
+    target = Target("Fate", PAGE, game_exe="fate.exe")
+    out = run(p.run_page(grab, target, on_blocks=lambda bs: seen.append([b.record is not None for b in bs])))
+    assert out.kind == "translated" and out.translated == 2
+    assert [b.record.translation for b in out.blocks] == ["RU:The morning was cold and grey.", "RU:You're late, she said."]
+    assert seen[0] == [False, False] and seen[-1] == [True, True]  # сначала точки, потом переводы
+    assert out.blocks[0].rect.y == 0.10 and out.text.count("\n") == 1
+    # игрок кликнул: на странице добавился абзац. Переводится только он, с прошлыми как контекстом
+    p._ocr.res = _page(("The morning was cold and grey.", 0.10), ("You're late, she said.", 0.20), ("I nodded.", 0.30))
+    tr = p.translator
+    tr.requests.clear()
+    out = run(p.run_page(grab, target))
+    assert out.translated == 1 and [r.text for r in tr.requests] == ["I nodded."]
+    ctx = [c.source for c in tr.requests[0].context]
+    assert ctx[-2:] == ["The morning was cold and grey.", "You're late, she said."]
+    assert all(b.record is not None for b in out.blocks)
+
+
+def test_page_without_text_and_with_failed_paragraph():
+    p, grab, _ = make(OcrResult())
+    assert run(p.run_page(grab, Target("Fate", PAGE))).kind == "no_text"
+    p, grab, _ = make(_page(("Only one paragraph here.", 0.1)), FakeTranslator(fail="лимит"))
+    out = run(p.run_page(grab, Target("Fate", PAGE)))
+    assert out.kind == "error" and out.message == "лимит" and out.blocks[0].error == "лимит"
