@@ -294,7 +294,8 @@ class Overlay(QWidget):
         out: list[tuple[QRectF, QRectF, QFont]] = []
         for i, (b, r) in enumerate(zip(self._page, rects, strict=True)):
             line_px = max(8.0, b.line_h * h)
-            px = max(PAGE_MIN_PX, min(44.0, line_px * 0.8)) * self.font_scale
+            # рамка слова от OCR примерно с кегль игры: перевод того же размера, что и оригинал
+            px = max(PAGE_MIN_PX, min(44.0, line_px * 0.95)) * self.font_scale
             pad = max(4.0, line_px * 0.28)
             text_w = max(60.0, r.w)
             # вниз можно занять место до следующего абзаца: русский текст обычно длиннее английского

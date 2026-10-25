@@ -906,6 +906,7 @@ def _page_flow(out_dir: Path) -> Callable[[], tuple[str, object]]:
             app._sync_geometry = lambda: app.display  # type: ignore[method-assign]
             app._make_grab = lambda *_a: (lambda: frames["now"])  # type: ignore[method-assign]
             app.overlay.fade = False
+            app.overlay.set_display_rect(app.display)
             frames["now"].save(out_dir / "page-frame.png")
             app.f2()
             done = pump(lambda: app.state == "idle" and app.overlay.page_visible and all(v.text for v in app.overlay.page))
@@ -927,12 +928,23 @@ def _page_flow(out_dir: Path) -> Callable[[], tuple[str, object]]:
             info["words_sentence"] = app.word_ctx.line.sentence[:40] if app.word_ctx else ""
             app._close_words("esc")
             pump(lambda: not app.word_layer.is_open, 3)
-            # Alt: оригинал виден, перевод не рисуется
+            # Alt: оригинал виден, перевод не рисуется (подсказка в углу может и остаться)
+            boxes = [b for b, _t, _f in app.overlay.page_boxes()]
+
+            def painted_in_boxes() -> int:
+                shot = app.overlay.grab().toImage()
+                return sum(
+                    1
+                    for b in boxes
+                    for y in range(int(b.top()) + 2, int(b.bottom()) - 2, 6)
+                    for x in range(int(b.left()) + 2, int(b.right()) - 2, 12)
+                    if 0 <= x < shot.width() and 0 <= y < shot.height() and shot.pixelColor(x, y).alpha() > 0
+                )
+
+            info["boxes_painted"] = painted_in_boxes()
             app.overlay.set_peek(True)
-            shot = app.overlay.grab().toImage()
-            info["peek_clear"] = all(
-                shot.pixelColor(x, y).alpha() == 0 for y in range(0, shot.height(), 25) for x in range(0, shot.width(), 25)
-            )
+            info["peek_painted"] = painted_in_boxes()
+            info["peek_clear"] = info["boxes_painted"] > 50 and info["peek_painted"] == 0
             app.overlay.set_peek(False)
             app._hide_strip()  # F4
             info["hidden"] = not app.overlay.page_visible and not app.page_live
