@@ -80,10 +80,23 @@ class Progress:
     hours: list[int] = field(default_factory=lambda: [0] * 24)  # реплик по часу суток
     pos: list[tuple[str, str, int]] = field(default_factory=list)  # (ключ, подпись, слов)
     words_read: int = 0  # английских слов в прочитанных репликах
-    # учёба (study.py): сегодня и за 7 дней (реплик сам по-английски, подглядываний, слов запомнилось)
-    study_today: tuple[int, int, int] = (0, 0, 0)
-    study_week: tuple[int, int, int] = (0, 0, 0)
-    study_known: int = 0  # всего слов, которые учёба считает выученными
+    # учёба (study.py): сегодня, за 7 дней и за 7 дней до них
+    # (реплик сам по-английски, подглядываний, слов запомнилось, забытых ушло в карточки)
+    study_today: tuple[int, int, int, int] = (0, 0, 0, 0)
+    study_week: tuple[int, int, int, int] = (0, 0, 0, 0)
+    study_prev_week: tuple[int, int, int, int] = (0, 0, 0, 0)
+    study_known: int = 0  # всего слов и выражений, которые учёба считает выученными
+
+    @property
+    def study_share(self) -> int | None:
+        """Сколько реплик за неделю прочитано без перевода, %."""
+        lines, peeks = self.study_week[:2]
+        return round(100 * (lines - peeks) / lines) if lines else None
+
+    @property
+    def study_prev_share(self) -> int | None:
+        lines, peeks = self.study_prev_week[:2]
+        return round(100 * (lines - peeks) / lines) if lines >= 20 else None
 
     @property
     def pages_read(self) -> int:
@@ -206,11 +219,19 @@ def progress(store: Store, goal: int, today: Callable[[], date] = date.today) ->
 
 
 def study(store: Store, now: date) -> dict[str, object]:
-    raw = store.study_days((now - timedelta(days=6)).isoformat())
-    week = tuple(sum(v[i] for v in raw.values()) for i in range(3))
+    week_start = now - timedelta(days=6)
+    raw = store.study_days((now - timedelta(days=13)).isoformat())
+
+    def total(days: list[str]) -> tuple[int, int, int, int]:
+        rows = [raw[d] for d in days if d in raw]
+        return tuple(sum(r[i] for r in rows) for i in range(4))  # type: ignore[return-value]
+
+    week = [(week_start + timedelta(days=i)).isoformat() for i in range(7)]
+    prev = [(week_start - timedelta(days=7 - i)).isoformat() for i in range(7)]
     return {
-        "study_today": raw.get(now.isoformat(), (0, 0, 0)),
-        "study_week": week,
+        "study_today": raw.get(now.isoformat(), (0, 0, 0, 0)),
+        "study_week": total(week),
+        "study_prev_week": total(prev),
         "study_known": store.study_known(),
     }
 

@@ -27,7 +27,7 @@ import os
 import socket
 import time
 import uuid
-from collections.abc import Callable, Coroutine, Sequence
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from typing import Any
@@ -76,9 +76,8 @@ from lexoplay.recall import RecallChip, Recaller, RecallIndex
 from lexoplay.session import GameSession, Sessions
 from lexoplay.store import Game, GameNotes, SavedWord, Store, StoredLine, Task
 from lexoplay.study import LEVEL_NAMES as STUDY_LEVEL_NAMES
-from lexoplay.study import SKIP as GLOSS_SKIP
-from lexoplay.study import Pick, Shown, StudyBook, match_meanings
-from lexoplay.study import pick as study_pick
+from lexoplay.study import Hint, Shown, StudyBook, StudyPlan, merge, model_hints
+from lexoplay.study import plan as study_plan
 from lexoplay.textproc import Paragraph, Utterance, page_text, paragraphs, strip_speaker, to_utterance
 from lexoplay.translate import (
     NOTES_MAX_CHARS,
@@ -97,7 +96,7 @@ from lexoplay.translate import (
 )
 from lexoplay.ui.freeze_frame import FreezeFrame
 from lexoplay.ui.main_window import AccountStatus, MainWindow, UpdateState
-from lexoplay.ui.overlay import GlossView, Overlay, PageView
+from lexoplay.ui.overlay import HintView, Overlay, PageView
 from lexoplay.ui.region_picker import RegionPicker
 from lexoplay.ui.theme import app_icon
 from lexoplay.ui.word_layer import WordLayer
@@ -141,6 +140,7 @@ PAGE_REGION_H = 0.45  # выделили больше стольких по вы
 PEEK_MS = 50  # как часто смотреть, не держат ли Alt (оригинал под переводом страницы)
 STUDY_CLOSE_S = 0.25  # учёба: курсор ушёл с плашки, перевод прячется через столько (без мигания на краю)
 STUDY_PEEK_S = 0.4  # перевод был виден дольше: подглядывал (случайно пронёс курсор не считается)
+STUDY_CARDS_PER_DAY = 10  # забытых мест в карточки за день, не больше
 VK_MENU = 0x12
 PREWARM_MS = 3000  # через столько после запуска окно LexoPlay собирается заранее (если игра не идёт)
 NOTES_RETRY_S = 600.0  # справка по игре не собралась (сеть, лимит): снова не раньше чем через 10 минут
@@ -289,7 +289,7 @@ class App(QObject):
             log.exception("учёба: слова не загрузились")
             self.study = StudyBook()
         self._study: Shown | None = None
-        self._study_views: list[tuple[GlossView, Pick]] = []
+        self._study_keys: list[str] = []  # ключи подсказок в том порядке, в каком они на оверлее
         self._study_open_since = 0.0
         self._study_close_at = 0.0
         self._gloss_tr: AnthropicTranslator | None = None
@@ -1851,10 +1851,10 @@ class App(QObject):
             self.dump.new_shot()
         target = self._target(game, session.id, study=studying)
         region = game.region
-        exe = game.exe
+        exe, title, session_id = game.exe, game.title, session.id
 
-        def study_seen(text: str, ocr: OcrResult, picks: tuple[Pick, ...], found: dict[str, str] | None, t: int = token) -> None:
-            self.bridge.call.emit(lambda: self._study_seen(t, exe, text, ocr, picks, found))
+        def study_seen(text: str, ocr: OcrResult, plan: StudyPlan, items: list[tuple[str, str]] | None, t: int = token) -> None:
+            self.bridge.call.emit(lambda: self._study_seen(t, exe, title, session_id, text, ocr, plan, items))
 
         self._busy_source = None
         self._busy_recall = []
@@ -2127,39 +2127,47 @@ class App(QObject):
     def _study_level_name(self) -> str:
         return STUDY_LEVEL_NAMES.get(self.settings.study_level, "B1")
 
-    def _study_picker(self, game: Game) -> Callable[[OcrResult], list[Pick]]:
-        """Выбор слов для подсказок (в фоновом потоке): всё нужное собрано заранее, здесь."""
-        names = set(self._game_names(game.exe))
+    def _study_picker(self, game: Game) -> Callable[[OcrResult], StudyPlan]:
+        """Свои подсказки к реплике (в фоновом потоке): всё нужное собрано заранее, здесь."""
         try:
             saved: RecallIndex | None = self._saved_index()
         except Exception:
             log.exception("учёба: сохранённые слова недоступны")
             saved = None
-        level, book = self.settings.study_level, self.study
+        book = self.study
+        learning = book.index()
 
-        def pick_words(ocr: OcrResult) -> list[Pick]:
-            return study_pick([w.text for w in ocr.words], level=level, names=names, state=book.get, saved=saved)
+        def make(ocr: OcrResult) -> StudyPlan:
+            return study_plan([w.text for w in ocr.words], learning=learning, state=book.get, saved=saved)
 
-        return pick_words
+        return make
 
     def _study_seen(
-        self, token: int, exe: str, text: str, ocr: OcrResult, picks: tuple[Pick, ...], found: dict[str, str] | None
+        self,
+        token: int,
+        exe: str,
+        title: str,
+        session_id: str,
+        text: str,
+        ocr: OcrResult,
+        plan: StudyPlan,
+        items: list[tuple[str, str]] | None,
     ) -> None:
-        """Из пайплайна: слова реплики выбраны (found None) или пришли их значения (раньше перевода)."""
+        """Из пайплайна: реплика прочитана (items None) или модель написала подсказки (раньше перевода)."""
         if token != self.token or not self.overlay.study_hide:
             return
         sh = self._study
         if sh is None or sh.text != text or sh.exe != exe:
-            sh = self._study_begin(exe, text, ocr, picks)
-        if found:
-            self._study_glosses_in(sh, found)
+            sh = self._study_begin(exe, title, session_id, text, ocr, plan)
+        if items is not None:
+            self._study_hints_in(sh, items, save=True)
 
-    def _study_begin(self, exe: str, text: str, ocr: OcrResult, picks: Sequence[Pick]) -> Shown:
+    def _study_begin(self, exe: str, title: str, session_id: str, text: str, ocr: OcrResult, plan: StudyPlan) -> Shown:
         self._study_commit()
-        sh = Shown(exe, text, tuple(picks), time.monotonic(), rects=tuple(w.rect for w in ocr.words))
-        for p in sh.picks:
-            if p.ask and (m := self.study.meaning(p.key)):
-                sh.meanings[p.index] = m  # значение с прошлой встречи; модель пришлёт своё для этой реплики
+        sh = Shown(
+            exe, text, tuple(w.text for w in ocr.words), tuple(w.rect for w in ocr.words), time.monotonic(),
+            hints=list(plan.hints), room=plan.room, known=plan.known, title=title, session_id=session_id,
+        )  # fmt: skip
         self._study = sh
         self._study_close_at = 0.0
         self.overlay.set_study_open(False)
@@ -2167,46 +2175,69 @@ class App(QObject):
         self._study_timer.start()
         return sh
 
-    def _study_glosses_in(self, sh: Shown, found: dict[str, str]) -> None:
-        sh.meanings.update(match_meanings(sh.picks, found))
+    def _study_hints_in(self, sh: Shown, items: list[tuple[str, str]], *, save: bool) -> None:
+        """Подсказки модели к реплике: к словам на экране и в общий список (свои учимые первыми)."""
+        if sh.asked:
+            return
+        sh.asked = True
+        new = model_hints(sh.words, items, state=self.study.get, have=sh.hints, room=sh.room)
+        sh.hints = merge(sh.hints, new)
+        if save:
+            try:
+                self.store.study_hints_set(sh.exe, self.settings.target_lang, normalize_text(sh.text), list(items))
+            except Exception:
+                log.exception("учёба: подсказки не записались")
         if sh is self._study:
             self._study_show()
 
     def _study_show(self) -> None:
-        """Подсказки текущей реплики на оверлей."""
+        """Подсказки текущей реплики на оверлей: подчёркнутые места и строка «часть · значение»."""
         sh = self._study
-        views: list[tuple[GlossView, Pick]] = []
+        views: list[HintView] = []
+        self._study_keys = []
         if sh is not None:
-            for p in sh.picks:
-                meaning = sh.meaning(p)
-                if not meaning or meaning == GLOSS_SKIP or not 0 <= p.index < len(sh.rects):
-                    continue  # значение ещё не пришло или модель сказала, что учить незачем
-                views.append((GlossView(sh.rects[p.index], meaning, p.kind, p.label, p.index in sh.revealed), p))
-        self._study_views = views
-        self.overlay.show_glosses([v for v, _p in views])
+            for h in sh.hints:
+                if not h.meaning:
+                    continue
+                rects = tuple(sh.rects[i] for i in h.words if 0 <= i < len(sh.rects))
+                views.append(HintView(rects, h.text, h.meaning, h.kind, h.key in sh.revealed))
+                self._study_keys.append(h.key)
+        self.overlay.show_hints(views)
 
     def _study_finish(self, out: F2Outcome, game: Game, text: str, translation: str, speaker: str | None) -> None:
-        """Перевод пришёл: значения из ответа, а тех, что нет (перевод из кеша или с сервера), спросить отдельно."""
+        """Перевод пришёл. Подсказок модели нет (перевод из истории или с сервера Lexo): из прошлого раза
+        или отдельным маленьким запросом."""
         assert out.ocr is not None
         sh = self._study
         if sh is None or sh.text != text or sh.exe != game.exe:
-            sh = self._study_begin(game.exe, text, out.ocr, out.picks)
-        if out.glosses:
-            self._study_glosses_in(sh, out.glosses)
-        missing = [p for p in sh.picks if p.ask and not sh.meanings.get(p.index)]
-        if not missing or (out.kind == "translated" and isinstance(self.translator, AnthropicTranslator) and out.glosses):
-            return  # своим ключом модель уже ответила про эти слова (остальные пропустила сама)
+            session = self.sessions.touch(game.exe, game.title)
+            sh = self._study_begin(game.exe, game.title, session.id, text, out.ocr, out.study or StudyPlan())
+        sh.translation = translation
+        if out.hints is not None:
+            self._study_hints_in(sh, list(out.hints), save=True)
+        if sh.asked:
+            return
+        norm = normalize_text(text)
+        try:
+            stored = self.store.study_hints_get(game.exe, self.settings.target_lang, norm)
+        except Exception:
+            log.exception("учёба: сохранённые подсказки недоступны")
+            stored = None
+        if stored is not None:
+            self._study_hints_in(sh, stored, save=False)
+            return
         tr = self._gloss_translator()
         if tr is None:
             return
-        words = list(dict.fromkeys(p.token for p in missing))
-        coro = tr.glosses(
+        known = tuple(dict.fromkeys([*sh.known, *(h.text for h in sh.hints)]))
+        coro = tr.hints(
             text,
-            words,
             game=game.title,
             speaker=speaker,
             translation=translation,
             level=self._study_level_name(),
+            room=sh.room,
+            known=known,
             source_lang=self.settings.source_lang,
             target_lang=self.settings.target_lang,
         )
@@ -2215,14 +2246,12 @@ class App(QObject):
 
     def _study_fetched(self, sh: Shown, fut: concurrent.futures.Future) -> None:
         try:
-            found, usage = fut.result()
+            items, usage = fut.result()
         except Exception as exc:
-            log.warning("учёба: значения слов не пришли: %s", exc)
+            log.warning("учёба: подсказки не пришли: %s", exc)
             return
-        self.own_usage.add("gloss", usage, self.settings.model)
-        self._study_glosses_in(sh, found)
-        if sh is not self._study and sh.meanings:  # реплику уже пролистали: значения пригодятся в следующий раз
-            self._study_save(sh, shown_s=0.0)
+        self.own_usage.add("hints", usage, self.settings.model)
+        self._study_hints_in(sh, items, save=True)
 
     def _gloss_translator(self) -> AnthropicTranslator | None:
         """Значения слов пишет модель своего ключа, даже если перевод идёт через Lexo."""
@@ -2238,7 +2267,8 @@ class App(QObject):
         return self._gloss_tr
 
     def _study_tick(self) -> None:
-        """Alt или курсор на плашке: перевод виден. Курсор на «?»: значение слова открыто до конца реплики."""
+        """Alt или курсор на плашке: перевод виден. Курсор на «?» (над окном диалога или на подчёркнутом месте):
+        значение открыто до конца реплики."""
         sh = self._study
         if sh is None or not self.overlay.strip_visible:
             self._study_timer.stop()
@@ -2255,13 +2285,11 @@ class App(QObject):
             x, y = winapi.cursor_pos()
             nx, ny = (x - d.x) / d.w, (y - d.y) / d.h
             if 0 <= nx <= 1 and 0 <= ny <= 1:
-                over = self.overlay.strip_hit(nx, ny)
-                i = self.overlay.gloss_at(nx, ny)
-                if i is not None and i < len(self._study_views):
-                    view, p = self._study_views[i]
-                    if view.kind != "new" and p.index not in sh.revealed:
-                        sh.revealed.add(p.index)
-                        self._study_show()
+                i, over = self.overlay.hover(nx, ny)
+                views = self.overlay.hints
+                if i is not None and i < len(views) and i < len(self._study_keys) and views[i].value() == "?":
+                    sh.revealed.add(self._study_keys[i])
+                    self._study_show()
         opened = self.overlay.study_open
         if alt or over:
             self._study_close_at = 0.0
@@ -2278,27 +2306,59 @@ class App(QObject):
                 self.overlay.set_study_open(False)
 
     def _study_commit(self) -> None:
-        """Реплика ушла с экрана: засчитать встречи слов и день учёбы."""
+        """Реплика ушла с экрана: засчитать встречи, день учёбы, забытое в карточки."""
         sh = self._study
         if sh is None:
             return
         self._study = None
-        self._study_views = []
         self._study_timer.stop()
-        self.overlay.show_glosses(())
+        self.overlay.show_hints(())
         self.overlay.set_study_open(False)
         self._study_save(sh, shown_s=time.monotonic() - sh.since)
 
     def _study_save(self, sh: Shown, *, shown_s: float) -> None:
         try:
-            changed, learned, counted = self.study.commit(sh, shown_s=shown_s, now=time.time())
+            changed, learned, counted, forgotten = self.study.commit(sh, shown_s=shown_s, now=time.time())
             self.store.study_put(changed)
-            if counted or learned:
+            cards = self._study_cards(sh, forgotten) if forgotten else 0
+            if counted or learned or cards:
                 self.store.study_day_add(
-                    date.today().isoformat(), lines=int(counted), peeks=int(counted and sh.peeked), learned=learned
+                    date.today().isoformat(),
+                    lines=int(counted),
+                    peeks=int(counted and sh.peeked),
+                    learned=learned,
+                    cards=cards,
                 )
         except Exception:
             log.exception("учёба: не записалось")
+
+    def _study_cards(self, sh: Shown, forgotten: list[Hint]) -> int:
+        """Забытое (открывал «?» после нескольких встреч) в карточки: в игре само не запоминается,
+        пусть повторится на телефоне. Не больше STUDY_CARDS_PER_DAY в день, своё и уже сохранённое не дублируем."""
+        if not self.settings.study_cards:
+            return 0
+        today = date.today().isoformat()
+        done = self.store.study_days(today).get(today, (0, 0, 0, 0))[3]
+        added: list[str] = []
+        for h in forgotten:
+            if done + len(added) >= STUDY_CARDS_PER_DAY:
+                break
+            word = h.key if " " not in h.key else h.text
+            if self.vocab.known(word) or self.vocab.known(h.text):
+                continue
+            try:
+                self._store_word(
+                    sh.exe, sh.title or sh.exe, sh.session_id,
+                    selection=h.text, lemma=word, translation=h.meaning, ipa=None, pos=None,
+                    sentence=sh.text, sentence_translation=sh.translation or None,
+                )  # fmt: skip
+                self.sessions.word_added(sh.exe)
+                added.append(word)
+            except Exception:
+                log.exception("учёба: забытое не сохранилось")
+        if added:
+            self.overlay.toast("В карточки: " + ", ".join(added), 2500)
+        return len(added)
 
     def _study_sync(self) -> None:
         """Настройку учёбы переключили в окне: реплика на экране следует ей."""
@@ -2315,12 +2375,13 @@ class App(QObject):
         if self.state != "idle" or not self.overlay.strip_visible or line is None or game is None or line.exe != game.exe:
             return  # перевода на экране нет (или он ещё в пути): учёба начнётся со следующей реплики
         self.overlay.study_hide = True
-        text = line.sentence
-        picks = self._study_picker(game)(line.ocr)
-        sh = self._study_begin(game.exe, line.utterance.text if line.utterance else text, line.ocr, picks)
-        fake = F2Outcome("repeat", record=line.record, ocr=line.ocr, utterance=line.utterance, picks=tuple(picks))
+        text = line.utterance.text if line.utterance else line.sentence
+        plan = self._study_picker(game)(line.ocr)
+        session = self.sessions.touch(game.exe, game.title)
+        self._study_begin(game.exe, game.title, session.id, text, line.ocr, plan)
+        fake = F2Outcome("repeat", record=line.record, ocr=line.ocr, utterance=line.utterance, study=plan)
         if line.record is not None:
-            self._study_finish(fake, game, sh.text, line.record.translation, self._line_speaker(line))
+            self._study_finish(fake, game, text, line.record.translation, self._line_speaker(line))
         self.overlay.update()
 
     def toggle_study(self) -> None:
@@ -2335,8 +2396,10 @@ class App(QObject):
             self.overlay.toast("Учёба включена, но в этой игре текст на весь экран: тут перевод как обычно", 4000)
         elif on:
             self.overlay.toast(
-                f"Учёба: читай сам, над трудными словами подсказки. Перевод: держи Alt или наведи. {hk.study or 'Клавиша'} выключит",
-                4500,
+                "Учёба: читай сам. Трудные места подсказаны над окном диалога, бирюзовым. «?» значит вспомни сам, "
+                "наведи, если не помнишь; жёлтые это твои слова из карточек. Перевод: держи Alt. "
+                f"{hk.study or 'Клавиша'} выключит",
+                7000,
             )
         else:
             self.overlay.toast("Учёба выключена: обычный перевод", 2500)

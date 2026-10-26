@@ -576,22 +576,25 @@ class ProgressPage(QWidget):
         self.totals.setText(f"Всего с LexoPlay: реплик {lines}, новых слов {words}, в играх {minutes(seconds)}.")
 
     def _show_study(self, pr: Progress) -> None:
-        lines, peeks, learned = pr.study_today
-        week_lines, week_peeks, _week_learned = pr.study_week
+        lines, peeks, learned, cards = pr.study_today
+        week_lines = pr.study_week[0]
         self.study_box.setVisible(bool(week_lines or pr.study_known or getattr(self.ctl.settings, "study_mode", False)))
+        parts: list[str] = []
         if lines:
-            peek = f", перевод подглядывал {count(peeks, 'раз', 'раза', 'раз')}" if peeks else ", ни разу не подглядывал перевод"
-            head = f"Учёба сегодня: сам по-английски <b>{count(lines, 'реплика', 'реплики', 'реплик')}</b>{peek}."
-        elif week_lines:
-            share = round(100 * (week_lines - week_peeks) / week_lines)
-            head = f"Учёба за неделю: сам по-английски {count(week_lines, 'реплика', 'реплики', 'реплик')}, без перевода {share}%."
-        else:
+            share = round(100 * (lines - peeks) / lines)
+            parts.append(f"Учёба сегодня: сам по-английски <b>{count(lines, 'реплика', 'реплики', 'реплик')}</b>, без перевода {share}%.")
+        if week_lines and pr.study_share is not None:
+            prev = pr.study_prev_share
+            trend = f" (неделей раньше {prev}%)" if prev is not None else ""
+            parts.append(f"За неделю без перевода <b>{pr.study_share}%</b>{trend}.")
+        if not parts:
             hk = getattr(getattr(self.ctl.settings, "hotkeys", None), "study", "") or "F8"
-            head = f"Учёба: в игре нажми {hk}, и реплики читаешь сам, с подсказками над трудными словами."
-        tail = ""
+            parts.append(f"Учёба: в игре нажми {hk}, и реплики читаешь сам, а трудные места подсказаны над окном диалога.")
         if learned or pr.study_known:
-            tail = f" Слов запомнилось: <b>{learned}</b> сегодня, {pr.study_known} всего."
-        self.study_text.setText(head + tail)
+            parts.append(f"Запомнилось слов и выражений: <b>{learned}</b> сегодня, {pr.study_known} всего.")
+        if cards:
+            parts.append(f"Забытые ушли в карточки: {cards}.")
+        self.study_text.setText(" ".join(parts))
 
     def _show_activity(self) -> None:
         pr = self.pr

@@ -14,7 +14,9 @@ explains: разборы реплик (F7, кнопка «Разбор» в ис
 lookups: значения слов (F3) своим ключом: тот же клик по тому же слову в той же реплике без запроса.
 stats: по дням и играм: сколько реплик переведено, слов сохранено, минут в игре.
 study_words: учёба (study.py): что с трудным словом (значение видно, под «?», знаешь) и его значение.
-study_days: учёба по дням: реплик прочитано по-английски, сколько раз подглядывал перевод, слов запомнилось.
+study_days: учёба по дням: реплик прочитано по-английски, сколько раз подглядывал перевод, слов запомнилось,
+сколько забытых ушло в карточки.
+study_hints: учёба: подсказки модели к реплике (трудные места и их значения), чтобы второй раз не спрашивать.
 """
 
 from __future__ import annotations
@@ -118,7 +120,16 @@ CREATE TABLE IF NOT EXISTS study_days (
     day TEXT PRIMARY KEY,
     lines INTEGER NOT NULL DEFAULT 0,
     peeks INTEGER NOT NULL DEFAULT 0,
-    learned INTEGER NOT NULL DEFAULT 0
+    learned INTEGER NOT NULL DEFAULT 0,
+    cards INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS study_hints (
+    exe TEXT NOT NULL,
+    lang TEXT NOT NULL,
+    norm TEXT NOT NULL,
+    data TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    PRIMARY KEY (exe, lang, norm)
 );
 CREATE TABLE IF NOT EXISTS game_notes (
     exe TEXT NOT NULL,
@@ -287,6 +298,9 @@ class Store:
         vocab_cols = {r[1] for r in self._db.execute("PRAGMA table_info(vocab)").fetchall()}
         if "translation" not in vocab_cols:  # до 0.6.27: слова Lexo без перевода
             self._db.execute("ALTER TABLE vocab ADD COLUMN translation TEXT")
+        study_cols = {r[1] for r in self._db.execute("PRAGMA table_info(study_days)").fetchall()}
+        if "cards" not in study_cols:  # 0.6.33: забытые слова в карточки ещё не уходили
+            self._db.execute("ALTER TABLE study_days ADD COLUMN cards INTEGER NOT NULL DEFAULT 0")
         cols = {r[1] for r in self._db.execute("PRAGMA table_info(games)").fetchall()}
         for col, ddl in (
             ("deck_mode", "TEXT NOT NULL DEFAULT 'game'"),
@@ -976,21 +990,45 @@ class Store:
             )
             self._db.commit()
 
-    def study_day_add(self, day: str, *, lines: int = 0, peeks: int = 0, learned: int = 0) -> None:
+    def study_day_add(self, day: str, *, lines: int = 0, peeks: int = 0, learned: int = 0, cards: int = 0) -> None:
         with self._lock:
             self._db.execute(
-                "INSERT INTO study_days (day, lines, peeks, learned) VALUES (?, ?, ?, ?) "
-                "ON CONFLICT(day) DO UPDATE SET lines = lines + excluded.lines, "
-                "peeks = peeks + excluded.peeks, learned = learned + excluded.learned",
-                (day, lines, peeks, learned),
+                "INSERT INTO study_days (day, lines, peeks, learned, cards) VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(day) DO UPDATE SET lines = lines + excluded.lines, peeks = peeks + excluded.peeks, "
+                "learned = learned + excluded.learned, cards = cards + excluded.cards",
+                (day, lines, peeks, learned, cards),
             )
             self._db.commit()
 
-    def study_days(self, since: str) -> dict[str, tuple[int, int, int]]:
-        """{день: (реплик по-английски, подглядываний, слов запомнилось)} начиная с since."""
+    def study_days(self, since: str) -> dict[str, tuple[int, int, int, int]]:
+        """{день: (реплик по-английски, подглядываний, слов запомнилось, ушло в карточки)} начиная с since."""
         with self._lock:
-            rows = self._db.execute("SELECT day, lines, peeks, learned FROM study_days WHERE day >= ?", (since,)).fetchall()
-        return {r[0]: (int(r[1]), int(r[2]), int(r[3])) for r in rows}
+            rows = self._db.execute(
+                "SELECT day, lines, peeks, learned, cards FROM study_days WHERE day >= ?", (since,)
+            ).fetchall()
+        return {r[0]: (int(r[1]), int(r[2]), int(r[3]), int(r[4])) for r in rows}
+
+    def study_hints_get(self, exe: str, lang: str, norm: str) -> list[tuple[str, str]] | None:
+        """Подсказки модели к реплике (может быть, пустые: подсказывать нечего) или None, если не спрашивали."""
+        with self._lock:
+            row = self._db.execute(
+                "SELECT data FROM study_hints WHERE exe = ? AND lang = ? AND norm = ?", (exe.lower(), lang, norm)
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            return [(str(a), str(b)) for a, b in json.loads(row[0])]
+        except (ValueError, TypeError):
+            return None
+
+    def study_hints_set(self, exe: str, lang: str, norm: str, hints: list[tuple[str, str]]) -> None:
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO study_hints (exe, lang, norm, data, created_at) VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(exe, lang, norm) DO UPDATE SET data = excluded.data, created_at = excluded.created_at",
+                (exe.lower(), lang, norm, json.dumps([list(h) for h in hints], ensure_ascii=False), time.time()),
+            )
+            self._db.commit()
 
     def study_known(self) -> int:
         with self._lock:

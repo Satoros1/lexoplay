@@ -185,7 +185,7 @@ def main(out: Path) -> int:
     from lexoplay.geometry import Rect
     from lexoplay.recall import RecallChip
     from lexoplay.ui import theme
-    from lexoplay.ui.overlay import GlossView, Overlay, PageView
+    from lexoplay.ui.overlay import HintView, Overlay, PageView
     from lexoplay.ui.word_layer import WordLayer
     from lexoplay.wordmode import CardState, ExplainRow, ExplainState, reader_views
 
@@ -207,14 +207,23 @@ def main(out: Path) -> int:
     compose(scene, ov, out / "translate.png")
     ov.hide_strip()
 
-    # 1б. учёба: перевод спрятан (Alt), над трудными словами значения, своё слово под «?»
-    def gloss(word: str, text: str, kind: str, **kw: object) -> GlossView:
-        x, y, w, h = word_rects(word)
-        return GlossView(Rect(x / W, y / H, w / W, h / H), text, kind, **kw)  # type: ignore[arg-type]
+    # 1б. учёба: перевод спрятан (Alt), над окном диалога подсказки к трудным местам, твоё слово под «?»
+    def hint(words: list[str], text: str, meaning: str, kind: str) -> HintView:
+        rects = []
+        for word in words:
+            x, y, w, h = word_rects(word)
+            rects.append(Rect(x / W, y / H, w / W, h / H))
+        return HintView(tuple(rects), text, meaning, kind)
 
     ov.study_hide = True
     ov.show_text(region, LINE_RU)
-    ov.show_glosses([gloss("reluctant", "неохотно", "new"), gloss("eerie", "жуткий", "saved")])
+    ov.show_hints(
+        [
+            hint(["reluctant", "to"], "reluctant to", "не хотела, неохотно", "new"),
+            hint(["eerie"], "eerie", "жуткий", "saved"),
+            hint(["after", "dark"], "after dark", "после темноты", "test"),
+        ]
+    )
     pump(app)
     compose(scene, ov, out / "study.png")
     ov.study_hide = False

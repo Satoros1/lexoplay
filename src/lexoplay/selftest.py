@@ -998,8 +998,9 @@ def _dialog_frame(lines: list[str]):  # type: ignore[no-untyped-def]
 
 
 def _study_flow(out_dir: Path) -> Callable[[], tuple[str, object]]:
-    """Учёба: F2 прячет перевод, над трудными словами значения и «?»; Alt показывает перевод,
-    наведение открывает «?»; после реплики слова и день учёбы записаны; клавиша учёбы выключает."""
+    """Учёба: F2 прячет перевод, над окном диалога подсказки к трудным местам (от модели и свои под «?»);
+    Alt показывает перевод, наведение на подчёркнутое место открывает «?»; после реплики места и день учёбы
+    записаны, забытое ушло в слова; клавиша учёбы выключает."""
 
     def run() -> tuple[str, object]:
         import tempfile
@@ -1028,13 +1029,17 @@ def _study_flow(out_dir: Path) -> Callable[[], tuple[str, object]]:
         frame = _dialog_frame(lines)
         reqs: list[object] = []
 
-        class FakeTranslator:  # как свой ключ: значения слов приходят раньше перевода
+        class FakeTranslator:  # как свой ключ: подсказки приходят раньше перевода
             async def translate(self, req):  # type: ignore[no-untyped-def]
                 reqs.append(req)
-                found = {w.lower(): {"culprit": "преступник", "tampered": "подделал"}.get(w.lower(), "что-то") for w in req.gloss_words}
-                if req.on_glosses:
-                    req.on_glosses(found)
-                return TranslateResult(source=req.text, translation="Преступник подделал улики. Это явно ошибка, Макото.", glosses=found)
+                items = [("tampered with the evidence", "подделал улики"), ("culprit", "преступник")] if req.study else None
+                if req.on_hints and items is not None:
+                    req.on_hints(items)
+                return TranslateResult(
+                    source=req.text,
+                    translation="Преступник подделал улики. Это явно ошибка, Макото.",
+                    hints=tuple(items) if items is not None else None,
+                )
 
         def pump(cond: Callable[[], bool], seconds: float = 20.0) -> bool:
             end = time.time() + seconds
@@ -1072,10 +1077,11 @@ def _study_flow(out_dir: Path) -> Callable[[], tuple[str, object]]:
             app.overlay.set_display_rect(app.display)
             frame.save(out_dir / "study-frame.png")
             app.f2()
-            info["shown"] = pump(lambda: app.state == "idle" and app.overlay.text is not None and bool(app.overlay.glosses))
+            info["shown"] = pump(lambda: app.state == "idle" and app.overlay.text is not None and len(app.overlay.hints) == 2)
             info["hidden"] = app.overlay.study_hide and not app.overlay.study_open
-            info["glosses"] = [(g.kind, g.shown) for g in app.overlay.glosses]
-            info["asked"] = list(getattr(reqs[0], "gloss_words", ())) if reqs else None
+            info["hints"] = [(h.kind, h.text, h.value()) for h in app.overlay.hints]
+            info["underlined"] = [len(h.words) for h in app.overlay.hints]
+            info["known_sent"] = list(getattr(reqs[0], "study_known", ())) if reqs else None
             pill = app.overlay.strip_rect()
             for _ in range(5):
                 app_q.processEvents()
@@ -1090,11 +1096,12 @@ def _study_flow(out_dir: Path) -> Callable[[], tuple[str, object]]:
             info["alt_closed"] = pump(lambda: not app.overlay.study_open, 3)
             # курсор на «?» над culprit: значение открыто до конца реплики
             d = app.display
-            mark = next((i for i, g in enumerate(app.overlay.glosses) if g.kind == "test"), None)
+            mark = next((h for h in app.overlay.hints if h.kind == "test" and h.words), None)
             if mark is not None:
-                r = app.overlay.glosses[mark].rect
+                r = mark.words[0]
                 cursor["pos"] = (int(d.x + (r.x + r.w / 2) * d.w), int(d.y + (r.y + r.h / 2) * d.h))
-            info["mark_open"] = pump(lambda: any(g.kind == "test" and g.open for g in app.overlay.glosses), 3)
+            info["mark_open"] = pump(lambda: any(h.kind == "test" and h.value() != "?" for h in app.overlay.hints), 3)
+            app.overlay.grab().save(str(out_dir / "study-overlay-mark.png"))
             cursor["pos"] = (0, 0)
             pump(lambda: False, 1.2)  # реплику читают: дольше MIN_SHOW_S
             app._hide_strip()  # реплика сменилась
@@ -1102,13 +1109,18 @@ def _study_flow(out_dir: Path) -> Callable[[], tuple[str, object]]:
             info["words"] = words
             today = _date.today().isoformat()
             info["day"] = store.study_days(today).get(today)
-            info["no_glosses_after"] = app.overlay.glosses == ()
+            info["cards"] = [(w.word, w.translation) for w in store.words_list()]
+            info["no_hints_after"] = app.overlay.hints == ()
+            from lexoplay.dedupe import normalize_text
+
+            utt = app.current.utterance.text if app.current and app.current.utterance else ""
+            info["hints_cached"] = store.study_hints_get(game.exe, "ru", normalize_text(utt)) is not None
             # клавиша учёбы: выключили, следующий перевод обычный
             app.toggle_study()
             info["off"] = not app.settings.study_mode
             app.f2()
             info["plain"] = pump(lambda: app.state == "idle" and app.overlay.text is not None)
-            info["plain_visible"] = not app.overlay.study_hide and not app.overlay.glosses
+            info["plain_visible"] = not app.overlay.study_hide and not app.overlay.hints
             app._hide_strip()
         finally:
             winapi.key_down, winapi.cursor_pos = real_key_down, real_cursor  # type: ignore[assignment]
@@ -1117,16 +1129,19 @@ def _study_flow(out_dir: Path) -> Callable[[], tuple[str, object]]:
         ok = (
             info.get("shown")
             and info.get("hidden")
-            and ("new", "подделал") in (info.get("glosses") or [])
-            and ("test", "?") in (info.get("glosses") or [])
+            and info.get("hints") == [("test", "culprit", "?"), ("new", "tampered with the evidence", "подделал улики")]
+            and all(info.get("underlined") or [0])
+            and "culprit" in (info.get("known_sent") or [])
             and info.get("alt_open")
             and info.get("full")
             and info.get("alt_closed")
             and info.get("mark_open")
             and words.get("culprit", ("",))[0] == "new"  # открыл «?»: значение снова видно пару встреч
-            and words.get("tampered", ("", 0))[:2] == ("new", 1)
-            and info.get("day") == (1, 1, 0)
-            and info.get("no_glosses_after")
+            and words.get("tampered with the evidence", ("", 0))[:2] == ("new", 1)
+            and info.get("day") == (1, 1, 0, 1)
+            and info.get("cards") == [("culprit", "преступник")]  # забытое ушло в слова
+            and info.get("hints_cached")  # второй раз эту реплику модель не спросят
+            and info.get("no_hints_after")
             and info.get("off")
             and info.get("plain")
             and info.get("plain_visible")

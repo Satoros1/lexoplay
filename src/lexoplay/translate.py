@@ -52,7 +52,7 @@ SYSTEM_PROMPT = """You are the localizer of the video game "{game}". The player 
 
 Write the translation a professional {target} game localizer would ship:
 - Natural, idiomatic {target} that a native speaker would really say in this situation. Rephrase freely; never translate word for word, never use calques, rare, bookish or made-up words.
-- Translate the whole meaning: never drop a word and never put "..." in place of a word you are unsure about.
+- Translate the whole meaning: keep every clause, qualifier and detail of the line (a shorter translation that loses a part of it is wrong), never drop a word and never put "..." in place of a word you are unsure about.
 - Translate only what the line says: never add a meaning, a reason or an ending of your own. If the OCR lost words or the line breaks off mid-sentence, translate what is there and end with "...".
 - Keep the perspective: a line in which the speaker talks about themselves stays in the first person and is never retold ("he says that...", "she asks..."). Never talk to the player, never add the speaker's name.
 - A line with a speaker is that character's own words. A line without a speaker is narration, the hero's thoughts, a sign or a menu: translate it as such.
@@ -70,18 +70,28 @@ Write the translation a professional {target} game localizer would ship:
 {examples}
 Reply with the translation of the line after "Translate this line". Then on a new line write "@@" and that line in {source} as the game really shows it: the OCR mistakes fixed, the same words and punctuation, normal capitalization, no speaker name. Nothing else: no quotes, no notes.
 Work out the garbled words silently, before you answer: the reply is shown to the player as is, so it never contains your reasoning, guesses about the OCR, corrections of yourself, alternatives or a second version: write the translation once, from start to end. If you can't be sure of a word, choose the most likely one and translate.
-When the request ends with <gloss_words>, the player is learning {source} and reads the original: before the translation write one line that starts with "##" and gives each of those words with its short {target} meaning in this line: "## word = meaning; word = meaning". A meaning is 1-3 words, the sense the word has here; for a word inside an idiom or a phrasal verb, the meaning of the whole expression. Write "word = -" for a name, a garbled word or a word every learner of that level knows. Then the translation and the "@@" line as usual.
+When the request ends with <study>, the player is learning {source} at the level given there and reads the original first, so they need two more things from you.
+First, before the translation, write one line that starts with "##": the parts of this line such a learner most likely won't understand, the most important first, no more than the max given, as "## part = meaning; part = meaning". {study_rules} A line with nothing hard gets just "##".
+Second, translate closely: keep every part of the line and, where {target} allows, its order, so the player can match each phrase of the original with its translation. It still reads as natural {target}, but nothing is retold, merged or left out. Then the "@@" line as usual.
 Never use the em dash character; use a comma, a colon or a new sentence instead.{notes}"""
 
 SOURCE_MARK = "@@"
-GLOSS_MARK = "##"  # строка значений трудных слов для учёбы (study.py), перед переводом
-GLOSS_SKIP = "-"  # модель: слово учить незачем (имя, мусор OCR, его знает любой на этом уровне)
-GLOSS_CHARS = 28
-GLOSS_MAX_TOKENS = 300
+HINT_MARK = "##"  # учёба (study.py): строка подсказок к трудным местам реплики, перед переводом
+HINT_CHARS = 32
+HINTS_MAX_TOKENS = 300
 
-# Значения слов для реплики, которую не переводили (перевод из кеша): маленький запрос без раздумий.
-GLOSS_PROMPT = """The player reads the video game "{game}" in {source} and is learning the language (level {level}). For each word listed after the line, give its short {target} meaning in this line.
-Reply with one line only: "## word = meaning; word = meaning". A meaning is 1-3 words, the sense the word has here; for a word inside an idiom or a phrasal verb, the meaning of the whole expression. Write "word = -" for a name, a garbled word or a word every learner of that level knows. Never use the em dash character."""
+# Что подсказывать в учёбе: одно и то же для перевода и для отдельного запроса подсказок.
+STUDY_RULES = (
+    "A part is copied from the line exactly as it stands. Prefer whole expressions whose meaning doesn't follow "
+    "from their words (idioms, phrasal verbs, set phrases and patterns such as \"figure out\", \"no way to\", "
+    "\"as it turns out\", \"make up one's mind\") over single words, and take a single word only if it is rare; never explain one word of "
+    "an expression on its own. The meaning is a short {target} rendering that fits this line, 1-5 words. Skip names, "
+    "the game's own terms, what any learner of that level knows and every part listed as known."
+)
+
+# Подсказки к реплике, перевод которой уже есть (из истории или с сервера Lexo): маленький запрос без раздумий.
+HINTS_PROMPT = """The player reads the video game "{game}" in {source} and is learning the language at the level given in <study>. They read the line in the original first.
+Pick the parts of the line such a learner most likely won't understand, the most important first, no more than the max given, and reply with one line only: "## part = meaning; part = meaning". {study_rules} If nothing in the line is hard, reply just "##". Never use the em dash character."""
 
 # Образцы хорошего перевода: маленькой модели они дают больше, чем любые правила.
 EXAMPLES = {
@@ -201,13 +211,16 @@ class TranslateRequest:
     game_exe: str = ""
     previous: str | None = None  # «Перевести иначе»: прошлый перевод, который не понравился
     notes: str = ""  # справка по игре: герои, термины, тон (game_notes)
-    # учёба: слова, чьи значения в этой реплике нужны над ними (study.pick), и уровень игрока (B1)
-    gloss_words: tuple[str, ...] = ()
-    gloss_level: str = "B1"
+    # учёба: игрок читает оригинал сам (уровень B1): модель подсказывает трудные места и переводит близко к тексту.
+    # study_known: места, которые он уже знает или учит; study_room: сколько новых подсказок можно
+    study: bool = False
+    study_level: str = "B1"
+    study_known: tuple[str, ...] = ()
+    study_room: int = 3
     # кусок перевода по мере того, как модель его пишет (из фонового потока)
     on_partial: Partial | None = field(default=None, compare=False, repr=False)
-    # значения gloss_words, как только модель их написала (из фонового потока)
-    on_glosses: Callable[[dict[str, str]], None] | None = field(default=None, compare=False, repr=False)
+    # учёба: подсказки, как только модель их написала, раньше перевода (из фонового потока)
+    on_hints: Callable[[list[tuple[str, str]]], None] | None = field(default=None, compare=False, repr=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -215,7 +228,8 @@ class TranslateResult:
     source: str
     translation: str
     usage: tuple[int, int] | None = None  # токены своего ключа (вход, выход): для счётчика расходов
-    glosses: dict[str, str] = field(default_factory=dict)  # учёба: слово -> значение (GLOSS_SKIP: не учить)
+    # учёба: (место реплики, значение) по важности; None: модель строку подсказок не написала
+    hints: tuple[tuple[str, str], ...] | None = None
 
 
 class Translator(Protocol):
@@ -244,6 +258,7 @@ def build_system(req: TranslateRequest) -> str:
         game=(req.game or "unknown").replace('"', "'"),
         examples=examples_block(req.target_lang),
         notes=notes_block(req.notes) + glossary_block(req.glossary),
+        study_rules=STUDY_RULES.format(target=lang_name(req.target_lang)),
     )
 
 
@@ -284,21 +299,22 @@ def build_user(req: TranslateRequest) -> str:
         )
     parts.append("Translate this line:")
     parts.append(_line(req.speaker, req.text))
-    if req.gloss_words:
-        parts.append(gloss_tag(req.gloss_words, req.gloss_level))
+    if req.study:
+        parts.append(study_tag(req.study_level, req.study_room, req.study_known))
     return "\n".join(parts)
 
 
-def gloss_tag(words: tuple[str, ...] | list[str], level: str) -> str:
-    return f'<gloss_words level="{_attr(level)}">' + ", ".join(_attr(w) for w in words) + "</gloss_words>"
+def study_tag(level: str, room: int, known: tuple[str, ...] | list[str]) -> str:
+    body = ("known: " + "; ".join(_attr(k) for k in known)) if known else ""
+    return f'<study level="{_attr(level)}" max="{max(1, room)}">{body}</study>'
 
 
 _GLOSS_LINE = re.compile(r"(?m)^[ \t]*##[^\n]*(?:\n|$)")
-_GLOSS_ITEM = re.compile(r"^[\"'«“]?([A-Za-z][A-Za-z'’ -]{0,40}?)[\"'»”]?\s*(?:=|:|—|–|\s-\s)\s*(.+?)$")
+_HINT_ITEM = re.compile(r"^[\"'«“]?([A-Za-z0-9][A-Za-z0-9'’ ,.!?-]{0,80}?)[\"'»”]?\s*(?:=|—|–|\s-\s)\s*(.+?)$")
 
 
-def split_glosses(raw: str) -> tuple[str, str | None, bool]:
-    """Ответ модели -> (ответ без строки значений, строка значений «## ...» или None, дописана ли она)."""
+def split_hints(raw: str) -> tuple[str, str | None, bool]:
+    """Ответ модели -> (ответ без строки подсказок, строка подсказок «## ...» или None, дописана ли она)."""
     m = _GLOSS_LINE.search(raw)
     if m is None:
         if raw.strip() == "#":
@@ -308,29 +324,31 @@ def split_glosses(raw: str) -> tuple[str, str | None, bool]:
     return raw[: m.start()] + raw[m.end() :], line.strip(), line.endswith("\n")
 
 
-def short_gloss(text: str) -> str:
+def short_hint(text: str) -> str:
     t = no_dash(text.strip().strip("\"'«»“”").strip()).rstrip(".").strip()
-    if len(t) > GLOSS_CHARS:
-        cut = t[: GLOSS_CHARS + 1]
-        t = (cut.rsplit(" ", 1)[0] if " " in cut else cut[:GLOSS_CHARS]).rstrip(",;: ") + "…"
+    if len(t) > HINT_CHARS:
+        cut = t[: HINT_CHARS + 1]
+        t = (cut.rsplit(" ", 1)[0] if " " in cut else cut[:HINT_CHARS]).rstrip(",;: ") + "…"
     return t
 
 
-def parse_glosses(line: str | None) -> dict[str, str]:
-    """«## despaired = отчаялся; Makoto = -» -> {"despaired": "отчаялся", "makoto": "-"}."""
+def parse_hints(line: str | None) -> list[tuple[str, str]]:
+    """«## the way things are = при нынешнем положении дел; persuade = убедить» -> [(место, значение), ...] по порядку.
+
+    Пустая строка «##» (подсказывать нечего) -> []. Места без значения (« = -») не берём."""
     if not line:
-        return {}
+        return []
     body = line.strip().lstrip("#").strip()
-    out: dict[str, str] = {}
+    out: list[tuple[str, str]] = []
     for part in re.split(r"\s*[;|]\s*", body):
-        m = _GLOSS_ITEM.match(part.strip())
+        m = _HINT_ITEM.match(part.strip())
         if not m:
             continue
-        word = m.group(1).strip().lower().replace("’", "'")
+        item = m.group(1).strip().strip(",.!? ").replace("’", "'")
         meaning = m.group(2).strip()
-        meaning = GLOSS_SKIP if meaning.strip("\"'«»“” ") in ("-", "—", "–", "") else short_gloss(meaning)
-        if word and meaning:
-            out[word] = meaning
+        if not item or meaning.strip("\"'«»“” ") in ("-", "—", "–", ""):
+            continue
+        out.append((item, short_hint(meaning)))
     return out
 
 
@@ -626,7 +644,7 @@ def tidy_saved(translation: str, *speakers: str | None, target_lang: str = "ru")
 
 def split_reply(raw: str) -> tuple[str, str | None]:
     """Ответ модели → (перевод, исправленный оригинал после «@@» или None). Строка значений («##») не входит."""
-    raw = split_glosses(raw)[0]
+    raw = split_hints(raw)[0]
     if SOURCE_MARK not in raw:
         return raw, None
     tr, src = raw.split(SOURCE_MARK, 1)
@@ -805,18 +823,18 @@ class AnthropicTranslator:
     async def _stream(self, req: TranslateRequest) -> tuple[str, str | None, tuple[int, int] | None]:
         buf = ""
         shown = ""
-        glossed = not (req.gloss_words and req.on_glosses)
+        hinted = not (req.study and req.on_hints)
         async with self._client.messages.stream(**self._params(req)) as stream:
             async for chunk in stream.text_stream:
                 buf += chunk
-                if not glossed:
-                    _rest, line, done = split_glosses(buf)
+                if not hinted:
+                    _rest, line, done = split_hints(buf)
                     if line is not None and done:
-                        glossed = True
+                        hinted = True
                         try:
-                            req.on_glosses(parse_glosses(line))  # type: ignore[misc]
+                            req.on_hints(parse_hints(line))  # type: ignore[misc]
                         except Exception:
-                            log.debug("on_glosses упал", exc_info=True)
+                            log.debug("on_hints упал", exc_info=True)
                 if req.on_partial:
                     part = clean_translation(buf, req.speaker, partial=True, target_lang=req.target_lang, source=req.text)
                     if part and part != shown:
@@ -859,39 +877,40 @@ class AnthropicTranslator:
             if translation:
                 learn_names(req.text, translation, req.target_lang)
                 source = pick_source(req.text, split_reply(raw)[1])
-                glosses = parse_glosses(split_glosses(raw)[1]) if req.gloss_words else {}
-                return TranslateResult(source=source, translation=translation, usage=usage, glosses=glosses)
+                line = split_hints(raw)[1] if req.study else None
+                hints = tuple(parse_hints(line)) if line is not None else None
+                return TranslateResult(source=source, translation=translation, usage=usage, hints=hints)
             if stop == "refusal":
                 raise TranslationError("Модель отказалась переводить эту реплику.")
             log.warning("пустой перевод: stop_reason=%s, ответ=%r", stop, raw[:200])
         raise TranslationError("Модель не прислала перевод, попробуй ещё раз.")
 
-    async def glosses(
+    async def hints(
         self,
         text: str,
-        words: list[str] | tuple[str, ...],
         *,
         game: str = "",
         speaker: str | None = None,
         translation: str | None = None,
         level: str = "B1",
+        room: int = 3,
+        known: tuple[str, ...] | list[str] = (),
         source_lang: str = "en",
         target_lang: str = "ru",
-    ) -> tuple[dict[str, str], tuple[int, int] | None]:
-        """Значения слов в реплике без перевода (перевод уже есть, из кеша): (слово -> значение, токены)."""
+    ) -> tuple[list[tuple[str, str]], tuple[int, int] | None]:
+        """Учёба: подсказки к реплике, перевод которой уже есть (из истории, с сервера): (места, токены)."""
         a = self._anthropic
         user = [_line(speaker, text)]
         if translation:
             user.append(f"<translation>{translation}</translation>")
-        user.append(gloss_tag(tuple(words), level))
+        user.append(study_tag(level, room, tuple(known)))
         params: dict = {
             "model": self._model,
-            "max_tokens": GLOSS_MAX_TOKENS,
-            "system": GLOSS_PROMPT.format(
+            "max_tokens": HINTS_MAX_TOKENS,
+            "system": HINTS_PROMPT.format(
                 game=(game or "unknown").replace('"', "'"),
                 source=lang_name(source_lang),
-                target=lang_name(target_lang),
-                level=level,
+                study_rules=STUDY_RULES.format(target=lang_name(target_lang)),
             ),
             "messages": [{"role": "user", "content": "\n".join(user)}],
         }
@@ -913,11 +932,13 @@ class AnthropicTranslator:
             except Exception as exc:
                 raise friendly_error(a, exc, self._model) from exc
         else:
-            raise TranslationError("Модель не приняла запрос значений слов.")
+            raise TranslationError("Модель не приняла запрос подсказок.")
         self._last_used = time.monotonic()
         raw = "".join(getattr(b, "text", "") for b in msg.content if getattr(b, "type", "") == "text")
-        line = split_glosses(raw)[1] or raw.strip().splitlines()[0] if raw.strip() else None
-        return parse_glosses(line), usage_of(msg)
+        line = split_hints(raw)[1]
+        if line is None and raw.strip():
+            line = raw.strip().splitlines()[0]
+        return parse_hints(line), usage_of(msg)
 
     async def translate_batch(
         self, reqs: list[TranslateRequest], on_partial: Callable[[int, str], None] | None = None
