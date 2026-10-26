@@ -40,6 +40,7 @@ from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon,
 from lexoplay import __version__, autostart, updater
 from lexoplay.bg import BackgroundLoop
 from lexoplay.config import (
+    MOUSE_PEEK,
     Settings,
     data_dir,
     debug_dir,
@@ -137,11 +138,12 @@ KNOWN_CLICK_GRABBERS = {"dr1_us.exe", "dr2_us.exe"}
 FREEZE_GRACE_S = 1.5  # сколько после сворачивания игры фокус может прыгать сам (в окне)
 FREEZE_GRACE_FULL_S = 3.5  # полноэкранной: она ещё меняет режим экрана
 PAGE_REGION_H = 0.45  # выделили больше стольких по высоте и ширине 0.5: похоже на текст на весь экран (NVL)
-PEEK_MS = 50  # как часто смотреть, не держат ли Alt (оригинал под переводом страницы)
+PEEK_MS = 50  # как часто смотреть, не держат ли клавишу «показать» (Alt: оригинал страницы, перевод в учёбе)
+STUDY_HOVER_S = 0.2  # учёба: курсор задержался на подсказке или плашке столько, значит навёл, а не пронёс мимо
+STUDY_MOVED_PX = 12  # курсор сдвинулся с места, где был при появлении реплики (стоящий курсор не «навёл»)
 STUDY_CLOSE_S = 0.25  # учёба: курсор ушёл с плашки, перевод прячется через столько (без мигания на краю)
 STUDY_PEEK_S = 0.4  # перевод был виден дольше: подглядывал (случайно пронёс курсор не считается)
 STUDY_CARDS_PER_DAY = 10  # забытых мест в карточки за день, не больше
-VK_MENU = 0x12
 PREWARM_MS = 3000  # через столько после запуска окно LexoPlay собирается заранее (если игра не идёт)
 NOTES_RETRY_S = 600.0  # справка по игре не собралась (сеть, лимит): снова не раньше чем через 10 минут
 NOTES_RECHECK_S = 1800.0  # раз в полчаса смотрим, не появились ли герои, которых в справке нет
@@ -292,6 +294,9 @@ class App(QObject):
         self._study_keys: list[str] = []  # ключи подсказок в том порядке, в каком они на оверлее
         self._study_open_since = 0.0
         self._study_close_at = 0.0
+        self._study_cursor0: tuple[int, int] | None = None  # где был курсор, когда показали реплику
+        self._study_moved = False  # с тех пор курсор двигали: наведение считается
+        self._study_hover: tuple[object, float] = (None, 0.0)  # на чём курсор и с какого момента
         self._gloss_tr: AnthropicTranslator | None = None
         self._gloss_sig: tuple = ()
         self._last_input = 0.0  # когда игрок последний раз кликал или жал клавишу (monotonic)
@@ -860,6 +865,7 @@ class App(QObject):
         self._rebuild_translator()
         self._define_hotkeys()
         self._apply_hotkey_groups()
+        self._sync_input()  # клавишей «показать» могли стать кнопкой мыши
         if not self.settings.auto_translate:
             self.auto_live = False
         self._auto_action.setChecked(self.settings.auto_translate)
@@ -986,6 +992,8 @@ class App(QObject):
                 pass
         if self.word_layer.is_open:
             vks |= WORDS_VKS
+        if self.settings.peek_key not in MOUSE_PEEK:
+            vks.add(self.settings.peek[1])  # держат, чтобы подглядеть: это не «пропустил реплику»
         return vks
 
     def _sync_ignored_keys(self) -> None:
@@ -1005,6 +1013,7 @@ class App(QObject):
         self.overlay.strip_place = self.settings.strip_place
         self.overlay.font_family = self.settings.strip_font
         self.overlay.font_bold = self.settings.strip_bold
+        self.overlay.peek_name = self.settings.peek[2]
         self.word_layer.font_scale = self.settings.font_scale
         self.word_layer.font_family = self.settings.strip_font
         self.word_layer.hover_pick = self.settings.hover_pick
@@ -2047,7 +2056,8 @@ class App(QObject):
             self._page_hint = True
             hk = self.settings.hotkeys
             self.overlay.toast(
-                f"Перевод поверх текста, новые абзацы переведутся сами. Держи Alt: оригинал. {hk.hide}: убрать", 5000
+                f"Перевод поверх текста, новые абзацы переведутся сами. Держи {self.settings.peek[2]}: оригинал. {hk.hide}: убрать",
+                5000,
             )
 
     def _page_error(self, out: PageOutcome) -> None:
@@ -2116,7 +2126,7 @@ class App(QObject):
             self._peek_timer.stop()
             self.overlay.set_peek(False)
             return
-        held = self._game_in_focus() and winapi.key_down(VK_MENU)
+        held = self._game_in_focus() and winapi.key_down(self.settings.peek[0])
         self.overlay.set_peek(held)
 
     # ------------------------------------------------------------------ учёба
@@ -2170,6 +2180,9 @@ class App(QObject):
         )  # fmt: skip
         self._study = sh
         self._study_close_at = 0.0
+        self._study_cursor0 = winapi.cursor_pos()
+        self._study_moved = False
+        self._study_hover = (None, 0.0)
         self.overlay.set_study_open(False)
         self._study_show()
         self._study_timer.start()
@@ -2278,16 +2291,32 @@ class App(QObject):
             return
         now = time.monotonic()
         focus = self._game_in_focus()
-        alt = focus and winapi.key_down(VK_MENU)
+        alt = focus and winapi.key_down(self.settings.peek[0])
         over = False
         d = self.display
         if focus and d is not None and d.w > 0 and d.h > 0:
             x, y = winapi.cursor_pos()
+            x0, y0 = self._study_cursor0 or (x, y)
+            if abs(x - x0) + abs(y - y0) > STUDY_MOVED_PX:
+                self._study_moved = True
             nx, ny = (x - d.x) / d.w, (y - d.y) / d.h
-            if 0 <= nx <= 1 and 0 <= ny <= 1:
-                i, over = self.overlay.hover(nx, ny)
+            if self._study_moved and 0 <= nx <= 1 and 0 <= ny <= 1:
+                # курсор, который просто стоит на тексте с прошлой реплики (в игре кликают мышью), ничего не открывает
+                i, hit = self.overlay.hover(nx, ny)
+                target = ("strip", None) if hit else ("hint", i) if i is not None else None
+                if target != self._study_hover[0]:
+                    self._study_hover = (target, now)
+                dwell = target is not None and now - self._study_hover[1] >= STUDY_HOVER_S
+                over = hit and (self.overlay.study_open or dwell)  # открытый перевод держится, пока курсор на нём
                 views = self.overlay.hints
-                if i is not None and i < len(views) and i < len(self._study_keys) and views[i].value() == "?":
+                if (
+                    dwell
+                    and i is not None
+                    and not self.overlay.study_open  # перевод открыт: значения и так видны, это не «забыл»
+                    and i < len(views)
+                    and i < len(self._study_keys)
+                    and views[i].value() == "?"
+                ):
                     sh.revealed.add(self._study_keys[i])
                     self._study_show()
         opened = self.overlay.study_open
@@ -2397,7 +2426,7 @@ class App(QObject):
         elif on:
             self.overlay.toast(
                 "Учёба: читай сам. Трудные места подсказаны над окном диалога, бирюзовым. «?» значит вспомни сам, "
-                "наведи, если не помнишь; жёлтые это твои слова из карточек. Перевод: держи Alt. "
+                f"наведи, если не помнишь; жёлтые это твои слова из карточек. Перевод: держи {self.settings.peek[2]}. "
                 f"{hk.study or 'Клавиша'} выключит",
                 7000,
             )
@@ -2542,7 +2571,8 @@ class App(QObject):
     def _sync_input(self) -> None:
         """Raw Input нужен, пока следим за репликой, открыт режим слов или на кнопку мыши назначено действие."""
         mouse = self.hotkeys.mouse_vks
-        self.input.ignore_buttons = mouse
+        peek = {self.settings.peek[1]} if self.settings.peek_key in MOUSE_PEEK else set()
+        self.input.ignore_buttons = set(mouse) | peek
         if self.watcher is not None or self.word_layer.is_open or mouse:
             self.input.start()
         else:
@@ -2944,6 +2974,8 @@ class App(QObject):
     def _open_words(self, game: Game, session: GameSession, line: CurrentLine) -> None:
         if self.display is None or game.region is None or not line.ocr.words:
             return
+        if self._study is not None:
+            self._study.peeked = True  # в режиме слов виден перевод реплики
         views = self._line_views(line)
         if not views:
             return

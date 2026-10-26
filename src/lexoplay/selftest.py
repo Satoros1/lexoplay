@@ -1017,7 +1017,7 @@ def _study_flow(out_dir: Path) -> Callable[[], tuple[str, object]]:
 
         from datetime import date as _date
 
-        from lexoplay.app import VK_MENU, Active, App
+        from lexoplay.app import Active, App
         from lexoplay.bg import BackgroundLoop
         from lexoplay.config import Settings
         from lexoplay.geometry import Rect
@@ -1061,7 +1061,7 @@ def _study_flow(out_dir: Path) -> Callable[[], tuple[str, object]]:
         real_key_down, real_cursor = winapi.key_down, winapi.cursor_pos
         held = {"alt": False}
         cursor = {"pos": (0, 0)}
-        winapi.key_down = lambda vk: held["alt"] and vk == VK_MENU  # type: ignore[assignment]
+        winapi.key_down = lambda vk: held["alt"] and vk == 0x12  # Alt  # type: ignore[assignment]
         winapi.cursor_pos = lambda: cursor["pos"]  # type: ignore[assignment]
         try:
             app.start()

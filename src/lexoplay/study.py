@@ -186,8 +186,8 @@ def plan(
         for idx, shown, e in _found(learning, words):
             key = e.word  # type: ignore[attr-defined]
             st = state(key)
-            if st is None:
-                continue
+            if st is None or (st.state in ("new", "test") and not st.meaning):
+                continue  # без значения подсказать нечего: пусть модель объяснит заново
             known.append(shown)
             if st.state not in ("new", "test") or used.intersection(idx):
                 continue

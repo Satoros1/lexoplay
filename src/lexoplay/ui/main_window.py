@@ -49,7 +49,7 @@ from PySide6.QtWidgets import (
 )
 
 from lexoplay import __version__
-from lexoplay.config import HOTKEY_LABELS, Hotkeys, Settings
+from lexoplay.config import HOTKEY_LABELS, MOUSE_PEEK, PEEK_KEYS, Hotkeys, Settings
 from lexoplay.games import WindowInfo
 from lexoplay.geometry import font_px_for
 from lexoplay.hotkeys import HotkeyError, parse, risk
@@ -382,7 +382,7 @@ class GamesPage(QWidget):
     TEXT_MODES = (
         ("dialog", "Окно диалога", "Реплики в окне внизу (или сбоку): перевод в плашке над ним"),
         ("page", "Текст на весь экран", "Текст абзацами по всему экрану (NVL): перевод поверх каждого абзаца, "
-         "новые абзацы переводятся сами. Держи Alt, чтобы увидеть оригинал"),
+         "новые абзацы переводятся сами. Держи Alt (меняется во вкладке «Клавиши»), чтобы увидеть оригинал"),
     )
 
     def _mode_combo(self, g: Game) -> QComboBox:
@@ -765,9 +765,9 @@ class KeysPage(QWidget):
         self.edits.clear()
         self.notes.clear()
         items = self.ctl.settings.hotkeys.items()
-        for i, (name, value) in enumerate(items):
+        for name, value in items:
             row = QFrame()
-            row.setObjectName("rowLast" if i == len(items) - 1 else "row")
+            row.setObjectName("row")
             rl = QHBoxLayout(row)
             rl.setContentsMargins(18, 12, 18, 12)
             col = QVBoxLayout()
@@ -787,7 +787,40 @@ class KeysPage(QWidget):
             self.box_lay.addWidget(row)
             self.edits[name] = edit
             self.notes[name] = note
+        # клавиша, которую держат: её не нажимают один раз, поэтому выбор из списка, а не ввод
+        row = QFrame()
+        row.setObjectName("rowLast")
+        rl = QHBoxLayout(row)
+        rl.setContentsMargins(18, 12, 18, 12)
+        col = QVBoxLayout()
+        col.setSpacing(2)
+        col.addWidget(label("Показать, пока держишь", "title"))
+        col.addWidget(
+            label(
+                "Учёба: виден перевод реплики. Текст на весь экран: виден оригинал под переводом. "
+                "Ctrl и Shift тут нет: в новеллах они пропускают текст.",
+                "muted",
+                wrap=True,
+            )
+        )
+        self.peek_note = label("", "warn", wrap=True)
+        self.peek_note.hide()
+        col.addWidget(self.peek_note)
+        rl.addLayout(col, 1)
+        self.peek = QComboBox()
+        for code, (_vk, _raw, _short, title) in PEEK_KEYS.items():
+            self.peek.addItem(title, code)
+        self.peek.setCurrentIndex(max(0, self.peek.findData(self.ctl.settings.peek_key)))
+        self.peek.setMinimumWidth(220)
+        self.peek.activated.connect(self._peek_changed)
+        rl.addWidget(self.peek, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.box_lay.addWidget(row)
         self._validate()
+
+    def _peek_changed(self) -> None:
+        self.ctl.settings.peek_key = self.peek.currentData() or "alt"
+        self._validate()
+        self.ctl.settings_changed()
 
     def cancel_capture(self) -> None:
         """Ушли с вкладки или закрыли окно посреди ввода клавиши: ввод прекратить, клавиши LexoPlay включить."""
@@ -819,9 +852,17 @@ class KeysPage(QWidget):
                     msg = f"Эта же клавиша стоит на «{HOTKEY_LABELS[others[0]][0]}»: оставь её только в одном месте."
             note.setText(msg or "")
             note.setVisible(bool(msg))
+        peek = self.ctl.settings.peek_key
+        clash = next((n for n, v in values if peek in MOUSE_PEEK and v.replace(" ", "").lower() == peek), None)
+        note = getattr(self, "peek_note", None)
+        if note is not None:
+            msg = f"Эта же кнопка стоит на «{HOTKEY_LABELS[clash][0]}»: выбери другую." if clash else ""
+            note.setText(msg)
+            note.setVisible(bool(msg))
 
     def _reset(self) -> None:
         self.ctl.settings.hotkeys = Hotkeys()
+        self.ctl.settings.peek_key = "alt"
         self.ctl.settings_changed()
         self._build()
 
@@ -1046,7 +1087,8 @@ class ViewPage(QWidget):
         stl.addWidget(
             setting_row(
                 "Читать по-английски самому",
-                "Перевод реплики спрятан, держи Alt, и он виден. Над окном диалога подсказки к тому, что на твоём "
+                f"Перевод реплики спрятан: держи {s.peek[2]} (меняется во вкладке «Клавиши»), и он виден. "
+                "Над окном диалога подсказки к тому, что на твоём "
                 "уровне трудно понять: чаще всего это выражения, а не отдельные слова. Встретилось несколько раз, "
                 "и вместо значения «?»: вспомни сам или наведи курсор. Выученное подсказок больше не получает. "
                 f"В игре включается клавишей {hk.study}. Подсказки пишет модель твоего ключа Anthropic (вкладка «Ещё»). "

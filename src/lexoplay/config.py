@@ -60,9 +60,23 @@ HOTKEY_LABELS = {
     "hide": ("Спрятать перевод", ""),
     "reselect": ("Выделить окно диалога заново", "Если перевод встал не туда, и поставить плашку перевода, куда удобно"),
     "explain": ("Разбор реплики", "Сленг, идиомы и трудные места реплики с объяснением, их можно сохранить в слова"),
-    "study": ("Учёба: вкл/выкл", "Читаешь по-английски сам: трудные места подсказаны над окном диалога, перевод под Alt"),
+    "study": ("Учёба: вкл/выкл", "Читаешь по-английски сам: трудные места подсказаны над окном диалога, перевод виден, пока держишь клавишу ниже"),
     "add_game": ("Добавить текущее окно как игру", "Работает в любой программе, поэтому по умолчанию выключено"),
 }
+
+# Клавиша «держать, чтобы увидеть»: в учёбе перевод реплики, в тексте на весь экран оригинал под переводом.
+# код -> (VK для GetAsyncKeyState, VK в Raw Input: её нажатие не «игрок пропустил реплику», коротко, в списке)
+# Ctrl и Shift нет: в новеллах они пропускают текст.
+PEEK_KEYS: dict[str, tuple[int, int, str, str]] = {
+    "alt": (0x12, 0x12, "Alt", "Alt"),
+    "ralt": (0xA5, 0x12, "Правый Alt", "Правый Alt"),
+    "tab": (0x09, 0x09, "Tab", "Tab"),
+    "`": (0xC0, 0xC0, "Ё", "` (Ё)"),
+    "mouse3": (0x04, 0x04, "Mouse3", "Средняя кнопка мыши"),
+    "mouse4": (0x05, 0x05, "Mouse4", "Боковая кнопка мыши (Mouse4)"),
+    "mouse5": (0x06, 0x06, "Mouse5", "Вторая боковая кнопка (Mouse5)"),
+}
+MOUSE_PEEK = {"mouse3", "mouse4", "mouse5"}
 
 SETTINGS_VERSION = 4
 
@@ -99,6 +113,7 @@ class Settings:
     study_mode: bool = False
     study_level: str = "b1"  # a2 | b1 | b2: уровень игрока, под него модель выбирает, что подсказать
     study_cards: bool = True  # учёба: забытое (открывал «?» после нескольких встреч) само уходит в карточки
+    peek_key: str = "alt"  # держать: в учёбе виден перевод, в тексте на весь экран оригинал (PEEK_KEYS)
     no_focus_games: list[str] = field(default_factory=list)  # свернулись, когда режим слов брал фокус: больше не берём
     hotkeys: Hotkeys = field(default_factory=Hotkeys)
     version: int = SETTINGS_VERSION
@@ -130,6 +145,10 @@ class Settings:
         if int(raw.get("version") or 1) < 4 and data.get("context_lines") == 8:
             data["context_lines"] = 12  # 0.4: больше контекста, перевод ровнее
         return cls(**data, hotkeys=hk)
+
+    @property
+    def peek(self) -> tuple[int, int, str, str]:
+        return PEEK_KEYS.get(self.peek_key, PEEK_KEYS["alt"])
 
     def save(self) -> None:
         self.path().write_text(json.dumps(asdict(self), ensure_ascii=False, indent=2), encoding="utf-8")

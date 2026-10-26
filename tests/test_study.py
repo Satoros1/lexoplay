@@ -286,3 +286,33 @@ def test_overlay_hides_translation_and_shows_hint_row(qapp):
     ov.grab()  # рисуется без ошибок
     ov.hide_strip()
     assert ov.hints == () and not ov.study_open
+
+
+def test_peek_key_is_configurable_and_unknown_value_falls_back_to_alt():
+    from lexoplay.config import PEEK_KEYS, Settings
+
+    s = Settings()
+    assert s.peek[2] == "Alt"
+    s.peek_key = "mouse4"
+    assert s.peek[:2] == (0x05, 0x05)
+    s.peek_key = "nonsense"
+    assert s.peek == PEEK_KEYS["alt"]
+    assert "ctrl" not in PEEK_KEYS and "shift" not in PEEK_KEYS  # в новеллах пропускают текст
+
+
+def test_open_translation_stays_open_over_its_hints_and_label_follows_key(qapp):
+    from lexoplay.ui.overlay import HintView, Overlay
+
+    ov = Overlay()
+    ov.fade = False
+    ov.resize(1280, 800)
+    ov.set_display_rect(Rect(0, 0, 1280, 800))
+    ov.peek_name = "Mouse4"
+    assert ov.study_label == "Mouse4 · перевод"
+    ov.study_hide = True
+    ov.show_text(Rect(0.08, 0.72, 0.84, 0.22), "Перевод реплики.")
+    ov.show_hints([HintView((Rect(0.3, 0.84, 0.08, 0.04),), "persuade", "убедить", "test")])
+    ov.set_study_open(True)
+    _box, _f, _t, _s, _o, row = ov._strip_geometry(ov._shown())
+    c = row.chips[0].rect.center()
+    assert ov.hover(c.x() / 1280, c.y() / 800) == (0, True)  # подсказка на открытой плашке не закрывает перевод

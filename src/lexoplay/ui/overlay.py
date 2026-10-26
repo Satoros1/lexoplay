@@ -63,7 +63,7 @@ class _RecallRow:
 
 
 RECALL_LABEL = "уже сохранял"
-STUDY_HINT = "Alt · перевод"  # учёба: перевод спрятан, виден по Alt или наведению
+STUDY_HINT = "{key} · перевод"  # учёба: перевод спрятан, виден, пока держат клавишу (peek_name) или навели
 PAGE_FADE_S = 0.18  # новый перевод абзаца проявляется за столько
 PAGE_MIN_PX = 12.0
 PAGE_SAME_SIZE = 0.8  # общий кегль страницы не мельче стольких от кегля игры
@@ -168,6 +168,7 @@ class Overlay(QWidget):
         # учёба: подсказки к трудным местам, перевод спрятан, пока не держат Alt и не наводят на плашку
         self._hints: tuple[HintView, ...] = ()
         self.study_hide = False
+        self.peek_name = "Alt"  # клавиша «держать, чтобы увидеть» (настройка peek_key)
         self._study_open = False
         self.winId()  # создать нативное окно заранее
         if on_native:
@@ -279,31 +280,40 @@ class Overlay(QWidget):
     def study_open(self) -> bool:
         return self._study_open
 
-    def hover(self, nx: float, ny: float, margin: float = 6.0) -> tuple[int | None, bool]:
-        """Учёба: что под курсором (в долях окна игры). (номер подсказки или None, показать ли перевод).
+    @property
+    def study_label(self) -> str:
+        return STUDY_HINT.format(key=self.peek_name)
 
-        Подсказка: её «часть · ?» над окном диалога или подчёркнутое место в тексте игры. Перевод: плашка
-        вне подсказок, а пока перевод открыт, вся открытая плашка."""
+    def hover(self, nx: float, ny: float, margin: float = 6.0) -> tuple[int | None, bool]:
+        """Учёба: что под курсором (в долях окна игры). (номер подсказки или None, на плашке ли перевода).
+
+        Подсказка: её «часть · ?» над окном диалога или подчёркнутое место в тексте игры. Плашка: пока перевод
+        спрятан, место вне подсказок; пока открыт, вся открытая плашка (и подсказки на ней) и место спрятанной."""
         if not self.strip_visible:
             return None, False
         w, h = float(self.width()), float(self.height())
         x, y = nx * w, ny * h
         state = self._shown()
         box, _f, _t, _s, _o, row = self._strip_geometry(state)
+        index: int | None = None
         if row is not None:
-            for c in row.chips:
-                if c.index >= 0 and c.rect.adjusted(-2, -2, 2, 2).contains(x, y):
-                    return c.index, False
-        for i, hint in enumerate(self._hints):
-            for r in hint.words:
-                rr = denormalize(r, Rect(0, 0, w, h))
-                if QRectF(rr.x - 2, rr.y - 2, rr.w + 4, rr.h + 6).contains(x, y):
-                    return i, False
+            index = next((c.index for c in row.chips if c.index >= 0 and c.rect.adjusted(-2, -2, 2, 2).contains(x, y)), None)
+        if index is None:
+            for i, hint in enumerate(self._hints):
+                for r in hint.words:
+                    rr = denormalize(r, Rect(0, 0, w, h))
+                    if QRectF(rr.x - 2, rr.y - 2, rr.w + 4, rr.h + 6).contains(x, y):
+                        index = i
+                        break
+                if index is not None:
+                    break
         rects = [box]
-        if self.study_hide and not state.hidden:  # перевод открыт: и место спрятанной плашки тоже держит его
+        if self.study_hide and not state.hidden:  # перевод открыт: место спрятанной плашки тоже держит его
             rects.append(self._strip_geometry(replace(state, hidden=True))[0])
         over = any(r.adjusted(-margin, -margin, margin, margin).contains(x, y) for r in rects)
-        return None, over
+        if state.hidden and index is not None:
+            over = False  # на подсказке спрятанной плашки: открыть её значение, а не весь перевод
+        return index, over
 
     def strip_hit(self, nx: float, ny: float, margin: float = 6.0) -> bool:
         """Курсор на плашке перевода (для учёбы см. hover)."""
@@ -647,7 +657,7 @@ class Overlay(QWidget):
         font.setWeight(QFont.Weight.Medium)
         fm = QFontMetricsF(font)
         busy = strip_state.text is None
-        label_w = size * 2.6 if busy else fm.horizontalAdvance(STUDY_HINT)
+        label_w = size * 2.6 if busy else fm.horizontalAdvance(self.study_label)
         pad_x, pad_y = size * 0.9, size * 0.5
         family = self.font_family or FONT_FAMILY
         items = self._hint_items(strip_state, all_open=False)
@@ -772,7 +782,7 @@ class Overlay(QWidget):
             else:
                 p.setFont(font)
                 p.setPen(TEXT_MUTED)
-                p.drawText(text_rect, int(Qt.AlignmentFlag.AlignCenter), STUDY_HINT)
+                p.drawText(text_rect, int(Qt.AlignmentFlag.AlignCenter), self.study_label)
             p.setClipping(False)
             return
         original = self._original_shown(strip)
