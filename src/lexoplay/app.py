@@ -1862,8 +1862,8 @@ class App(QObject):
         region = game.region
         exe, title, session_id = game.exe, game.title, session.id
 
-        def study_seen(text: str, ocr: OcrResult, plan: StudyPlan, items: list[tuple[str, str]] | None, t: int = token) -> None:
-            self.bridge.call.emit(lambda: self._study_seen(t, exe, title, session_id, text, ocr, plan, items))
+        def study_seen(text: str, ocr: OcrResult, plan: StudyPlan, t: int = token) -> None:
+            self.bridge.call.emit(lambda: self._study_seen(t, exe, title, session_id, text, ocr, plan))
 
         self._busy_source = None
         self._busy_recall = []
@@ -2153,30 +2153,23 @@ class App(QObject):
         return make
 
     def _study_seen(
-        self,
-        token: int,
-        exe: str,
-        title: str,
-        session_id: str,
-        text: str,
-        ocr: OcrResult,
-        plan: StudyPlan,
-        items: list[tuple[str, str]] | None,
+        self, token: int, exe: str, title: str, session_id: str, text: str, ocr: OcrResult, plan: StudyPlan
     ) -> None:
-        """Из пайплайна: реплика прочитана (items None) или модель написала подсказки (раньше перевода)."""
+        """Из пайплайна: реплика прочитана, перевод только начался. Свои подсказки сразу, подсказки модели
+        отдельным быстрым запросом параллельно переводу (или из прошлого раза)."""
         if token != self.token or not self.overlay.study_hide:
             return
         sh = self._study
         if sh is None or sh.text != text or sh.exe != exe:
             sh = self._study_begin(exe, title, session_id, text, ocr, plan)
-        if items is not None:
-            self._study_hints_in(sh, items, save=True)
+        self._study_ask(sh)
 
     def _study_begin(self, exe: str, title: str, session_id: str, text: str, ocr: OcrResult, plan: StudyPlan) -> Shown:
         self._study_commit()
         sh = Shown(
             exe, text, tuple(w.text for w in ocr.words), tuple(w.rect for w in ocr.words), time.monotonic(),
-            hints=list(plan.hints), room=plan.room, known=plan.known, title=title, session_id=session_id,
+            hints=list(plan.hints), room=plan.room, known=plan.known, base=list(plan.hints),
+            title=title, session_id=session_id,
         )  # fmt: skip
         self._study = sh
         self._study_close_at = 0.0
@@ -2188,13 +2181,49 @@ class App(QObject):
         self._study_timer.start()
         return sh
 
-    def _study_hints_in(self, sh: Shown, items: list[tuple[str, str]], *, save: bool) -> None:
-        """Подсказки модели к реплике: к словам на экране и в общий список (свои учимые первыми)."""
+    def _study_ask(self, sh: Shown, *, speaker: str | None = None, translation: str | None = None) -> None:
+        """Подсказки модели к реплике: из прошлого раза или запросом без раздумий, потоком (по одной)."""
+        if sh.asked or sh.pending:
+            return
+        try:
+            stored = self.store.study_hints_get(sh.exe, self.settings.target_lang, normalize_text(sh.text))
+        except Exception:
+            log.exception("учёба: сохранённые подсказки недоступны")
+            stored = None
+        if stored is not None:
+            self._study_hints_in(sh, stored, final=True)
+            return
+        tr = self._gloss_translator()
+        if tr is None:
+            return
+        sh.pending = True
+
+        def items(found: list[tuple[str, str]]) -> None:  # из фонового потока: ещё одно место дописано
+            self.bridge.call.emit(lambda: self._study_hints_in(sh, list(found), final=False))
+
+        coro = tr.hints(
+            sh.text,
+            game=sh.title,
+            speaker=speaker,
+            translation=translation,
+            level=self._study_level_name(),
+            room=sh.room,
+            known=tuple(dict.fromkeys([*sh.known, *(h.text for h in sh.base)])),
+            source_lang=self.settings.source_lang,
+            target_lang=self.settings.target_lang,
+            on_items=items,
+        )
+        fut = self.bg.submit(coro)
+        fut.add_done_callback(lambda f, sh=sh: self.bridge.call.emit(lambda: self._study_fetched(sh, f)))
+
+    def _study_hints_in(self, sh: Shown, items: list[tuple[str, str]], *, final: bool, save: bool = False) -> None:
+        """Подсказки модели к реплике (часть или все): к словам на экране, свои учимые первыми."""
         if sh.asked:
             return
-        sh.asked = True
-        new = model_hints(sh.words, items, state=self.study.get, have=sh.hints, room=sh.room)
-        sh.hints = merge(sh.hints, new)
+        new = model_hints(sh.words, items, state=self.study.get, have=sh.base, room=sh.room)
+        sh.hints = merge(sh.base, new)
+        if final:
+            sh.asked, sh.pending = True, False
         if save:
             try:
                 self.store.study_hints_set(sh.exe, self.settings.target_lang, normalize_text(sh.text), list(items))
@@ -2218,53 +2247,24 @@ class App(QObject):
         self.overlay.show_hints(views)
 
     def _study_finish(self, out: F2Outcome, game: Game, text: str, translation: str, speaker: str | None) -> None:
-        """Перевод пришёл. Подсказок модели нет (перевод из истории или с сервера Lexo): из прошлого раза
-        или отдельным маленьким запросом."""
+        """Перевод пришёл (подсказки модели к этому времени обычно уже на экране: их запрос быстрее)."""
         assert out.ocr is not None
         sh = self._study
         if sh is None or sh.text != text or sh.exe != game.exe:
             session = self.sessions.touch(game.exe, game.title)
             sh = self._study_begin(game.exe, game.title, session.id, text, out.ocr, out.study or StudyPlan())
         sh.translation = translation
-        if out.hints is not None:
-            self._study_hints_in(sh, list(out.hints), save=True)
-        if sh.asked:
-            return
-        norm = normalize_text(text)
-        try:
-            stored = self.store.study_hints_get(game.exe, self.settings.target_lang, norm)
-        except Exception:
-            log.exception("учёба: сохранённые подсказки недоступны")
-            stored = None
-        if stored is not None:
-            self._study_hints_in(sh, stored, save=False)
-            return
-        tr = self._gloss_translator()
-        if tr is None:
-            return
-        known = tuple(dict.fromkeys([*sh.known, *(h.text for h in sh.hints)]))
-        coro = tr.hints(
-            text,
-            game=game.title,
-            speaker=speaker,
-            translation=translation,
-            level=self._study_level_name(),
-            room=sh.room,
-            known=known,
-            source_lang=self.settings.source_lang,
-            target_lang=self.settings.target_lang,
-        )
-        fut = self.bg.submit(coro)
-        fut.add_done_callback(lambda f, sh=sh: self.bridge.call.emit(lambda: self._study_fetched(sh, f)))
+        self._study_ask(sh, speaker=speaker, translation=translation)
 
     def _study_fetched(self, sh: Shown, fut: concurrent.futures.Future) -> None:
+        sh.pending = False
         try:
             items, usage = fut.result()
         except Exception as exc:
             log.warning("учёба: подсказки не пришли: %s", exc)
             return
         self.own_usage.add("hints", usage, self.settings.model)
-        self._study_hints_in(sh, items, save=True)
+        self._study_hints_in(sh, items, final=True, save=True)
 
     def _gloss_translator(self) -> AnthropicTranslator | None:
         """Значения слов пишет модель своего ключа, даже если перевод идёт через Lexo."""

@@ -1029,17 +1029,25 @@ def _study_flow(out_dir: Path) -> Callable[[], tuple[str, object]]:
         frame = _dialog_frame(lines)
         reqs: list[object] = []
 
-        class FakeTranslator:  # как свой ключ: подсказки приходят раньше перевода
+        class FakeTranslator:  # перевод с раздумьями: долго
             async def translate(self, req):  # type: ignore[no-untyped-def]
+                import asyncio
+
                 reqs.append(req)
-                items = [("tampered with the evidence", "подделал улики"), ("culprit", "преступник")] if req.study else None
-                if req.on_hints and items is not None:
-                    req.on_hints(items)
-                return TranslateResult(
-                    source=req.text,
-                    translation="Преступник подделал улики. Это явно ошибка, Макото.",
-                    hints=tuple(items) if items is not None else None,
-                )
+                await asyncio.sleep(1.5)
+                return TranslateResult(source=req.text, translation="Преступник подделал улики. Это явно ошибка, Макото.")
+
+        hint_calls: list[dict] = []
+
+        class FakeHinter:  # подсказки своим быстрым запросом, по одной
+            async def hints(self, text, **kw):  # type: ignore[no-untyped-def]
+                import asyncio
+
+                hint_calls.append(kw)
+                items = [("tampered with the evidence", "подделал улики"), ("culprit", "преступник")]
+                await asyncio.sleep(0.1)
+                kw["on_items"](items[:1])
+                return items, (300, 30)
 
         def pump(cond: Callable[[], bool], seconds: float = 20.0) -> bool:
             end = time.time() + seconds
@@ -1067,6 +1075,8 @@ def _study_flow(out_dir: Path) -> Callable[[], tuple[str, object]]:
             app.start()
             app.events.foreground.disconnect(app._on_foreground)
             app.translator = FakeTranslator()  # type: ignore[assignment]
+            hinter = FakeHinter()
+            app._gloss_translator = lambda: hinter  # type: ignore[method-assign]
             app.pipelines.clear()
             app.display = Rect(60, 60, 1000, 700)
             app.active = Active(0, os.getpid(), game.exe)
@@ -1077,11 +1087,14 @@ def _study_flow(out_dir: Path) -> Callable[[], tuple[str, object]]:
             app.overlay.set_display_rect(app.display)
             frame.save(out_dir / "study-frame.png")
             app.f2()
+            # подсказки на экране, пока перевод ещё думает
+            info["hints_first"] = pump(lambda: len(app.overlay.hints) == 2, 10) and app.state == "busy"
             info["shown"] = pump(lambda: app.state == "idle" and app.overlay.text is not None and len(app.overlay.hints) == 2)
             info["hidden"] = app.overlay.study_hide and not app.overlay.study_open
             info["hints"] = [(h.kind, h.text, h.value()) for h in app.overlay.hints]
             info["underlined"] = [len(h.words) for h in app.overlay.hints]
-            info["known_sent"] = list(getattr(reqs[0], "study_known", ())) if reqs else None
+            info["known_sent"] = list(hint_calls[0].get("known", ())) if hint_calls else None
+            info["hint_calls"] = len(hint_calls)
             pill = app.overlay.strip_rect()
             for _ in range(5):
                 app_q.processEvents()
@@ -1129,6 +1142,8 @@ def _study_flow(out_dir: Path) -> Callable[[], tuple[str, object]]:
         ok = (
             info.get("shown")
             and info.get("hidden")
+            and info.get("hints_first")
+            and info.get("hint_calls") == 1
             and info.get("hints") == [("test", "culprit", "?"), ("new", "tampered with the evidence", "подделал улики")]
             and all(info.get("underlined") or [0])
             and "culprit" in (info.get("known_sent") or [])

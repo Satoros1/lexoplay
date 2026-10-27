@@ -139,28 +139,73 @@ def test_hint_line_is_parsed_and_never_shown_as_translation():
     assert split_hints("#1 в рейтинге")[0] == "#1 в рейтинге"
 
 
-def test_study_request_asks_for_hints_and_close_translation_without_touching_the_cached_system_part():
+def test_study_request_asks_for_close_translation_without_touching_the_cached_system_part():
     plain = TranslateRequest(LINE, "Kyoko", "DR")
-    studying = TranslateRequest(LINE, "Kyoko", "DR", study=True, study_level="B1", study_known=("persuade",), study_room=2)
+    studying = TranslateRequest(LINE, "Kyoko", "DR", study=True, study_level="B1")
     assert "<study" not in build_user(plain)
-    assert build_user(studying).endswith('<study level="B1" max="2">known: persuade</study>')
+    assert build_user(studying).endswith('<study level="B1"/>')
     assert build_system(plain) == build_system(studying)  # системная часть та же: кеш промпта не сбрасывается
     system = build_system(plain)
-    assert "Prefer whole expressions" in system and "translate closely" in system
+    assert "translate closely" in system and "##" not in system  # подсказки идут своим быстрым запросом
     assert "keep every clause, qualifier and detail" in system  # и обычный перевод без сокращений
 
 
+class _FakeStream:
+    def __init__(self, chunks):
+        self.chunks = chunks
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+    @property
+    def text_stream(self):
+        async def gen():
+            for c in self.chunks:
+                yield c
+
+        return gen()
+
+    async def get_final_message(self):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(usage=SimpleNamespace(input_tokens=300, output_tokens=30), content=[])
+
+
+def test_hints_request_is_fast_and_streams_parts_one_by_one():
+    pytest.importorskip("anthropic")
+    from lexoplay.translate import HINTS_MAX_TOKENS, AnthropicTranslator
+
+    tr = AnthropicTranslator("sk-test", "claude-haiku-5-5")
+    calls: dict = {}
+
+    def stream(**params):
+        calls.update(params)
+        return _FakeStream(["## the way things", " are right now = при нынешнем положении дел; no wa", "y to = никак не", "\n"])
+
+    tr._client.messages.stream = stream  # type: ignore[method-assign]
+    got: list[list] = []
+    items, usage = asyncio.run(
+        tr.hints(LINE, level="B1", room=2, known=("persuade",), on_items=lambda it: got.append(list(it)))
+    )
+    assert calls["thinking"] == {"type": "disabled"} and calls["max_tokens"] == HINTS_MAX_TOKENS  # без раздумий
+    assert "Prefer whole expressions" in calls["system"]
+    assert calls["messages"][0]["content"].endswith('<study level="B1" max="2">known: persuade</study>')
+    assert got[0] == [("the way things are right now", "при нынешнем положении дел")]  # первое место сразу
+    assert got[-1] == items == [("the way things are right now", "при нынешнем положении дел"), ("no way to", "никак не")]
+    assert usage == (300, 30)
+
+
 # ---------------------------------------------------------------- пайплайн
-class HintTranslator:
+class PlainTranslator:
     def __init__(self) -> None:
         self.requests: list[TranslateRequest] = []
 
     async def translate(self, req):
         self.requests.append(req)
-        items = [("the way things are right now", "при нынешнем положении дел")] if req.study else None
-        if req.on_hints and items is not None:
-            req.on_hints(items)
-        return TranslateResult(source=req.text, translation=f"RU:{req.text}", hints=tuple(items) if items else None)
+        return TranslateResult(source=req.text, translation=f"RU:{req.text}")
 
 
 def _ocr(text: str) -> OcrResult:
@@ -183,10 +228,10 @@ async def _direct(fn):
     return fn()
 
 
-def test_pipeline_passes_plan_and_hints():
+def test_pipeline_hands_plan_over_before_translating():
     from PIL import Image
 
-    tr = HintTranslator()
+    tr = PlainTranslator()
     p = Pipeline(_Ocr(_ocr(LINE)), tr, LineMemory(), sleep=_no_sleep, run_sync=_direct)
     seen: list[tuple] = []
     plan = study.StudyPlan(known=("persuade",), room=2)
@@ -195,14 +240,15 @@ def test_pipeline_passes_plan_and_hints():
     def grab():
         return Image.new("RGB", (400, 300), (250, 250, 250))
 
-    out = asyncio.run(p.run(grab, target, on_study=lambda text, ocr, pl, items: seen.append((pl, items))))
+    def on_study(text, ocr, pl):
+        seen.append((text, pl, len(tr.requests)))
+
+    out = asyncio.run(p.run(grab, target, on_study=on_study))
     assert out.kind == "translated" and out.study is plan
-    req = tr.requests[0]
-    assert req.study and req.study_known == ("persuade",) and req.study_room == 2
-    assert out.hints == (("the way things are right now", "при нынешнем положении дел"),)
-    assert seen[0] == (plan, None) and seen[1][1] == list(out.hints)  # сначала план, потом подсказки (до перевода)
-    again = asyncio.run(p.run(grab, target, on_study=lambda *a: seen.append(a)))
-    assert again.kind == "repeat" and again.study is plan and again.hints is None
+    assert seen == [(LINE, plan, 0)]  # план отдан раньше, чем ушёл запрос перевода
+    assert tr.requests[0].study and tr.requests[0].study_level == "B1"
+    again = asyncio.run(p.run(grab, target, on_study=on_study))
+    assert again.kind == "repeat" and again.study is plan and len(seen) == 2
     plain = asyncio.run(p.run(grab, Target("G", Rect(0.05, 0.75, 0.9, 0.2))))
     assert plain.study is None and len(tr.requests) == 1
 

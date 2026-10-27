@@ -77,10 +77,12 @@ class Shown:
     words: tuple[str, ...]  # слова OCR по порядку (для поиска мест от модели)
     rects: tuple[Rect, ...]  # их рамки в долях окна игры
     since: float  # time.monotonic(), когда показали
-    hints: list[Hint] = field(default_factory=list)
+    hints: list[Hint] = field(default_factory=list)  # что сейчас на экране: свои и от модели
     room: int = MAX_FROM_MODEL
     known: tuple[str, ...] = ()  # что модели не подсказывать (StudyPlan.known)
-    asked: bool = False  # подсказки модели уже есть (может быть, ни одной)
+    base: list[Hint] = field(default_factory=list)  # свои подсказки (StudyPlan.hints): к ним добавляются от модели
+    asked: bool = False  # подсказки модели пришли целиком (может быть, ни одной)
+    pending: bool = False  # запрос подсказок в пути
     revealed: set[str] = field(default_factory=set)  # ключи открытых наведением «?»
     peeked: bool = False  # подглядывал перевод реплики
     title: str = ""

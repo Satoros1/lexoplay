@@ -81,7 +81,6 @@ class F2Outcome:
     preview: Image.Image | None = None  # цветная обрезка окна диалога для окна LexoPlay
     usage: tuple[int, int] | None = None  # токены своего ключа: (вход, выход)
     study: StudyPlan | None = None  # учёба: свои подсказки к реплике (study.plan)
-    hints: tuple[tuple[str, str], ...] | None = None  # учёба: подсказки модели (место, значение); None: не писала
 
 
 PAGE_PARALLEL = 3  # столько абзацев страницы переводятся одновременно
@@ -355,12 +354,12 @@ class Pipeline:
         *,
         settle: float | None = None,
         on_source: Callable[[str], None] | None = None,
-        on_study: Callable[[str, OcrResult, StudyPlan, list[tuple[str, str]] | None], None] | None = None,
+        on_study: Callable[[str, OcrResult, StudyPlan], None] | None = None,
     ) -> F2Outcome:
         """settle: сколько ждать, пока текст допечатается (автоперевод ждёт дольше).
         on_source: реплика прочитана и уходит в перевод (оригинал можно показать сразу).
-        on_study: учёба (из фонового потока): (реплика, OCR, свои подсказки, None) сразу после OCR,
-        и (…, подсказки модели), как только модель их написала, ещё до перевода."""
+        on_study: учёба (из фонового потока): (реплика, OCR, свои подсказки) сразу после OCR, ещё до перевода:
+        подсказки модели приложение спрашивает отдельным быстрым запросом, пока идёт перевод."""
         t0 = time.perf_counter()
         # соединение с сервером перевода открываем сразу, пока идут захват и OCR
         warm = getattr(self.translator, "warm", None)
@@ -404,7 +403,7 @@ class Pipeline:
                 log.exception("учёба: свои подсказки не собрались")
         seen["study"] = plan
         if on_study is not None and plan is not None:
-            on_study(utt.text, result, plan, None)
+            on_study(utt.text, result, plan)
 
         known = self.memory.find(utt.text)
         if known is not None:
@@ -435,10 +434,7 @@ class Pipeline:
             notes=target.notes,
             study=plan is not None,
             study_level=target.study_level,
-            study_known=plan.known if plan is not None else (),
-            study_room=plan.room if plan is not None else 0,
             on_partial=on_partial,
-            on_hints=(lambda items: on_study(utt.text, result, plan, items)) if on_study is not None and plan is not None else None,
         )
         if on_source is not None:
             on_source(utt.text)
@@ -466,7 +462,7 @@ class Pipeline:
         if self.cache is not None and target.game_exe:
             self.cache.add(target.game_exe, self.target_lang, rec)
         timings["total"] = time.perf_counter() - t0
-        return F2Outcome("translated", record=rec, usage=getattr(res, "usage", None), hints=getattr(res, "hints", None), **seen)
+        return F2Outcome("translated", record=rec, usage=getattr(res, "usage", None), **seen)
 
     def _known(self, target: Target, text: str) -> tuple[LineRecord | None, bool]:
         """Перевод абзаца без запроса: (запись, из кеша на диске)."""

@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -70,13 +71,11 @@ Write the translation a professional {target} game localizer would ship:
 {examples}
 Reply with the translation of the line after "Translate this line". Then on a new line write "@@" and that line in {source} as the game really shows it: the OCR mistakes fixed, the same words and punctuation, normal capitalization, no speaker name. Nothing else: no quotes, no notes.
 Work out the garbled words silently, before you answer: the reply is shown to the player as is, so it never contains your reasoning, guesses about the OCR, corrections of yourself, alternatives or a second version: write the translation once, from start to end. If you can't be sure of a word, choose the most likely one and translate.
-When the request ends with <study>, the player is learning {source} at the level given there and reads the original first, so they need two more things from you.
-First, before the translation, write one line that starts with "##": the parts of this line such a learner most likely won't understand, the most important first, no more than the max given, as "## part = meaning; part = meaning". {study_rules} A line with nothing hard gets just "##".
-Second, translate closely: keep every part of the line and, where {target} allows, its order, so the player can match each phrase of the original with its translation. It still reads as natural {target}, but nothing is retold, merged or left out. Then the "@@" line as usual.
+When the request ends with <study>, the player is learning {source} and reads the original first, so translate closely: keep every part of the line and, where {target} allows, its order, so the player can match each phrase of the original with its translation. It still reads as natural {target}, but nothing is retold, merged or left out.
 Never use the em dash character; use a comma, a colon or a new sentence instead.{notes}"""
 
 SOURCE_MARK = "@@"
-HINT_MARK = "##"  # учёба (study.py): строка подсказок к трудным местам реплики, перед переводом
+HINT_MARK = "##"  # учёба (study.py): строка подсказок к трудным местам реплики (отдельный быстрый запрос)
 HINT_CHARS = 32
 HINTS_MAX_TOKENS = 300
 
@@ -89,7 +88,8 @@ STUDY_RULES = (
     "the game's own terms, what any learner of that level knows and every part listed as known."
 )
 
-# Подсказки к реплике, перевод которой уже есть (из истории или с сервера Lexo): маленький запрос без раздумий.
+# Подсказки к реплике: свой маленький запрос без раздумий, параллельно переводу. Перевод с раздумьями идёт
+# секунды, а подсказки нужны сразу, как только реплика на экране (перевод в учёбе всё равно спрятан).
 HINTS_PROMPT = """The player reads the video game "{game}" in {source} and is learning the language at the level given in <study>. They read the line in the original first.
 Pick the parts of the line such a learner most likely won't understand, the most important first, no more than the max given, and reply with one line only: "## part = meaning; part = meaning". {study_rules} If nothing in the line is hard, reply just "##". Never use the em dash character."""
 
@@ -211,16 +211,11 @@ class TranslateRequest:
     game_exe: str = ""
     previous: str | None = None  # «Перевести иначе»: прошлый перевод, который не понравился
     notes: str = ""  # справка по игре: герои, термины, тон (game_notes)
-    # учёба: игрок читает оригинал сам (уровень B1): модель подсказывает трудные места и переводит близко к тексту.
-    # study_known: места, которые он уже знает или учит; study_room: сколько новых подсказок можно
+    # учёба: игрок читает оригинал сам (уровень B1), перевод близко к тексту. Подсказки отдельным запросом (hints)
     study: bool = False
     study_level: str = "B1"
-    study_known: tuple[str, ...] = ()
-    study_room: int = 3
     # кусок перевода по мере того, как модель его пишет (из фонового потока)
     on_partial: Partial | None = field(default=None, compare=False, repr=False)
-    # учёба: подсказки, как только модель их написала, раньше перевода (из фонового потока)
-    on_hints: Callable[[list[tuple[str, str]]], None] | None = field(default=None, compare=False, repr=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -228,8 +223,6 @@ class TranslateResult:
     source: str
     translation: str
     usage: tuple[int, int] | None = None  # токены своего ключа (вход, выход): для счётчика расходов
-    # учёба: (место реплики, значение) по важности; None: модель строку подсказок не написала
-    hints: tuple[tuple[str, str], ...] | None = None
 
 
 class Translator(Protocol):
@@ -258,7 +251,6 @@ def build_system(req: TranslateRequest) -> str:
         game=(req.game or "unknown").replace('"', "'"),
         examples=examples_block(req.target_lang),
         notes=notes_block(req.notes) + glossary_block(req.glossary),
-        study_rules=STUDY_RULES.format(target=lang_name(req.target_lang)),
     )
 
 
@@ -300,7 +292,7 @@ def build_user(req: TranslateRequest) -> str:
     parts.append("Translate this line:")
     parts.append(_line(req.speaker, req.text))
     if req.study:
-        parts.append(study_tag(req.study_level, req.study_room, req.study_known))
+        parts.append(f'<study level="{_attr(req.study_level)}"/>')
     return "\n".join(parts)
 
 
@@ -811,30 +803,22 @@ class AnthropicTranslator:
         return clean_notes(text), usage_of(msg)
 
     async def warm(self) -> None:
-        """Открыть соединение заранее (TLS ~0.1–0.3 с), пока идёт захват и OCR."""
+        """Открыть соединения заранее (TLS ~0.1–0.3 с), пока идёт захват и OCR. Два: в учёбе подсказки
+        идут своим запросом одновременно с переводом, и второму не надо ждать рукопожатия."""
         if time.monotonic() - self._last_used < 20:
             return
         self._last_used = time.monotonic()
         try:
-            await self._client.models.list(limit=1)
+            await asyncio.gather(self._client.models.list(limit=1), self._client.models.list(limit=1))
         except Exception:
             log.debug("прогрев соединения не удался", exc_info=True)
 
     async def _stream(self, req: TranslateRequest) -> tuple[str, str | None, tuple[int, int] | None]:
         buf = ""
         shown = ""
-        hinted = not (req.study and req.on_hints)
         async with self._client.messages.stream(**self._params(req)) as stream:
             async for chunk in stream.text_stream:
                 buf += chunk
-                if not hinted:
-                    _rest, line, done = split_hints(buf)
-                    if line is not None and done:
-                        hinted = True
-                        try:
-                            req.on_hints(parse_hints(line))  # type: ignore[misc]
-                        except Exception:
-                            log.debug("on_hints упал", exc_info=True)
                 if req.on_partial:
                     part = clean_translation(buf, req.speaker, partial=True, target_lang=req.target_lang, source=req.text)
                     if part and part != shown:
@@ -877,9 +861,7 @@ class AnthropicTranslator:
             if translation:
                 learn_names(req.text, translation, req.target_lang)
                 source = pick_source(req.text, split_reply(raw)[1])
-                line = split_hints(raw)[1] if req.study else None
-                hints = tuple(parse_hints(line)) if line is not None else None
-                return TranslateResult(source=source, translation=translation, usage=usage, hints=hints)
+                return TranslateResult(source=source, translation=translation, usage=usage)
             if stop == "refusal":
                 raise TranslationError("Модель отказалась переводить эту реплику.")
             log.warning("пустой перевод: stop_reason=%s, ответ=%r", stop, raw[:200])
@@ -897,8 +879,10 @@ class AnthropicTranslator:
         known: tuple[str, ...] | list[str] = (),
         source_lang: str = "en",
         target_lang: str = "ru",
+        on_items: Callable[[list[tuple[str, str]]], None] | None = None,
     ) -> tuple[list[tuple[str, str]], tuple[int, int] | None]:
-        """Учёба: подсказки к реплике, перевод которой уже есть (из истории, с сервера): (места, токены)."""
+        """Учёба: подсказки к реплике (места, токены). Без раздумий и потоком: on_items получает готовые
+        места по одному, как только модель дописала каждое (из фонового потока)."""
         a = self._anthropic
         user = [_line(speaker, text)]
         if translation:
@@ -918,12 +902,28 @@ class AnthropicTranslator:
             params["output_config"] = {"effort": "low"}
         else:
             params["thinking"] = {"type": "disabled"}
+        buf, sent = "", 0
         for _attempt in range(2):
             try:
-                msg = await self._client.messages.create(**params)
+                async with self._client.messages.stream(**params) as stream:
+                    async for chunk in stream.text_stream:
+                        buf += chunk
+                        if on_items is None:
+                            continue
+                        done = "\n" in buf.lstrip()
+                        line = (split_hints(buf)[1] or buf.strip().split("\n", 1)[0]) if buf.strip() else ""
+                        segs = line.lstrip("#").split(";")
+                        ready = parse_hints("## " + ";".join(segs if done else segs[:-1]))
+                        if len(ready) > sent:
+                            sent = len(ready)
+                            try:
+                                on_items(ready)
+                            except Exception:
+                                log.debug("on_items упал", exc_info=True)
+                    final = await stream.get_final_message()
                 break
             except a.BadRequestError as exc:
-                if "thinking" in params and "thinking" in str(exc).lower():
+                if "thinking" in params and "thinking" in str(exc).lower() and not buf:
                     params.pop("thinking")
                     params["output_config"] = {"effort": "low"}
                     params["max_tokens"] = MAX_TOKENS
@@ -934,11 +934,10 @@ class AnthropicTranslator:
         else:
             raise TranslationError("Модель не приняла запрос подсказок.")
         self._last_used = time.monotonic()
-        raw = "".join(getattr(b, "text", "") for b in msg.content if getattr(b, "type", "") == "text")
-        line = split_hints(raw)[1]
-        if line is None and raw.strip():
-            line = raw.strip().splitlines()[0]
-        return parse_hints(line), usage_of(msg)
+        line = split_hints(buf)[1]
+        if line is None and buf.strip():
+            line = buf.strip().splitlines()[0]
+        return parse_hints(line), usage_of(final)
 
     async def translate_batch(
         self, reqs: list[TranslateRequest], on_partial: Callable[[int, str], None] | None = None
