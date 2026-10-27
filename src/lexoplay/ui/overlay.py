@@ -43,6 +43,32 @@ class _Strip:
     hints: tuple[HintView, ...] = ()  # учёба: трудные места реплики «часть · значение» (вместо recall)
 
 
+_Item = tuple[str, str, str, str, int, float]  # слово, перевод, «×3», вид, номер подсказки, прогресс
+RING_GAP = 0.38  # от кольца до слова, в кеглях
+
+
+def _ring_size(size: float) -> float:
+    return max(9.0, size * 0.8)
+
+
+def _paint_ring(p: QPainter, rect: QRectF, progress: float, color: QColor) -> None:
+    """Прогресс места до «знаю»: бледное кольцо и яркая дуга по часовой от верха.
+    Только встретилось: одно кольцо, почти запомнил: почти полное."""
+    thick = max(2.0, rect.width() * 0.21)
+    r = rect.adjusted(thick / 2, thick / 2, -thick / 2, -thick / 2)
+    track = QColor(color)
+    track.setAlphaF(0.22)
+    pen = QPen(track, thick)
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.setPen(pen)
+    p.drawEllipse(r)
+    if progress > 0:
+        arc = QPen(QColor(color), thick)
+        arc.setCapStyle(Qt.PenCapStyle.RoundCap)
+        p.setPen(arc)
+        p.drawArc(r, 90 * 16, -round(360 * 16 * min(1.0, progress)))
+
+
 @dataclass(frozen=True, slots=True)
 class _ChipBox:
     rect: QRectF
@@ -51,6 +77,7 @@ class _ChipBox:
     count: str  # «×3», если слово встречалось не первый раз
     kind: str = "saved"  # saved: жёлтая (твоё слово) | new, test: бирюзовая (учёба)
     index: int = -1  # учёба: номер подсказки
+    progress: float = -1.0  # учёба: насколько место близко к «знаю» (0..1), кольцо перед словом; -1 без кольца
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,6 +116,7 @@ class HintView:
     meaning: str
     kind: str  # new: значение видно | test: «?», вспомни сам | saved: твоё слово, жёлтый «?»
     open: bool = False  # «?» открыт наведением
+    progress: float = -1.0  # путь до «знаю»: 0 только встретилось, ближе к 1 почти запомнил; -1 не показывать
 
     def value(self, all_open: bool = False) -> str:
         return self.meaning if self.kind == "new" or self.open or all_open else "?"
@@ -653,15 +681,14 @@ class Overlay(QWidget):
     ) -> tuple[QRectF, QFont, QRectF, QFont, QRectF | None, _RecallRow | None]:
         """Учёба, перевод спрятан: над окном диалога подсказки «часть · значение» и клавиша «Alt перевод».
 
-        Ряд по центру окна диалога (как и текст в нём), каждая строка ряда центрируется отдельно,
-        клавиша стоит в конце последней строки и выровнена по середине подсказок.
-        Без подсказок только клавиша. Пока перевод в пути, вместо неё точки."""
+        Ряд от левого края окна диалога, как текст в нём: глазу не надо искать подсказки, они там, где
+        начинается реплика. Клавиша стоит в конце последней строки и выровнена по середине подсказок.
+        Без подсказок только клавиша. Пока перевод в пути, на её месте точки (место то же, плашка не прыгает)."""
         size = max(12.0, px * 0.74)
         font.setPixelSize(round(size))
         font.setWeight(QFont.Weight.Medium)
         fm = QFontMetricsF(font)
-        busy = strip_state.text is None
-        label_w = size * 2.6 if busy else self._study_label_width(font)
+        label_w = self._study_label_width(font)
         label_h = fm.height() * 1.25
         pad_x = pad_y = size * 0.5  # отступ со всех сторон один: подсказки-капсулы лежат в капсуле ровно
         family = self.font_family or FONT_FAMILY
@@ -669,7 +696,7 @@ class Overlay(QWidget):
         if not items:
             bw, bh = label_w + 2 * pad_x, label_h + 2 * pad_y
             strip = self._place(region, bh, px, w, h)
-            x = max(4.0, min(region.x + (region.w - bw) / 2, w - bw - 4))
+            x = max(4.0, min(region.x, w - bw - 4))
             box = QRectF(x, strip.y, bw, bh)
             return box, font, QRectF(x + pad_x, strip.y + pad_y, label_w, label_h), small, None, None
         label_w += size * 0.35  # у края капсулы слову «перевод» нужно чуть больше места, чем подсказке
@@ -694,14 +721,11 @@ class Overlay(QWidget):
         content_w = max(widths)
         bw, bh = content_w + 2 * pad_x, content_h + 2 * pad_y
         strip = self._place(region, bh, px, w, h)
-        x = max(4.0, min(region.x + (region.w - bw) / 2, w - bw - 4))
+        x = max(4.0, min(region.x, w - bw - 4))
         top = strip.y + pad_y
-        chips: list[_ChipBox] = []
-        for k, ln in enumerate(lines):
-            dx = x + pad_x + (content_w - widths[k]) / 2
-            chips.extend(replace(c, rect=c.rect.translated(dx, top)) for c in ln)
+        chips = [replace(c, rect=c.rect.translated(x + pad_x, top)) for c in row.chips]
         label_top = top + (ys[label_line] if label_line < len(ys) else content_h - chip_h)
-        label_left = x + pad_x + (content_w - widths[label_line]) / 2 + label_x
+        label_left = x + pad_x + label_x
         row = _RecallRow(None, tuple(chips), row.font, row.bold, row.height)
         label_rect = QRectF(label_left, label_top + (chip_h - label_h) / 2, label_w, label_h)
         return QRectF(x, strip.y, bw, bh), font, label_rect, small, None, row
@@ -748,18 +772,16 @@ class Overlay(QWidget):
         )
 
     @staticmethod
-    def _recall_items(strip_state: _Strip) -> list[tuple[str, str, str, str, int]]:
-        return [(c.word, c.translation, f"×{c.seen}" if c.seen >= 2 else "", "saved", -1) for c in strip_state.recall]
+    def _recall_items(strip_state: _Strip) -> list[_Item]:
+        return [(c.word, c.translation, f"×{c.seen}" if c.seen >= 2 else "", "saved", -1, -1.0) for c in strip_state.recall]
 
-    def _hint_items(self, strip_state: _Strip, *, all_open: bool) -> list[tuple[str, str, str, str, int]]:
-        return [(hv.text, hv.value(all_open), "", hv.kind, i) for i, hv in enumerate(strip_state.hints)]
+    def _hint_items(self, strip_state: _Strip, *, all_open: bool) -> list[_Item]:
+        return [(hv.text, hv.value(all_open), "", hv.kind, i, hv.progress) for i, hv in enumerate(strip_state.hints)]
 
     @staticmethod
-    def _layout_chips(
-        items: list[tuple[str, str, str, str, int]], width: float, px: float, family: str, label: str | None
-    ) -> _RecallRow:
+    def _layout_chips(items: list[_Item], width: float, px: float, family: str, label: str | None) -> _RecallRow:
         """Подсказки «слово · перевод» в ряд (переносятся, если не влезают), от точки (0, 0).
-        items: (слово, перевод, «×3» или "", saved | new | test, номер подсказки учёбы)."""
+        items: (слово, перевод, «×3» или "", saved | new | test, номер подсказки учёбы, прогресс или -1)."""
         size = max(12.0, px * 0.72)
         f = QFont(family)
         f.setPixelSize(round(size))
@@ -769,34 +791,38 @@ class Overlay(QWidget):
         h = fm.height() + size * 0.56
         pad, gap = size * 0.7, size * 0.5
 
-        def chip_w(word: str, tr: str, count: str) -> float:
+        ring = _ring_size(size)
+
+        def chip_w(word: str, tr: str, count: str, progress: float = -1.0) -> float:
             w = pad * 2 + fmb.horizontalAdvance(word)
+            if progress >= 0:
+                w += ring + size * RING_GAP - pad * 0.3  # кольцо ближе к краю: слева отступ меньше
             if tr:
                 w += fm.horizontalAdvance(" · " + tr)
             if count:
                 w += fm.horizontalAdvance("  " + count)
             return w
 
-        boxes: list[tuple[str, str, str, str, int, float]] = []
-        for word, tr, count, kind, index in items:
-            w = chip_w(word, tr, count)
+        boxes: list[tuple[str, str, str, str, int, float, float]] = []
+        for word, tr, count, kind, index, progress in items:
+            w = chip_w(word, tr, count, progress)
             if w > width and tr:  # длинный перевод: обрезаем его, слово оставляем целым
                 tr = fm.elidedText(tr, Qt.TextElideMode.ElideRight, max(0.0, fm.horizontalAdvance(tr) - (w - width)))
-                w = chip_w(word, tr, count)
-            boxes.append((word, tr, count, kind, index, min(w, width)))
+                w = chip_w(word, tr, count, progress)
+            boxes.append((word, tr, count, kind, index, progress, min(w, width)))
         label_box = None
         x = 0.0
         if label and boxes:
             label_w = fm.horizontalAdvance(label)
-            if label_w + gap + boxes[0][5] <= width:
+            if label_w + gap + boxes[0][6] <= width:
                 label_box = QRectF(0, 0, label_w, h)
                 x = label_w + gap
         y = 0.0
         out: list[_ChipBox] = []
-        for word, tr, count, kind, index, w in boxes:
+        for word, tr, count, kind, index, progress, w in boxes:
             if out and x + w > width:
                 x, y = 0.0, y + h + gap * 0.6
-            out.append(_ChipBox(QRectF(x, y, w, h), word, tr, count, kind, index))
+            out.append(_ChipBox(QRectF(x, y, w, h), word, tr, count, kind, index, progress))
             x += w + gap
         return _RecallRow(label_box, tuple(out), f, fb, y + h)
 
@@ -840,7 +866,7 @@ class Overlay(QWidget):
             if recall is not None:
                 self._paint_recall(p, recall)
             if strip.text is None:
-                self._paint_dots(p, text_rect, font)
+                self._paint_dots(p, text_rect, font, center=True)
             else:
                 self._paint_study_label(p, text_rect, font)
             p.setClipping(False)
@@ -881,8 +907,14 @@ class Overlay(QWidget):
             p.setPen(QPen(line, 1.0))
             p.setBrush(fill)
             p.drawRoundedRect(r.adjusted(0.5, 0.5, -0.5, -0.5), r.height() / 2, r.height() / 2)
-            pad = row.font.pixelSize() * 0.7
+            size = row.font.pixelSize()
+            pad = size * 0.7
             x = r.x() + pad
+            if c.progress >= 0:
+                x -= pad * 0.3
+                d = _ring_size(size)
+                _paint_ring(p, QRectF(x, r.center().y() - d / 2, d, d), c.progress, color)
+                x += d + size * RING_GAP
             p.setFont(row.bold)
             p.setPen(color)
             p.drawText(QRectF(x, r.y(), r.right() - x, r.height()), left, c.word)
@@ -973,12 +1005,13 @@ class Overlay(QWidget):
                 p.setPen(pen)
                 p.drawLine(QPointF(x1, y), QPointF(x2, y))
 
-    def _paint_dots(self, p: QPainter, text_rect: QRectF, font: QFont) -> None:
-        """Идёт перевод: три точки, яркая бежит слева направо."""
-        size = max(5.0, font.pixelSize() * 0.42)
+    def _paint_dots(self, p: QPainter, text_rect: QRectF, font: QFont, *, center: bool = False) -> None:
+        """Идёт перевод: три точки, яркая бежит слева направо. center: точки посередине места
+        (на месте «Alt перевод»), иначе с начала строки, где появится перевод."""
+        size = max(5.0, font.pixelSize() * 0.4)
         gap = size * 0.75
         cy = text_rect.center().y()
-        x = text_rect.x() + size * 0.2
+        x = text_rect.x() + (text_rect.width() - (3 * size + 2 * gap)) / 2 if center else text_rect.x() + size * 0.2
         p.setPen(Qt.PenStyle.NoPen)
         for i in range(3):
             c = QColor(TEXT if i == self._dots else TEXT_MUTED)

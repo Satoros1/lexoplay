@@ -324,6 +324,10 @@ def model_hints(
         if st is not None and st.state in ("known", "skip"):
             continue
         idx = locate(text, words, taken)
+        if words and not idx:
+            # на свободных словах места нет: оно внутри уже подсказанного («serious» в «I'm serious»), а
+            # подсказывать одно и то же дважды только путает, или его нет на экране вовсе
+            continue
         taken.update(idx)
         keys.add(key)
         out.append(Hint(idx, text.strip(), key, "test" if st is not None and st.state == "test" else "new", meaning, True))

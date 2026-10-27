@@ -410,3 +410,33 @@ def test_hint_meaning_must_be_in_learner_language():
     line = "## woulda = would have; factored in = учитывали"
     assert parse_hints(line, "ru") == [("factored in", "учитывали")]
     assert len(parse_hints(line)) == 2
+
+
+def test_model_hints_never_repeat_a_word_inside_another_place():
+    words = "I'm serious!".split()
+    got = study.model_hints(words, [("I'm serious", "я серьёзно"), ("serious", "серьёзный")])
+    assert [h.text for h in got] == ["I'm serious"]
+
+
+def test_study_strip_starts_at_dialog_left_and_keeps_place_while_busy(qapp=None):
+    from PySide6.QtWidgets import QApplication
+
+    from lexoplay.geometry import Rect
+    from lexoplay.ui.overlay import HintView, Overlay
+
+    _app = QApplication.instance() or QApplication([])
+    ov = Overlay()
+    ov.set_display_rect(Rect(0, 0, 1600, 900))
+    ov.resize(1600, 900)
+    ov.study_hide = True
+    region = Rect(0.1, 0.7, 0.8, 0.25)
+    hints = [HintView((Rect(0.2, 0.75, 0.1, 0.04),), "even if", "даже если", "new", False, 0.5)]
+    ov.show_busy(region)
+    ov.show_hints(hints)
+    busy = ov.strip_rect()
+    ov.show_text(region, "перевод")
+    ready = ov.strip_rect()
+    assert busy is not None and ready is not None
+    assert abs(ready.x - 160) < 1  # от левого края окна диалога, а не по центру
+    assert abs(busy.w - ready.w) < 1  # перевод пришёл: плашка не прыгает
+    ov.close()

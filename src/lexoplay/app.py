@@ -77,7 +77,17 @@ from lexoplay.recall import RecallChip, Recaller, RecallIndex
 from lexoplay.session import GameSession, Sessions
 from lexoplay.store import Game, GameNotes, SavedWord, Store, StoredLine, Task
 from lexoplay.study import LEVEL_NAMES as STUDY_LEVEL_NAMES
-from lexoplay.study import Hint, Shown, StudyBook, StudyPlan, merge, model_hints, underline_rects
+from lexoplay.study import (
+    PASSES_TO_KNOWN,
+    SEEN_TO_TEST,
+    Hint,
+    Shown,
+    StudyBook,
+    StudyPlan,
+    merge,
+    model_hints,
+    underline_rects,
+)
 from lexoplay.study import plan as study_plan
 from lexoplay.textproc import Paragraph, Utterance, page_text, paragraphs, strip_speaker, to_utterance
 from lexoplay.translate import (
@@ -2242,9 +2252,22 @@ class App(QObject):
                 if not h.meaning:
                     continue
                 rects = underline_rects(h.text, sh.words, sh.rects, h.words)
-                views.append(HintView(rects, h.text, h.meaning, h.kind, h.key in sh.revealed))
+                views.append(HintView(rects, h.text, h.meaning, h.kind, h.key in sh.revealed, self._study_progress(h)))
                 self._study_keys.append(h.key)
         self.overlay.show_hints(views)
+
+    def _study_progress(self, h: Hint) -> float:
+        """Насколько место близко к «знаю» (для кольца на подсказке): встречи со значением, потом «?»
+        без подглядывания. Сохранённые слова учатся в карточках: у них кольца нет."""
+        if h.kind == "saved":
+            return -1.0
+        st = self.study.get(h.key)
+        total = SEEN_TO_TEST + PASSES_TO_KNOWN
+        if st is None:
+            return 0.0
+        if st.state == "test":
+            return min(1.0, (SEEN_TO_TEST + st.passes) / total)
+        return min(1.0, st.seen / total)
 
     def _study_finish(self, out: F2Outcome, game: Game, text: str, translation: str, speaker: str | None) -> None:
         """Перевод пришёл (подсказки модели к этому времени обычно уже на экране: их запрос быстрее)."""
@@ -2350,6 +2373,10 @@ class App(QObject):
             changed, learned, counted, forgotten = self.study.commit(sh, shown_s=shown_s, now=time.time())
             self.store.study_put(changed)
             cards = self._study_cards(sh, forgotten) if forgotten else 0
+            if learned and not cards:
+                got = [w.key for w in changed if w.state == "known"]
+                names = [next((h.text for h in sh.hints if h.key == k), k) for k in got]
+                self.overlay.toast(f"Запомнил: {', '.join(names)} · всего {self.study.known_count()}", 2600)
             if counted or learned or cards:
                 self.store.study_day_add(
                     date.today().isoformat(),
