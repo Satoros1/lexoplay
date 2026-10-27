@@ -25,6 +25,7 @@ from lexoplay.dedupe import LineMemory, LineRecord, normalize_text, similarity
 from lexoplay.geometry import Rect
 from lexoplay.ocr_model import OcrResult
 from lexoplay.ocrfuse import fuse
+from lexoplay.ocrmend import mend
 from lexoplay.ocrscore import Quality, quality
 from lexoplay.preprocess import MODES, Prepared, changed, prepare, preview, thumbnail
 from lexoplay.textproc import Paragraph, Utterance, has_text, name_from, page_text, paragraphs, to_utterance
@@ -315,6 +316,7 @@ class Pipeline:
             if mode != first or added:
                 log.info("OCR: способы %s, выбран %s, добавлено слов из других: %s", reading.tried, mode, added)
             self._explored.append(bool(mode != first or added))
+        reading.result = mend(reading.result, self.source_lang)  # «masterm ind» -> «mastermind»
         if target.name_region is not None:
             name_res = await self._read(frame, target.name_region, reading.mode, slot=slot, tag="name")
             reading.name_text = name_from(name_res)

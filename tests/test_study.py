@@ -245,7 +245,7 @@ def test_pipeline_hands_plan_over_before_translating():
 
     out = asyncio.run(p.run(grab, target, on_study=on_study))
     assert out.kind == "translated" and out.study is plan
-    assert seen == [(LINE, plan, 0)]  # план отдан раньше, чем ушёл запрос перевода
+    assert seen == [(LINE.replace("m ind", "mind"), plan, 0)]  # разрезанное OCR слово склеено  # план отдан раньше, чем ушёл запрос перевода
     assert tr.requests[0].study and tr.requests[0].study_level == "B1"
     again = asyncio.run(p.run(grab, target, on_study=on_study))
     assert again.kind == "repeat" and again.study is plan and len(seen) == 2
@@ -385,3 +385,28 @@ def test_underline_rects_share_line_bottom():
     out = study.underline_rects("little scheme", words, rects, (2, 3))
     assert all(abs(r.bottom - 0.56) < 1e-9 for r in out)  # низ как у «particularly» с хвостом y
     assert out[1].w < rects[3].w  # точка после «scheme» без линии
+
+
+def test_mend_joins_words_cut_by_ocr():
+    from lexoplay.geometry import Rect
+    from lexoplay.ocr_model import Line, OcrResult, Word
+    from lexoplay.ocrmend import mend
+
+    def fix(s: str) -> str:
+        ws = [Word(x, Rect(i * 0.05, 0, 0.04, 0.05)) for i, x in enumerate(s.split())]
+        return mend(OcrResult((Line(tuple(ws)),))).raw_text
+
+    assert fix("the masterm ind took control of") == "the mastermind took control of"
+    assert fix("and demanded I become the ir tool.") == "and demanded I become their tool."
+    assert fix("Hina...com ing from you,") == "Hina...coming from you,"
+    assert fix("in to the woods a go") == "in to the woods a go"  # два обычных слова не трогаем
+    assert fix("You're late, she said") == "You're late, she said"
+    assert fix("Makoto Naegi is here") == "Makoto Naegi is here"
+
+
+def test_hint_meaning_must_be_in_learner_language():
+    from lexoplay.translate import parse_hints
+
+    line = "## woulda = would have; factored in = учитывали"
+    assert parse_hints(line, "ru") == [("factored in", "учитывали")]
+    assert len(parse_hints(line)) == 2

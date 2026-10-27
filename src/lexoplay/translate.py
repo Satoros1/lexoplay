@@ -85,7 +85,9 @@ STUDY_RULES = (
     "from their words (idioms, phrasal verbs, set phrases and patterns such as \"figure out\", \"no way to\", "
     "\"as it turns out\", \"make up one's mind\") over single words, and take a single word only if it is rare; never explain one word of "
     "an expression on its own. The meaning is a short {target} rendering that fits this line, 1-5 words. Skip names, "
-    "the game's own terms, what any learner of that level knows and every part listed as known."
+    "the game's own terms, what any learner of that level knows and every part listed as known. The meaning is always "
+    "in {target}, never an {source_name} paraphrase: for slang and spoken forms (\"woulda\", \"gonna\", \"y'all\") give "
+    "the {target} meaning too, not the full {source_name} form."
 )
 
 # Подсказки к реплике: свой маленький запрос без раздумий, параллельно переводу. Перевод с раздумьями идёт
@@ -324,10 +326,22 @@ def short_hint(text: str) -> str:
     return t
 
 
-def parse_hints(line: str | None) -> list[tuple[str, str]]:
+_CYRILLIC_LANGS = frozenset({"ru", "uk", "be", "bg", "sr", "mk", "kk"})
+
+
+def _in_script(meaning: str, target_lang: str | None) -> bool:
+    """Значение написано на языке ученика: для кириллических языков в нём есть кириллица.
+    «woulda = would have» ученику, который читает по-русски, ничего не даёт."""
+    if target_lang not in _CYRILLIC_LANGS:
+        return True
+    return any("\u0400" <= ch <= "\u04ff" for ch in meaning)
+
+
+def parse_hints(line: str | None, target_lang: str | None = None) -> list[tuple[str, str]]:
     """«## the way things are = при нынешнем положении дел; persuade = убедить» -> [(место, значение), ...] по порядку.
 
-    Пустая строка «##» (подсказывать нечего) -> []. Места без значения (« = -») не берём."""
+    Пустая строка «##» (подсказывать нечего) -> []. Места без значения (« = -») и со значением не на
+    языке ученика (target_lang) не берём."""
     if not line:
         return []
     body = line.strip().lstrip("#").strip()
@@ -338,7 +352,7 @@ def parse_hints(line: str | None) -> list[tuple[str, str]]:
             continue
         item = m.group(1).strip().strip(",.!? ").replace("’", "'")
         meaning = m.group(2).strip()
-        if not item or meaning.strip("\"'«»“” ") in ("-", "—", "–", ""):
+        if not item or meaning.strip("\"'«»“” ") in ("-", "—", "–", "") or not _in_script(meaning, target_lang):
             continue
         out.append((item, short_hint(meaning)))
     return out
@@ -894,7 +908,7 @@ class AnthropicTranslator:
             "system": HINTS_PROMPT.format(
                 game=(game or "unknown").replace('"', "'"),
                 source=lang_name(source_lang),
-                study_rules=STUDY_RULES.format(target=lang_name(target_lang)),
+                study_rules=STUDY_RULES.format(target=lang_name(target_lang), source_name=lang_name(source_lang)),
             ),
             "messages": [{"role": "user", "content": "\n".join(user)}],
         }
@@ -913,7 +927,7 @@ class AnthropicTranslator:
                         done = "\n" in buf.lstrip()
                         line = (split_hints(buf)[1] or buf.strip().split("\n", 1)[0]) if buf.strip() else ""
                         segs = line.lstrip("#").split(";")
-                        ready = parse_hints("## " + ";".join(segs if done else segs[:-1]))
+                        ready = parse_hints("## " + ";".join(segs if done else segs[:-1]), target_lang)
                         if len(ready) > sent:
                             sent = len(ready)
                             try:
@@ -937,7 +951,7 @@ class AnthropicTranslator:
         line = split_hints(buf)[1]
         if line is None and buf.strip():
             line = buf.strip().splitlines()[0]
-        return parse_hints(line), usage_of(final)
+        return parse_hints(line, target_lang), usage_of(final)
 
     async def translate_batch(
         self, reqs: list[TranslateRequest], on_partial: Callable[[int, str], None] | None = None
