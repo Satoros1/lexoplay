@@ -77,7 +77,7 @@ from lexoplay.recall import RecallChip, Recaller, RecallIndex
 from lexoplay.session import GameSession, Sessions
 from lexoplay.store import Game, GameNotes, SavedWord, Store, StoredLine, Task
 from lexoplay.study import LEVEL_NAMES as STUDY_LEVEL_NAMES
-from lexoplay.study import Hint, Shown, StudyBook, StudyPlan, merge, model_hints
+from lexoplay.study import Hint, Shown, StudyBook, StudyPlan, merge, model_hints, underline_rects
 from lexoplay.study import plan as study_plan
 from lexoplay.textproc import Paragraph, Utterance, page_text, paragraphs, strip_speaker, to_utterance
 from lexoplay.translate import (
@@ -2241,7 +2241,7 @@ class App(QObject):
             for h in sh.hints:
                 if not h.meaning:
                     continue
-                rects = tuple(sh.rects[i] for i in h.words if 0 <= i < len(sh.rects))
+                rects = underline_rects(h.text, sh.words, sh.rects, h.words)
                 views.append(HintView(rects, h.text, h.meaning, h.kind, h.key in sh.revealed))
                 self._study_keys.append(h.key)
         self.overlay.show_hints(views)

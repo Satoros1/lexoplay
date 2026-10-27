@@ -114,9 +114,30 @@ def _squash(text: str) -> str:
     return "".join(ch for ch in text.lower().replace("’", "'") if ch.isalnum())
 
 
+def _window(target: str, parts: list[str]) -> tuple[float, int, int] | None:
+    """Насколько окно слов OCR (parts, буквы без знаков) похоже на место, и какие его буквы [lo, hi) это место.
+
+    OCR мог разрезать слово не там («Hina...com» + «ing»): тогда крайнее слово окна совпадает только частью,
+    и похожесть считаем по этой части, а не по всему слову. Крайнее слово, от которого в месте меньше двух
+    букв, окну не нужно: такое окно не берём (возьмётся окно уже)."""
+    cand = "".join(parts)
+    if not cand or not parts[0] or not parts[-1]:
+        return None
+    blocks = [b for b in SequenceMatcher(None, target, cand, autojunk=False).get_matching_blocks() if b.size]
+    if not blocks:
+        return None
+    m = sum(b.size for b in blocks)
+    if len(parts) == 1:  # одно слово не режем: иначе «his» нашлось бы внутри «this»
+        return 2.0 * m / (len(target) + len(cand)), 0, len(cand)
+    lo, hi = blocks[0].b, blocks[-1].b + blocks[-1].size
+    if lo > len(parts[0]) - 2 or hi < len(cand) - len(parts[-1]) + 2:
+        return None
+    return 2.0 * m / (len(target) + hi - lo), lo, hi
+
+
 def locate(text: str, words: Sequence[str], taken: Iterable[int] = ()) -> tuple[int, ...]:
-    """Где в словах OCR место от модели. OCR мог разбить или склеить слово («m ind»), поэтому
-    сравниваем буквы подряд, а окно берём на слово-два шире и уже."""
+    """Где в словах OCR место от модели. OCR мог разбить или склеить слово («m ind», «Hina...com ing»),
+    поэтому сравниваем буквы подряд, а окно берём на слово-два шире и уже."""
     target = _squash(text)
     n = len(tokens(text)) or 1
     if not target:
@@ -130,13 +151,80 @@ def locate(text: str, words: Sequence[str], taken: Iterable[int] = ()) -> tuple[
             idx = tuple(range(i, i + size))
             if busy.intersection(idx):
                 continue
-            cand = _squash(" ".join(words[i : i + size]))
-            if not cand:
-                continue
-            r = SequenceMatcher(None, target, cand).ratio()
-            if r > best_r + 1e-9:
-                best_r, best = r, idx
+            got = _window(target, [_squash(words[j]) for j in idx])
+            if got is not None and got[0] > best_r + 1e-9:
+                best_r, best = got[0], idx
     return best if best_r >= MATCH_RATIO else ()
+
+
+_NARROW = set(".,;:!'’|il1()[]\"“”‘«»-")
+_WIDE = set("mwMW")
+
+
+def _width(text: str) -> float:
+    """Примерная ширина текста в «буквах»: точки и запятые узкие, m и w широкие, заглавные пошире."""
+    return sum(0.3 if ch in _NARROW else 1.45 if ch in _WIDE else 1.15 if ch.isupper() else 1.0 for ch in text)
+
+
+def spans(text: str, words: Sequence[str], idx: Sequence[int]) -> tuple[tuple[float, float], ...]:
+    """Какая часть каждого слова idx (доли ширины слева и справа) относится к месту text.
+
+    Знаки по краям места («you,», «scheme.», кавычки) и чужая часть разрезанного слова («Hina...» в
+    «Hina...com») под линию не попадают."""
+    parts = [_squash(words[j]) for j in idx]
+    target = _squash(text)
+    got = _window(target, parts) if target and parts else None
+    lo, hi = (got[1], got[2]) if got is not None else (0, sum(len(x) for x in parts))
+    out: list[tuple[float, float]] = []
+    at = 0
+    for j, part in zip(idx, parts, strict=True):
+        raw = words[j]
+        a0, a1 = max(0, lo - at), min(len(part), hi - at)
+        at += len(part)
+        alnum = [k for k, ch in enumerate(raw) if ch.isalnum()]
+        total = _width(raw)
+        if not alnum or a1 <= a0 or total <= 0:
+            out.append((0.0, 1.0))
+            continue
+        start, end = alnum[min(a0, len(alnum) - 1)], alnum[min(a1, len(alnum)) - 1] + 1
+        out.append((_width(raw[:start]) / total, _width(raw[:end]) / total))
+    return tuple(out)
+
+
+def underline_rects(text: str, words: Sequence[str], rects: Sequence[Rect], idx: Sequence[int]) -> tuple[Rect, ...]:
+    """Рамки под линию места: только его буквы, а низ у всех слов строки общий (под хвостами y, g, p),
+    чтобы линии в одной строке шли ровно, а не прыгали от слова к слову."""
+    idx = [i for i in idx if 0 <= i < len(rects) and i < len(words)]
+    if not idx:
+        return ()
+    bottoms = _line_bottoms(rects)
+    out: list[Rect] = []
+    for i, (a, b) in zip(idx, spans(text, words, idx), strict=True):
+        r = rects[i]
+        out.append(Rect(r.x + r.w * a, r.y, r.w * (b - a), bottoms[i] - r.y))
+    return tuple(out)
+
+
+def _line_bottoms(rects: Sequence[Rect]) -> list[float]:
+    """Низ строки текста для каждого слова: самый нижний низ слов, которые с ним в одной строке."""
+    order = sorted(range(len(rects)), key=lambda i: rects[i].y + rects[i].h / 2)
+    lines: list[list[int]] = []
+    for i in order:
+        r = rects[i]
+        if lines:
+            last = [rects[k] for k in lines[-1]]
+            top, bottom = min(q.y for q in last), max(q.bottom for q in last)
+            mid = r.y + r.h / 2
+            if top <= mid <= bottom:
+                lines[-1].append(i)
+                continue
+        lines.append([i])
+    out = [0.0] * len(rects)
+    for line in lines:
+        b = max(rects[k].bottom for k in line)
+        for k in line:
+            out[k] = b
+    return out
 
 
 def _joined(words: Sequence[str]) -> tuple[str, list[int]]:

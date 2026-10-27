@@ -63,7 +63,8 @@ class _RecallRow:
 
 
 RECALL_LABEL = "уже сохранял"
-STUDY_HINT = "{key} · перевод"  # учёба: перевод спрятан, виден, пока держат клавишу (peek_name) или навели
+STUDY_HINT = "{key} · перевод"
+STUDY_WORD = "перевод"  # рядом с клавишей peek_name в рамке  # учёба: перевод спрятан, виден, пока держат клавишу (peek_name) или навели
 PAGE_FADE_S = 0.18  # новый перевод абзаца проявляется за столько
 PAGE_MIN_PX = 12.0
 PAGE_SAME_SIZE = 0.8  # общий кегль страницы не мельче стольких от кегля игры
@@ -650,43 +651,101 @@ class Overlay(QWidget):
     def _hint_geometry(
         self, strip_state: _Strip, region: Rect, px: float, font: QFont, small: QFont, w: float, h: float
     ) -> tuple[QRectF, QFont, QRectF, QFont, QRectF | None, _RecallRow | None]:
-        """Учёба, перевод спрятан: на месте плашки подсказки «часть · значение» и «Alt · перевод» после них.
-        Без подсказок только «Alt · перевод» по центру. Пока перевод в пути, вместо надписи точки."""
+        """Учёба, перевод спрятан: над окном диалога подсказки «часть · значение» и клавиша «Alt перевод».
+
+        Ряд по центру окна диалога (как и текст в нём), каждая строка ряда центрируется отдельно,
+        клавиша стоит в конце последней строки и выровнена по середине подсказок.
+        Без подсказок только клавиша. Пока перевод в пути, вместо неё точки."""
         size = max(12.0, px * 0.74)
         font.setPixelSize(round(size))
         font.setWeight(QFont.Weight.Medium)
         fm = QFontMetricsF(font)
         busy = strip_state.text is None
-        label_w = size * 2.6 if busy else fm.horizontalAdvance(self.study_label)
-        pad_x, pad_y = size * 0.9, size * 0.5
+        label_w = size * 2.6 if busy else self._study_label_width(font)
+        label_h = fm.height() * 1.25
+        pad_x = pad_y = size * 0.5  # отступ со всех сторон один: подсказки-капсулы лежат в капсуле ровно
         family = self.font_family or FONT_FAMILY
         items = self._hint_items(strip_state, all_open=False)
         if not items:
-            bw, bh = label_w + 2 * pad_x, fm.height() + 2 * pad_y
+            bw, bh = label_w + 2 * pad_x, label_h + 2 * pad_y
             strip = self._place(region, bh, px, w, h)
             x = max(4.0, min(region.x + (region.w - bw) / 2, w - bw - 4))
             box = QRectF(x, strip.y, bw, bh)
-            return box, font, QRectF(x + pad_x, strip.y + pad_y, label_w, fm.height()), small, None, None
-        inner = max(120.0, region.w - 2 * pad_x)
+            return box, font, QRectF(x + pad_x, strip.y + pad_y, label_w, label_h), small, None, None
+        label_w += size * 0.35  # у края капсулы слову «перевод» нужно чуть больше места, чем подсказке
+        inner = max(120.0, min(region.w, w - 8) - 2 * pad_x)
         row = self._layout_chips(items, inner, px * 1.2, family, None)  # подсказки тут главное: крупнее, чем под переводом
-        gap = row.font.pixelSize() * 0.9
-        last_y = max((c.rect.y() for c in row.chips), default=0.0)
-        last_right = max((c.rect.right() for c in row.chips if c.rect.y() == last_y), default=0.0)
-        if last_right + gap + label_w <= inner:
-            lx, ly = last_right + gap, last_y
-            content_h = row.height
-        else:
-            lx, ly = 0.0, row.height + gap * 0.5
-            content_h = ly + row.chips[0].rect.height()
         chip_h = row.chips[0].rect.height()
-        content_w = max(max(c.rect.right() for c in row.chips), lx + label_w)
+        gap = row.font.pixelSize() * 0.9
+        ys = sorted({round(c.rect.y(), 2) for c in row.chips})
+        lines = [[c for c in row.chips if round(c.rect.y(), 2) == y] for y in ys]
+        last_right = max(c.rect.right() for c in lines[-1])
+        if last_right + gap + label_w <= inner:
+            label_line, label_x = len(lines) - 1, last_right + gap
+            content_h = row.height
+        else:  # клавиша своей строкой под подсказками
+            label_line, label_x = len(lines), 0.0
+            content_h = row.height + row.font.pixelSize() * 0.3 + chip_h
+        widths = [max(c.rect.right() for c in ln) for ln in lines]
+        if label_line < len(widths):
+            widths[label_line] = label_x + label_w
+        else:
+            widths.append(label_w)
+        content_w = max(widths)
         bw, bh = content_w + 2 * pad_x, content_h + 2 * pad_y
         strip = self._place(region, bh, px, w, h)
-        x = max(4.0, min(region.x, w - bw - 4))
-        dx, dy = x + pad_x, strip.y + pad_y
-        row = _RecallRow(None, tuple(replace(c, rect=c.rect.translated(dx, dy)) for c in row.chips), row.font, row.bold, row.height)
-        label_rect = QRectF(dx + lx, dy + ly + (chip_h - fm.height()) / 2, label_w, fm.height())
+        x = max(4.0, min(region.x + (region.w - bw) / 2, w - bw - 4))
+        top = strip.y + pad_y
+        chips: list[_ChipBox] = []
+        for k, ln in enumerate(lines):
+            dx = x + pad_x + (content_w - widths[k]) / 2
+            chips.extend(replace(c, rect=c.rect.translated(dx, top)) for c in ln)
+        label_top = top + (ys[label_line] if label_line < len(ys) else content_h - chip_h)
+        label_left = x + pad_x + (content_w - widths[label_line]) / 2 + label_x
+        row = _RecallRow(None, tuple(chips), row.font, row.bold, row.height)
+        label_rect = QRectF(label_left, label_top + (chip_h - label_h) / 2, label_w, label_h)
         return QRectF(x, strip.y, bw, bh), font, label_rect, small, None, row
+
+    def _study_label_parts(self, font: QFont) -> tuple[QFont, float, float, float]:
+        """Клавиша «Alt» и слово «перевод»: (шрифт клавиши, ширина клавиши, зазор, ширина слова)."""
+        key_font = QFont(font)
+        key_font.setPixelSize(max(9, round(font.pixelSize() * 0.82)))
+        key_font.setWeight(QFont.Weight.DemiBold)
+        kfm = QFontMetricsF(key_font)
+        key_w = kfm.horizontalAdvance(self.peek_name) + kfm.height() * 0.9
+        return key_font, key_w, font.pixelSize() * 0.4, QFontMetricsF(font).horizontalAdvance(STUDY_WORD)
+
+    def _study_label_width(self, font: QFont) -> float:
+        _kf, key_w, gap, word_w = self._study_label_parts(font)
+        return key_w + gap + word_w
+
+    def _paint_study_label(self, p: QPainter, rect: QRectF, font: QFont) -> None:
+        """«[Alt] перевод»: клавиша в рамке, как на клавиатуре, слово рядом приглушённое."""
+        key_font, key_w, gap, word_w = self._study_label_parts(font)
+        kfm = QFontMetricsF(key_font)
+        key_h = kfm.height() * 1.25
+        left = rect.x()
+        cy = rect.center().y()
+        key = QRectF(left, cy - key_h / 2, key_w, key_h)
+        line = QColor(TEXT_MUTED)
+        line.setAlphaF(0.55)
+        fill = QColor(TEXT)
+        fill.setAlphaF(0.07)
+        p.setPen(QPen(line, 1.0))
+        p.setBrush(fill)
+        r = min(6.0, key_h * 0.3)
+        p.drawRoundedRect(key.adjusted(0.5, 0.5, -0.5, -0.5), r, r)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.setFont(key_font)
+        p.setPen(TEXT)
+        p.drawText(key, int(Qt.AlignmentFlag.AlignCenter), self.peek_name)
+        p.setFont(font)
+        p.setPen(TEXT_MUTED)
+        p.drawText(
+            QRectF(key.right() + gap, rect.y(), word_w + 2, rect.height()),
+            int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+            STUDY_WORD,
+        )
 
     @staticmethod
     def _recall_items(strip_state: _Strip) -> list[tuple[str, str, str, str, int]]:
@@ -707,8 +766,8 @@ class Overlay(QWidget):
         fb = QFont(f)
         fb.setWeight(QFont.Weight.DemiBold)
         fm, fmb = QFontMetricsF(f), QFontMetricsF(fb)
-        h = fm.height() + size * 0.42
-        pad, gap = size * 0.62, size * 0.5
+        h = fm.height() + size * 0.56
+        pad, gap = size * 0.7, size * 0.5
 
         def chip_w(word: str, tr: str, count: str) -> float:
             w = pad * 2 + fmb.horizontalAdvance(word)
@@ -772,6 +831,9 @@ class Overlay(QWidget):
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(bg)
         radius = min(12.0, box.height() / 2)
+        if strip.hidden:  # учёба: скругление как у подсказок внутри плюс отступ, углы идут параллельно
+            first = recall.chips[0].rect if recall is not None and recall.chips else None
+            radius = box.height() / 2 if first is None else min(box.height() / 2, first.height() / 2 + first.y() - box.y())
         p.drawRoundedRect(box, radius, radius)
         p.setClipRect(box)  # пока плашка растёт, новая строка проявляется вместе с ней
         if strip.hidden:
@@ -780,9 +842,7 @@ class Overlay(QWidget):
             if strip.text is None:
                 self._paint_dots(p, text_rect, font)
             else:
-                p.setFont(font)
-                p.setPen(TEXT_MUTED)
-                p.drawText(text_rect, int(Qt.AlignmentFlag.AlignCenter), self.study_label)
+                self._paint_study_label(p, text_rect, font)
             p.setClipping(False)
             return
         original = self._original_shown(strip)
@@ -821,7 +881,7 @@ class Overlay(QWidget):
             p.setPen(QPen(line, 1.0))
             p.setBrush(fill)
             p.drawRoundedRect(r.adjusted(0.5, 0.5, -0.5, -0.5), r.height() / 2, r.height() / 2)
-            pad = row.font.pixelSize() * 0.62
+            pad = row.font.pixelSize() * 0.7
             x = r.x() + pad
             p.setFont(row.bold)
             p.setPen(color)
@@ -848,29 +908,70 @@ class Overlay(QWidget):
 
     def _paint_underlines(self, p: QPainter) -> None:
         """Учёба: трудные места подчёркнуты в тексте игры. Сплошная линия: значение видно над окном диалога;
-        пунктир: там «?». Бирюзовая: учёба, жёлтая: твоё слово."""
+        точки: там «?». Бирюзовая: учёба, жёлтая: твоё слово.
+
+        В одной строке текста все линии на одной высоте и одной толщины, соседние места разделены зазором,
+        концы скруглены: линия выглядит частью текста, а не наклейкой поверх."""
         w, h = float(self.width()), float(self.height())
         all_open = self._study_open
+        segs: list[tuple[float, float, float, float, QColor, bool]] = []  # x1, x2, низ, высота, цвет, сплошная
         for hint in self._hints:
             color = QColor(KNOWN) if hint.kind == "saved" else QColor(ACCENT)
             shown = hint.value(all_open) != "?"
-            color.setAlphaF(0.9 if shown else 0.7)
             # выражение подчёркнуто одной линией в каждой строке, а не словами по отдельности
             rows: list[list[Rect]] = []
             for r in sorted((denormalize(r, Rect(0, 0, w, h)) for r in hint.words), key=lambda r: (r.y, r.x)):
+                if r.w <= 0:
+                    continue
                 if rows and abs(rows[-1][-1].y + rows[-1][-1].h / 2 - (r.y + r.h / 2)) < r.h * 0.6:
                     rows[-1].append(r)
                 else:
                     rows.append([r])
             for row in rows:
-                x1, x2 = min(r.x for r in row), max(r.right for r in row)
-                bottom, rh = max(r.bottom for r in row), max(r.h for r in row)
-                pen = QPen(color, max(2.0, rh * 0.07))
+                segs.append(
+                    (min(r.x for r in row), max(r.right for r in row), max(r.bottom for r in row), max(r.h for r in row), color, shown)
+                )
+        if not segs:
+            return
+        # строки текста: отрезки, чьи низы рядом, получают общий низ и общую толщину
+        segs.sort(key=lambda s: (s[2], s[0]))
+        lines: list[list[tuple[float, float, float, float, QColor, bool]]] = []
+        for sg in segs:
+            if lines and abs(lines[-1][0][2] - sg[2]) < sg[3] * 0.45:
+                lines[-1].append(sg)
+            else:
+                lines.append([sg])
+        for line in lines:
+            line.sort(key=lambda s: s[0])
+            rh = sorted(s[3] for s in line)[len(line) // 2]
+            thick = max(2.0, min(5.0, rh * 0.075))
+            y = max(s[2] for s in line) + max(2.0, rh * 0.09) + thick / 2
+            gap = max(4.0, rh * 0.22)  # соседние места: видно, что это два места, а не одно
+            for k, (x1, x2, _b, _h, color, shown) in enumerate(line):
+                if k > 0 and x1 - line[k - 1][1] < gap:
+                    x1 = (x1 + line[k - 1][1]) / 2 + gap / 2
+                if k + 1 < len(line) and line[k + 1][0] - x2 < gap:
+                    x2 = (x2 + line[k + 1][0]) / 2 - gap / 2
+                x1, x2 = x1 + thick / 2, x2 - thick / 2  # круглые концы не вылезают за буквы
+                if x2 <= x1:
+                    continue
+                c = QColor(color)
+                c.setAlphaF(0.95 if shown else 0.85)
+                pen = QPen(c, thick)
+                pen.setCapStyle(Qt.PenCapStyle.RoundCap)
                 if not shown:
-                    pen.setStyle(Qt.PenStyle.DotLine)
+                    # ровные круглые точки: шаг подогнан, чтобы первая и последняя легли точно на края
+                    step = thick * 2.4
+                    n = max(1, round((x2 - x1) / step))
+                    p.setPen(Qt.PenStyle.NoPen)
+                    p.setBrush(c)
+                    for i in range(n + 1):
+                        cx = x1 + (x2 - x1) * i / n
+                        p.drawEllipse(QPointF(cx, y), thick * 0.62, thick * 0.62)
+                    p.setBrush(Qt.BrushStyle.NoBrush)
+                    continue
                 p.setPen(pen)
-                y = bottom + max(1.5, rh * 0.06)
-                p.drawLine(QPointF(x1 + 1, y), QPointF(x2 - 1, y))
+                p.drawLine(QPointF(x1, y), QPointF(x2, y))
 
     def _paint_dots(self, p: QPainter, text_rect: QRectF, font: QFont) -> None:
         """Идёт перевод: три точки, яркая бежит слева направо."""

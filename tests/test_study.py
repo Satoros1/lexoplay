@@ -362,3 +362,26 @@ def test_open_translation_stays_open_over_its_hints_and_label_follows_key(qapp):
     _box, _f, _t, _s, _o, row = ov._strip_geometry(ov._shown())
     c = row.chips[0].rect.center()
     assert ov.hover(c.x() / 1280, c.y() / 800) == (0, True)  # подсказка на открытой плашке не закрывает перевод
+
+
+def test_locate_word_cut_by_ocr_at_the_start():
+    words = "I have to say, Hina...com ing from you, this was a".split()
+    idx = study.locate("coming from you", words)
+    assert [words[i] for i in idx] == ["Hina...com", "ing", "from", "you,"]
+    sp = study.spans("coming from you", words, idx)
+    assert 0.5 < sp[0][0] < 0.75 and sp[0][1] == 1.0  # от «Hina...com» под линией только «com»
+    assert sp[1] == (0.0, 1.0) and sp[-1][0] == 0.0 and sp[-1][1] < 1.0  # запятая после «you» без линии
+
+
+def test_spans_do_not_cut_a_single_word():
+    assert study.spans("hous", ["house"], (0,)) == ((0.0, 1.0),)  # одно слово с ошибкой OCR: линия под всем словом
+
+
+def test_underline_rects_share_line_bottom():
+    from lexoplay.geometry import Rect
+
+    words = ["particularly", "nasty", "little", "scheme."]
+    rects = [Rect(0.0, 0.50, 0.2, 0.06), Rect(0.21, 0.50, 0.1, 0.06), Rect(0.32, 0.50, 0.1, 0.045), Rect(0.43, 0.5, 0.1, 0.045)]
+    out = study.underline_rects("little scheme", words, rects, (2, 3))
+    assert all(abs(r.bottom - 0.56) < 1e-9 for r in out)  # низ как у «particularly» с хвостом y
+    assert out[1].w < rects[3].w  # точка после «scheme» без линии
