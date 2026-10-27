@@ -47,7 +47,8 @@ LATIN_TARGETS = frozenset({"en", "nl", "de", "es", "fr", "it", "pt", "pl"})  # �
 #    а похожая реплика без имени потом находилась в кеше вместе со старым переводом с именем)
 # 7: справка по игре (герои, термины, тон) и правила понимать реплику через игру; нарочные повторы
 #    внутри реплики больше не выбрасываются
-TRANSLATION_VERSION = 7
+# 8: перевод не сокращает реплику: каждая часть и уточнение на месте
+TRANSLATION_VERSION = 8
 
 SYSTEM_PROMPT = """You are the localizer of the video game "{game}". The player reads its dialogue in {target}: you translate it line by line while they play.
 

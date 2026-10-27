@@ -278,24 +278,23 @@ def plan(
             st = state(key)
             if st is None or (st.state in ("new", "test") and not st.meaning):
                 continue  # без значения подсказать нечего: пусть модель объяснит заново
-            known.append(shown)
             if st.state not in ("new", "test") or used.intersection(idx):
+                known.append(shown)  # знаешь (или уже подсказано выражением вокруг): модели не объяснять
                 continue
             if sum(1 for h in hints if h.kind != "saved") >= MAX_LEARNING:
-                continue
+                continue  # не влезло: не говорим модели «знает», пусть подскажет, если это трудное место
             used.update(idx)
+            known.append(shown)
             hints.append(Hint(idx, shown, key, "test" if st.state == "test" else "new", st.meaning))
     if saved is not None and len(saved):
         n = 0
         for idx, shown, e in _found(saved, words):
-            if used.intersection(idx):
+            if used.intersection(idx) or n >= MAX_SAVED:
                 continue
             label = e.word if len(e.parts) > 1 else shown  # type: ignore[attr-defined]
-            known.append(label)
-            if n >= MAX_SAVED:
-                continue
             n += 1
             used.update(idx)
+            known.append(label)
             hints.append(Hint(idx, label, e.key, "saved", e.translation))  # type: ignore[attr-defined]
     learning_n = sum(1 for h in hints if h.kind != "saved")
     room = max(1, min(MAX_FROM_MODEL, MAX_HINTS - learning_n))
