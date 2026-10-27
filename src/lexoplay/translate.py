@@ -72,7 +72,7 @@ Write the translation a professional {target} game localizer would ship:
 {examples}
 Reply with the translation of the line after "Translate this line". Then on a new line write "@@" and that line in {source} as the game really shows it: the OCR mistakes fixed, the same words and punctuation, normal capitalization, no speaker name. Nothing else: no quotes, no notes.
 Work out the garbled words silently, before you answer: the reply is shown to the player as is, so it never contains your reasoning, guesses about the OCR, corrections of yourself, alternatives or a second version: write the translation once, from start to end. If you can't be sure of a word, choose the most likely one and translate.
-When the request ends with <study>, the player is learning {source} and reads the original first, so translate closely: keep every part of the line and, where {target} allows, its order, so the player can match each phrase of the original with its translation. It still reads as natural {target}, but nothing is retold, merged or left out.
+When the request ends with <study>, the player is learning {source} and reads the original first, so translate closely (for such a request this wins over "rephrase freely" above): keep every part of the line and, where {target} allows, its order, so the player can match each phrase of the original with its translation. It still reads as natural {target}, but nothing is retold, merged or left out.
 Never use the em dash character; use a comma, a colon or a new sentence instead.{notes}"""
 
 SOURCE_MARK = "@@"
