@@ -1,0 +1,720 @@
+{
+  "version": "0.6.41",
+  "python": "3.12.10 (tags/v3.12.10:0cc8128, Apr  8 2025, 12:21:36) [MSC v.1943 64 bit (AMD64)]",
+  "frozen": true,
+  "results": [
+    {
+      "check": "core_pipeline",
+      "status": "ok",
+      "detail": "translated",
+      "seconds": 0.095
+    },
+    {
+      "check": "imports",
+      "status": "ok",
+      "detail": [
+        "lexoplay.watch",
+        "lexoplay.gcguard",
+        "lexoplay.translate",
+        "lexoplay.store",
+        "lexoplay.lexo",
+        "lexoplay.outbox",
+        "lexoplay.session",
+        "lexoplay.vocab",
+        "lexoplay.wordmode",
+        "lexoplay.ui.overlay",
+        "lexoplay.ui.region_picker",
+        "lexoplay.ui.main_window",
+        "lexoplay.ui.window_picker",
+        "lexoplay.ui.hotkey_edit",
+        "lexoplay.ui.word_layer",
+        "lexoplay.report",
+        "lexoplay.games",
+        "lexoplay.updater",
+        "lexoplay.autostart",
+        "lexoplay.lookup",
+        "lexoplay.export",
+        "lexoplay.history",
+        "lexoplay.usage",
+        "lexoplay.ocrscore",
+        "lexoplay.wordlist_en",
+        "lexoplay.ui.pages",
+        "lexoplay.ui.history_page",
+        "lexoplay.ui.progress_page",
+        "lexoplay.timeline",
+        "lexoplay.progress",
+        "lexoplay.shield",
+        "lexoplay.rarity",
+        "lexoplay.recall",
+        "lexoplay.win.input",
+        "lexoplay.win.llhooks",
+        "lexoplay.app",
+        "lexoplay.win.winapi",
+        "lexoplay.win.capture",
+        "lexoplay.win.hooks",
+        "lexoplay.win.ocr"
+      ],
+      "seconds": 0.947
+    },
+    {
+      "check": "outbox",
+      "status": "ok",
+      "detail": {
+        "sent": [
+          "eerie",
+          "reluctant",
+          "make amends"
+        ],
+        "left": [
+          0,
+          0
+        ]
+      },
+      "seconds": 0.67
+    },
+    {
+      "check": "lexo_https",
+      "status": "ok",
+      "detail": {
+        "server": "https://api.lexovium.study",
+        "health": 200,
+        "desktop_me": 401,
+        "server_has_lexoplay": true
+      },
+      "seconds": 0.628
+    },
+    {
+      "check": "keyring",
+      "status": "ok",
+      "detail": "WinVaultKeyring",
+      "seconds": 0.038
+    },
+    {
+      "check": "ocr",
+      "status": "ok",
+      "detail": {
+        "languages": [
+          "en-US"
+        ],
+        "speaker": "Mira",
+        "text": "I was reluctant to come here tonight, you know. This place feels eerie after dark.",
+        "words": 16,
+        "first_word_rect": {
+          "x": 0.08166666666666667,
+          "y": 0.7894444444444445,
+          "w": 0.05,
+          "h": 0.02777777777777778
+        }
+      },
+      "seconds": 0.138
+    },
+    {
+      "check": "ocr_auto_modes",
+      "status": "ok",
+      "detail": {
+        "novel_seconds": 0.058,
+        "novel": {
+          "chosen": "normal",
+          "quality": "0.94/65",
+          "ratio": 0.939,
+          "text": "Mira\nI was reluctant to come here tonight, you know.\nThis place feels eerie after dark.",
+          "utterance": "I was reluctant to come here tonight, you know. This place feels eerie after dark.",
+          "tried": {
+            "normal": "0.94/65",
+            "pixel": "0.95/62",
+            "color": "0.94/65"
+          },
+          "modes": {
+            "normal": {
+              "quality": "0.94/65",
+              "text": "Mira\nI was reluctant to come here tonight, you know.\nThis place feels eerie after dark."
+            },
+            "pixel": {
+              "quality": "0.95/62",
+              "text": "I was reluctant to come here tonight, you know.\nThis place feels eerie after dark."
+            },
+            "color": {
+              "quality": "0.94/65",
+              "text": "Mira\nI was reluctant to come here tonight, you know.\nThis place feels eerie after dark."
+            }
+          }
+        },
+        "pixel_seconds": 0.088,
+        "pixel": {
+          "chosen": "color",
+          "quality": "0.84/43",
+          "ratio": 0.841,
+          "text": "YOUIRE NOT LEAVING THIS ROOM ALIVE\nWho are you people anyVVaY?",
+          "utterance": "YOUIRE NOT LEAVING THIS ROOM ALIVE Who are you people anyVVaY?",
+          "tried": {
+            "normal": "0.70/37",
+            "pixel": "0.78/41",
+            "color": "0.84/43"
+          },
+          "modes": {
+            "normal": {
+              "quality": "0.70/37",
+              "text": "VVhIZI\nYOUIRE NOT LEAVING THIS\nALIVE\nau people any%lh/a\nIli ?\nare"
+            },
+            "pixel": {
+              "quality": "0.78/41",
+              "text": "YOU'RE NOT LEAVING THIS ROOM ALIVE\n'INho are you people anyV'/aY?"
+            },
+            "color": {
+              "quality": "0.84/43",
+              "text": "YOUIRE NOT LEAVING THIS ROOM ALIVE\nWho are you people anyVVaY?"
+            }
+          }
+        },
+        "vn_color_seconds": 0.101,
+        "vn_color": {
+          "chosen": "normal",
+          "quality": "0.92/53",
+          "ratio": 0.917,
+          "text": "Makoto Naegi\nOh, and they mentioned the \"Ultimate Biker Gang\nLeader\" too.",
+          "utterance": "Oh, and they mentioned the \"Ultimate Biker Gang Leader\" too.",
+          "tried": {
+            "normal": "0.92/53",
+            "pixel": "0.91/32",
+            "color": "0.91/51"
+          },
+          "modes": {
+            "normal": {
+              "quality": "0.92/53",
+              "text": "Makoto Naegi\nOh, and they mentioned the \"Ultimate Biker Gang\nLeader\" too."
+            },
+            "pixel": {
+              "quality": "0.91/32",
+              "text": "Makoto Naegi\nOh, and they mentioned the \"\n' too."
+            },
+            "color": {
+              "quality": "0.91/51",
+              "text": "Makoto Naegi\nOh, and they mentioned the \"Ultimate Biker Gang\nLead \" too."
+            }
+          }
+        },
+        "concurrent": {
+          "seconds": 0.101,
+          "errors": [],
+          "texts_ok": true
+        },
+        "parallel": true
+      },
+      "seconds": 0.981
+    },
+    {
+      "check": "update_swap",
+      "status": "ok",
+      "detail": {
+        "swap_exit": 0,
+        "probe": "0.6.41 4468 C:\\Users\\runneradmin\\AppData\\Local\\Temp\\lexoplay-update-0wfb29z1\\LexoPlay.exe",
+        "files": [
+          "LexoPlay.exe",
+          "probe.txt"
+        ]
+      },
+      "seconds": 4.853
+    },
+    {
+      "check": "autostart",
+      "status": "ok",
+      "detail": {
+        "command": "\"D:\\a\\lexoplay\\lexoplay\\dist\\LexoPlay.exe\" --autostart"
+      },
+      "seconds": 0.001
+    },
+    {
+      "check": "overlay_render",
+      "status": "ok",
+      "detail": {
+        "painted_samples": 126,
+        "size": [
+          960,
+          720
+        ],
+        "waited": 0.08,
+        "alpha": 0.0,
+        "visible": true,
+        "strip": true,
+        "toast": true,
+        "errors": []
+      },
+      "seconds": 0.508
+    },
+    {
+      "check": "word_layer_render",
+      "status": "ok",
+      "detail": {
+        "size": [
+          960,
+          720
+        ]
+      },
+      "seconds": 0.035
+    },
+    {
+      "check": "main_window_render",
+      "status": "ok",
+      "detail": {
+        "font": "Segoe UI Variable Text",
+        "display": "Segoe UI Variable Display",
+        "pages": [
+          "window-games.png",
+          "window-history.png",
+          "window-words.png",
+          "window-progress.png",
+          "window-lexo.png",
+          "window-keys.png",
+          "window-view.png",
+          "window-more.png"
+        ]
+      },
+      "seconds": 1.44
+    },
+    {
+      "check": "picker_freeze_frame",
+      "status": "ok",
+      "detail": {
+        "center_rgb": [
+          151,
+          163,
+          158
+        ]
+      },
+      "seconds": 0.043
+    },
+    {
+      "check": "capture",
+      "status": "ok",
+      "detail": {
+        "client": {
+          "x": 120,
+          "y": 120,
+          "w": 320,
+          "h": 200
+        },
+        "window_size": [
+          320,
+          200
+        ],
+        "window_center": [
+          220,
+          30,
+          30
+        ],
+        "screen_center": [
+          220,
+          30,
+          30
+        ],
+        "foreground": 328292,
+        "exe": "lexoplay.exe"
+      },
+      "seconds": 0.488
+    },
+    {
+      "check": "hotkeys_and_hooks",
+      "status": "ok",
+      "detail": {
+        "failed": []
+      },
+      "seconds": 0.002
+    },
+    {
+      "check": "word_mode_keys",
+      "status": "ok",
+      "detail": {
+        "failed": []
+      },
+      "seconds": 0.006
+    },
+    {
+      "check": "raw_input_player_actions",
+      "status": "ok",
+      "detail": {
+        "sizes": [
+          24,
+          24,
+          16
+        ],
+        "started": true,
+        "ignored_key_events": 0,
+        "key_events": 1,
+        "after_wheel": 2,
+        "kinds": [
+          "key",
+          "mouse"
+        ],
+        "mouse5_buttons": [
+          6
+        ],
+        "mouse5_fired": [
+          "translate"
+        ],
+        "mouse5_not_player_action": true,
+        "cursor_over_own": true,
+        "cursor_over_own_after_hide": false
+      },
+      "seconds": 2.266
+    },
+    {
+      "check": "cursor_unlock_in_word_mode",
+      "status": "ok",
+      "detail": {
+        "game_in_focus": true,
+        "detected": true,
+        "travel": 120,
+        "exclusive_fullscreen": false,
+        "took_focus": true,
+        "cursor_moves_after": true
+      },
+      "seconds": 1.694
+    },
+    {
+      "check": "word_mode_keeps_input_from_game",
+      "status": "ok",
+      "detail": {
+        "keys": [
+          "probe_f23",
+          "words_enter",
+          "words_esc"
+        ],
+        "started": true,
+        "failed": "",
+        "async_down_while_held": false,
+        "picked": [
+          [
+            0
+          ]
+        ],
+        "buttons": [
+          6
+        ],
+        "actions": [
+          "probe_f23",
+          "words_enter"
+        ],
+        "hotkeys_fired": [],
+        "key_calls": 4,
+        "last_key": [
+          257,
+          13,
+          0
+        ],
+        "open_while_held": true,
+        "closed_on_release": true,
+        "hooks_removed": true,
+        "blocked": 11,
+        "errors": [],
+        "game_clicks_during_mode": 0,
+        "game_clicks_after_mode": 1
+      },
+      "seconds": 3.258
+    },
+    {
+      "check": "overlays_never_take_focus",
+      "status": "ok",
+      "detail": {
+        "overlay": true,
+        "word_layer": true
+      },
+      "seconds": 0.007
+    },
+    {
+      "check": "window_list",
+      "status": "ok",
+      "detail": {
+        "all": [
+          [
+            "C:\\ProgramData\\GitHub\\HostedComputeAgent",
+            "windowsterminal.exe"
+          ]
+        ],
+        "games": []
+      },
+      "seconds": 0.0
+    },
+    {
+      "check": "display_rect",
+      "status": "ok",
+      "detail": {
+        "display": {
+          "x": 0.0,
+          "y": 0.0,
+          "w": 1024.0,
+          "h": 768.0
+        },
+        "monitor": {
+          "x": 0,
+          "y": 0,
+          "w": 1024,
+          "h": 768
+        }
+      },
+      "seconds": 0.087
+    },
+    {
+      "check": "app_word_flow",
+      "status": "ok",
+      "detail": {
+        "vocab_loaded": true,
+        "account": "@selftest",
+        "layer_open": true,
+        "shield_on": true,
+        "click_picked": true,
+        "click_blocked": 2,
+        "click_seen_by_raw_input": [],
+        "card_ready": true,
+        "card_saved": true,
+        "card_sent": true,
+        "shield_off": true,
+        "session_end_sent": true,
+        "window_ok": true,
+        "card_payload": {
+          "idempotency_key": "35377dab-b636-4fd8-b1f9-042b3d563162",
+          "session_id": "45326c4c-c95c-48d5-b255-5dedf277995e",
+          "game": {
+            "title": "Selftest",
+            "exe": "selftest.exe"
+          },
+          "selection": "eerie",
+          "sentence": "This place feels eerie after dark.",
+          "sentence_translation": "Это место по ночам жуткое.",
+          "lemma": "eerie",
+          "translation": "жуткий, зловещий",
+          "marked_translation": null,
+          "deck": "game",
+          "deck_id": null
+        },
+        "paths": [
+          "GET /desktop/me",
+          "GET /desktop/vocab",
+          "POST /desktop/translate",
+          "POST /desktop/lookup",
+          "POST /desktop/cards",
+          "POST /desktop/sessions/45326c4c-c95c-48d5-b255-5dedf277995e/end",
+          "GET /desktop/decks"
+        ]
+      },
+      "seconds": 1.608
+    },
+    {
+      "check": "app_words_keep_game_input",
+      "status": "ok",
+      "detail": {
+        "game_foreground": true,
+        "took_focus": true,
+        "layer_foreground": true,
+        "focus_warning": false,
+        "hover_picked": true,
+        "picked": true,
+        "card_ready": true,
+        "card_saved": true,
+        "game_saw_in_mode": {},
+        "closed": true,
+        "focus_back": true,
+        "game_saw_close_click": {},
+        "shield_off": true,
+        "game_saw_after": {
+          "raw_down": 1,
+          "raw_up": 1,
+          "msg_down": 1,
+          "async_down": 1
+        },
+        "frozen": true,
+        "frozen_picked": true,
+        "frozen_game_saw": {},
+        "unfrozen": true,
+        "frame_dropped": true,
+        "no_focus_game_saw": {},
+        "blocked": 11
+      },
+      "seconds": 8.51
+    },
+    {
+      "check": "app_own_key_flow",
+      "status": "ok",
+      "detail": {
+        "translator": "AnthropicTranslator",
+        "panel_translated": true,
+        "card_ready": true,
+        "button": "+ в мои слова",
+        "saved_local": [
+          [
+            "eerie",
+            "жуткий, зловещий",
+            false
+          ]
+        ],
+        "explain_ready": true,
+        "explain_saved": [
+          "after dark"
+        ],
+        "tiers": {
+          "place": "common",
+          "feels": "common",
+          "eerie": "rare",
+          "dark.": "common"
+        },
+        "recall": [
+          [
+            "eerie",
+            "жуткий"
+          ],
+          [
+            "after dark",
+            "после наступления темноты"
+          ]
+        ],
+        "seen": [
+          1,
+          1
+        ],
+        "outbox_before_link": [
+          0,
+          0
+        ],
+        "usage_words": 1,
+        "stats_words_today": 2,
+        "server_calls_before_link": [],
+        "sent_after_link": true,
+        "marked": [
+          true,
+          true
+        ],
+        "card_payload": {
+          "idempotency_key": "local-word-1-1793121386",
+          "session_id": "851c94d0-d743-40e2-8843-db448ecdf6e2",
+          "game": {
+            "title": "Selftest",
+            "exe": "selftest.exe"
+          },
+          "selection": "eerie",
+          "sentence": "This place feels eerie after dark.",
+          "sentence_translation": "Это место по ночам жуткое.",
+          "lemma": "eerie",
+          "translation": "жуткий, зловещий",
+          "marked_translation": null,
+          "deck": "game",
+          "deck_id": null
+        }
+      },
+      "seconds": 1.411
+    },
+    {
+      "check": "app_page_flow",
+      "status": "ok",
+      "detail": {
+        "first": true,
+        "blocks": 3,
+        "calls_first": 3,
+        "texts": [
+          "The morning was cold. I stood ",
+          "\"You are late,\" she said witho",
+          "I nodded and followed her thro"
+        ],
+        "second": true,
+        "calls_total": 4,
+        "before_f3": {
+          "page": true,
+          "muted": false,
+          "live": true,
+          "busy": "idle",
+          "open": false,
+          "current": true
+        },
+        "words_open": true,
+        "words_sentence": "Something about this place felt wrong.",
+        "in_f3": {
+          "page": true,
+          "muted": true,
+          "live": true,
+          "busy": "idle",
+          "open": true,
+          "current": true
+        },
+        "after_f3": {
+          "page": true,
+          "muted": false,
+          "live": true,
+          "busy": "idle",
+          "open": false,
+          "current": true
+        },
+        "back_after_words": true,
+        "boxes_painted": 1676,
+        "peek_painted": 0,
+        "peek_clear": true,
+        "hidden": true
+      },
+      "seconds": 1.456
+    },
+    {
+      "check": "app_study_flow",
+      "status": "ok",
+      "detail": {
+        "hints_first": true,
+        "shown": true,
+        "hidden": true,
+        "hints": [
+          [
+            "test",
+            "culprit",
+            "?"
+          ],
+          [
+            "new",
+            "tampered with the evidence",
+            "подделал улики"
+          ]
+        ],
+        "underlined": [
+          1,
+          4
+        ],
+        "known_sent": [
+          "culprit"
+        ],
+        "hint_calls": 1,
+        "alt_open": true,
+        "widths": [
+          459,
+          900
+        ],
+        "full": true,
+        "alt_closed": true,
+        "mark_open": true,
+        "words": {
+          "culprit": [
+            "new",
+            2,
+            "преступник"
+          ],
+          "tampered with the evidence": [
+            "new",
+            1,
+            "подделал улики"
+          ]
+        },
+        "day": [
+          1,
+          1,
+          0,
+          1
+        ],
+        "cards": [
+          [
+            "culprit",
+            "преступник"
+          ]
+        ],
+        "no_hints_after": true,
+        "hints_cached": true,
+        "off": true,
+        "plain": true,
+        "plain_visible": true
+      },
+      "seconds": 5.119
+    }
+  ]
+}

@@ -1,0 +1,55 @@
+Traceback (most recent call last):
+  File "D:\a\lexoplay\lexoplay\src\lexoplay\app.py", line 271, in <lambda>
+    self.bridge.call.connect(lambda fn: fn())
+                                        ^^^^
+  File "D:\a\lexoplay\lexoplay\src\lexoplay\app.py", line 1377, in _update_tray
+    pending, failed = self.outbox.counts()
+                      ^^^^^^^^^^^^^^^^^^^^
+  File "D:\a\lexoplay\lexoplay\src\lexoplay\outbox.py", line 83, in counts
+    return self._store.outbox_counts()
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\a\lexoplay\lexoplay\src\lexoplay\store.py", line 455, in outbox_counts
+    rows = dict(self._db.execute("SELECT status, COUNT(*) FROM outbox GROUP BY status").fetchall())
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+sqlite3.ProgrammingError: Cannot operate on a closed database.
+Traceback (most recent call last):
+  File "D:\a\lexoplay\lexoplay\src\lexoplay\app.py", line 271, in <lambda>
+    self.bridge.call.connect(lambda fn: fn())
+                                        ^^^^
+  File "D:\a\lexoplay\lexoplay\src\lexoplay\app.py", line 1377, in _update_tray
+    pending, failed = self.outbox.counts()
+                      ^^^^^^^^^^^^^^^^^^^^
+  File "D:\a\lexoplay\lexoplay\src\lexoplay\outbox.py", line 83, in counts
+    return self._store.outbox_counts()
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\a\lexoplay\lexoplay\src\lexoplay\store.py", line 455, in outbox_counts
+    rows = dict(self._db.execute("SELECT status, COUNT(*) FROM outbox GROUP BY status").fetchall())
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+sqlite3.ProgrammingError: Cannot operate on a closed database.
+[  ok] core_pipeline: translated
+[  ok] imports: ['lexoplay.watch', 'lexoplay.gcguard', 'lexoplay.translate', 'lexoplay.store', 'lexoplay.lexo', 'lexoplay.outbox', 'lexoplay.session', 'lexoplay.vocab', 'lexoplay.wordmode', 'lexoplay.ui.overlay', 'lexoplay.ui.region_picker', 'lexoplay.ui.main_window', 'lexoplay.ui.window_picker', 'lexoplay.ui.hotke
+[  ok] outbox: {'sent': ['eerie', 'reluctant', 'make amends'], 'left': (0, 0)}
+[  ok] lexo_https: {'server': 'https://api.lexovium.study', 'health': 200, 'desktop_me': 401, 'server_has_lexoplay': True}
+[  ok] keyring: WinVaultKeyring
+[  ok] ocr: {'languages': ['en-US'], 'speaker': 'Mira', 'text': 'I was reluctant to come here tonight, you know. This place feels eerie after dark.', 'words': 16, 'first_word_rect': {'x': 0.08166666666666667, 'y': 0.7894444444444445, 'w': 0.05, 'h': 0.02777777777777778}}
+[  ok] ocr_auto_modes: {'novel_seconds': 0.058, 'novel': {'chosen': 'normal', 'quality': '0.94/65', 'ratio': 0.939, 'text': 'Mira\nI was reluctant to come here tonight, you know.\nThis place feels eerie after dark.', 'utterance': 'I was reluctant to come here tonight, you know. This place feels eerie after dark.', 'tried'
+[skip] update_swap: только в собранном exe
+[skip] autostart: только в собранном exe
+[  ok] overlay_render: {'painted_samples': 126, 'size': [960, 720], 'waited': 0.38, 'alpha': 0.0, 'visible': True, 'strip': True, 'toast': True, 'errors': []}
+[  ok] word_layer_render: {'size': [960, 720]}
+[  ok] main_window_render: {'font': 'Segoe UI Variable Text', 'display': 'Segoe UI Variable Display', 'pages': ['window-games.png', 'window-history.png', 'window-words.png', 'window-progress.png', 'window-lexo.png', 'window-keys.png', 'window-view.png', 'window-more.png']}
+[  ok] picker_freeze_frame: {'center_rgb': [151, 163, 158]}
+[  ok] capture: {'client': {'x': 120, 'y': 120, 'w': 320, 'h': 200}, 'window_size': (320, 200), 'window_center': (220, 30, 30), 'screen_center': (220, 30, 30), 'foreground': 328208, 'exe': 'python.exe'}
+[  ok] hotkeys_and_hooks: {'failed': []}
+[  ok] word_mode_keys: {'failed': []}
+[  ok] raw_input_player_actions: {'sizes': [24, 24, 16], 'started': True, 'ignored_key_events': 0, 'key_events': 1, 'after_wheel': 2, 'kinds': ['key', 'mouse'], 'mouse5_buttons': [6], 'mouse5_fired': ['translate'], 'mouse5_not_player_action': True, 'cursor_over_own': True, 'cursor_over_own_after_hide': False}
+[  ok] cursor_unlock_in_word_mode: {'game_in_focus': True, 'detected': True, 'travel': 120, 'exclusive_fullscreen': False, 'took_focus': True, 'cursor_moves_after': True}
+[  ok] word_mode_keeps_input_from_game: {'keys': ['probe_f23', 'words_enter', 'words_esc'], 'started': True, 'failed': '', 'async_down_while_held': False, 'picked': [[0]], 'buttons': [6], 'actions': ['probe_f23', 'words_enter'], 'hotkeys_fired': [], 'key_calls': 4, 'last_key': (257, 13, 0), 'open_while_held': True, 'closed_on_release': Tr
+[  ok] overlays_never_take_focus: {'overlay': True, 'word_layer': True}
+[  ok] window_list: {'all': [('C:\\ProgramData\\GitHub\\HostedComputeAgent', 'windowsterminal.exe')], 'games': []}
+[  ok] display_rect: {'display': {'x': 0.0, 'y': 0.0, 'w': 1024.0, 'h': 768.0}, 'monitor': {'x': 0, 'y': 0, 'w': 1024, 'h': 768}}
+[  ok] app_word_flow: {'vocab_loaded': True, 'account': '@selftest', 'layer_open': True, 'shield_on': True, 'click_picked': True, 'click_blocked': 2, 'click_seen_by_raw_input': [], 'card_ready': True, 'card_saved': True, 'card_sent': True, 'shield_off': True, 'session_end_sent': True, 'window_ok': True, 'card_payload': {
+[  ok] app_words_keep_game_input: {'game_foreground': True, 'took_focus': True, 'layer_foreground': True, 'focus_warning': False, 'hover_picked': True, 'picked': True, 'card_ready': True, 'card_saved': True, 'game_saw_in_mode': {}, 'closed': True, 'focus_back': True, 'game_saw_close_click': {}, 'shield_off': True, 'game_saw_after': 
+[  ok] app_own_key_flow: {'translator': 'AnthropicTranslator', 'panel_translated': True, 'card_ready': True, 'button': '+ в мои слова', 'saved_local': [('eerie', 'жуткий, зловещий', False)], 'explain_ready': True, 'explain_saved': ['after dark'], 'tiers': {'place': 'common', 'feels': 'common', 'eerie': 'rare', 'dark.': 'com
+[  ok] app_page_flow: {'first': True, 'blocks': 3, 'calls_first': 3, 'texts': ['The morning was cold. I stood ', '"You are late," she said witho', 'I nodded and followed her thro'], 'second': True, 'calls_total': 4, 'before_f3': {'page': True, 'muted': False, 'live': True, 'busy': 'idle', 'open': False, 'current': True},
+[  ok] app_study_flow: {'hints_first': True, 'shown': True, 'hidden': True, 'hints': [('test', 'culprit', '?'), ('new', 'tampered with the evidence', 'подделал улики')], 'underlined': [1, 4], 'known_sent': ['culprit'], 'hint_calls': 1, 'alt_open': True, 'widths': (459, 900), 'full': True, 'alt_closed': True, 'mark_open': 
