@@ -1096,6 +1096,7 @@ def _study_flow(out_dir: Path) -> Callable[[], tuple[str, object]]:
             info["known_sent"] = list(hint_calls[0].get("known", ())) if hint_calls else None
             info["hint_calls"] = len(hint_calls)
             pill = app.overlay.strip_rect()
+            d0 = app.display
             for _ in range(5):
                 app_q.processEvents()
             app.overlay.grab().save(str(out_dir / "study-overlay.png"))
@@ -1104,7 +1105,10 @@ def _study_flow(out_dir: Path) -> Callable[[], tuple[str, object]]:
             info["alt_open"] = pump(lambda: app.overlay.study_open, 3)
             pump(lambda: False, 0.6)  # держал дольше STUDY_PEEK_S: подглядывал
             app.overlay.grab().save(str(out_dir / "study-overlay-alt.png"))
-            info["full"] = app.overlay.strip_rect().w > (pill.w if pill else 0) * 2
+            # открытый перевод во всю ширину окна диалога (0.9 окна), подсказки были короче
+            full = app.overlay.strip_rect()
+            info["widths"] = (round(pill.w) if pill else None, round(full.w) if full else None)
+            info["full"] = full is not None and pill is not None and full.w >= d0.w * 0.85 and full.w > pill.w
             held["alt"] = False
             info["alt_closed"] = pump(lambda: not app.overlay.study_open, 3)
             # курсор на «?» над culprit: значение открыто до конца реплики
