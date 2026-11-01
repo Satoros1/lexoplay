@@ -1028,10 +1028,11 @@ class App(QObject):
 
     def _game_scale(self) -> float:
         """Свой размер подсказок у активной игры (окно LexoPlay → Игры, или −/+ в режиме слов); 1 = авто."""
-        if self.active is None:
+        active = getattr(self, "active", None)  # из __init__ (настройки оверлея) игры ещё нет
+        if active is None:
             return 1.0
         try:
-            game = self.store.get_game(self.active.exe)
+            game = self.store.get_game(active.exe)
         except Exception:
             log.debug("размер игры: не прочитался", exc_info=True)
             return 1.0
