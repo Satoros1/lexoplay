@@ -81,3 +81,28 @@ def test_stretched_game_gets_smaller_panel_and_size_follows_scale(qapp):
     layer.grab()  # надпись рисуется без ошибок
     layer.finish("esc")
     layer.close()
+
+
+def test_size_buttons_in_word_mode(qapp):
+    from PySide6.QtTest import QTest
+
+    from lexoplay.ui.word_layer import HOVER_SIZE_MS, WordLayer
+    from lexoplay.wordmode import reader_views
+
+    layer = WordLayer()
+    layer.animate = False
+    layer.hover_pick = True
+    layer.size_label = "авто"
+    steps = []
+    layer.zoom_step.connect(steps.append)
+    layer.open(Rect(0, 0, 1422, 1067), Rect(0.04, 0.72, 0.92, 0.25), reader_views("Don't beat around the bush."))
+    layer.grab()  # ряд кнопок нарисован: «− Размер авто +» рядом с «Разбор реплики»
+    minus, plus = layer._size_minus, layer._size_plus  # noqa: SLF001
+    assert minus is not None and plus is not None and minus.right() < plus.left()
+    layer.click(plus.center())
+    assert steps == [1]
+    layer.hover(minus.center())  # подержать курсор: шаг, и дальше ещё, пока держат
+    QTest.qWait(int(HOVER_SIZE_MS * 2.6))
+    assert steps[1:] == [-1, -1]
+    layer.finish("esc")
+    layer.close()

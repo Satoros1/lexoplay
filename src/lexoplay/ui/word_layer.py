@@ -61,6 +61,7 @@ IDLE_MS = 30_000
 PICK_MS = 350  # стрелками: значение слова запрашиваем, когда выбор остановился
 HOVER_WORD_MS = 450  # наведением: курсор задержался на слове, выбираем его без клика
 HOVER_ADD_MS = 900  # курсор держат на «+ в мои слова»: сохраняем без клика
+HOVER_SIZE_MS = 650  # курсор держат на «−»/«+» у «Размер»: шаг, и дальше шаг за шагом, пока держат
 
 
 def _qt_placer(widget: QWidget, rect: Rect) -> None:
@@ -137,6 +138,9 @@ class WordLayer(QWidget):
         self._explain_open = False
         self._explain_btn: QRectF | None = None
         self._retranslate_btn: QRectF | None = None
+        self._size_minus: QRectF | None = None  # «−» и «+» у «Размер» над панелью
+        self._size_plus: QRectF | None = None
+        self.size_label = ""  # «Авто» или «90%»: размер подсказок этой игры (ставит App)
         self.can_retranslate = False  # у реплики есть перевод: можно попросить другой
         self.retranslating = False
         self._explain_rect: QRectF | None = None
@@ -536,8 +540,11 @@ class WordLayer(QWidget):
         hover = self._hit_word(pos)
         over_button = bool(self._button_rect and self._button_rect.contains(pos))
         over_alt = bool(self._alt_rect and self._alt_rect.contains(pos))
+        size = self._size_at(pos)
         self.setCursor(
-            Qt.CursorShape.PointingHandCursor if hover is not None or over_button or over_alt else Qt.CursorShape.ArrowCursor
+            Qt.CursorShape.PointingHandCursor
+            if hover is not None or over_button or over_alt or size
+            else Qt.CursorShape.ArrowCursor
         )
         if hover != self._hover:
             self._hover = hover
@@ -549,6 +556,8 @@ class WordLayer(QWidget):
             target = ("add", 0)
         elif over_alt and self._card is not None and self._card.alt_button:
             target = ("alt", 0)
+        elif size:
+            target = ("size", size)
         elif hover is not None and not (self._sel == [hover] and not self._shift_down()):
             target = ("word", hover)
         if target != self._dwell_used:
@@ -560,9 +569,18 @@ class WordLayer(QWidget):
             if target is not None:
                 self._dwell_on = target
                 self._dwell_t0 = time.monotonic()
-                self._dwell.start(HOVER_ADD_MS if target[0] in ("add", "alt") else HOVER_WORD_MS)
+                delay = {"add": HOVER_ADD_MS, "alt": HOVER_ADD_MS, "size": HOVER_SIZE_MS}.get(target[0], HOVER_WORD_MS)
+                self._dwell.start(delay)
                 if target[0] in ("add", "alt"):
                     self._dwell_anim.start()
+
+    def _size_at(self, pos: QPointF) -> int:
+        """−1 над «−» у «Размер», +1 над «+», 0 мимо."""
+        if self._size_minus is not None and self._size_minus.contains(pos):
+            return -1
+        if self._size_plus is not None and self._size_plus.contains(pos):
+            return 1
+        return 0
 
     def _dwell_stop(self) -> None:
         self._dwell.stop()
@@ -584,6 +602,10 @@ class WordLayer(QWidget):
             self._dwell_used = target
             if self._card and self._card.alt_button:
                 self.alt_clicked.emit()
+        elif target[0] == "size":
+            self.zoom_step.emit(target[1])
+            self._dwell_on = target  # держат дальше: следующий шаг
+            self._dwell.start(HOVER_SIZE_MS)
         else:
             self._pick_word(target[1], shift=self._shift_down())
 
@@ -614,6 +636,10 @@ class WordLayer(QWidget):
         self._idle.start()
         if right:
             self._close_armed = True
+            return
+        size = self._size_at(pos)
+        if size:
+            self.zoom_step.emit(size)
             return
         if self._explain_btn and self._explain_btn.contains(pos):
             self.explain_clicked.emit()
@@ -935,13 +961,17 @@ class WordLayer(QWidget):
         if self.can_retranslate:
             buttons.insert(0, ("retranslate", "Перевожу заново…" if self.retranslating else "Перевести иначе · R"))
         widths = [fm.horizontalAdvance(text) + px * 1.6 for _key, text in buttons]
-        total = sum(widths) + px * 0.5 * (len(buttons) - 1)
+        size_text = f"Размер {self.size_label}".strip()
+        size_w = fm.horizontalAdvance(size_text) + h * 2 + px * 0.7
+        total = size_w + px * 0.5 + sum(widths) + px * 0.5 * (len(buttons) - 1)
         x = max(4.0, min(region.right - total, bounds.w - total - 6))
         if not self._sel and self._card is None:
             self._paint_hint(p, region, x, y, h, px)
         self._explain_btn = None
         self._retranslate_btn = None
         card = self._card_rect
+        self._paint_size(p, QRectF(x, y, size_w, h), size_text, f, px, card)
+        x += size_w + px * 0.5
         for (key, text), w in zip(buttons, widths, strict=True):
             rect = QRectF(x, y, w, h)
             if card is not None and rect.intersects(card):
@@ -962,17 +992,46 @@ class WordLayer(QWidget):
             p.drawText(rect, int(Qt.AlignmentFlag.AlignCenter), text)
             x += w + px * 0.5
 
+    def _paint_size(self, p: QPainter, rect: QRectF, text: str, f: QFont, px: float, card: QRectF | None) -> None:
+        """«− Размер 90% +»: размер перевода, панели и карточки для этой игры. Клик или подержать курсор."""
+        self._size_minus = self._size_plus = None
+        if card is not None and rect.intersects(card):
+            return  # карточка встала на место ряда: не рисуем поверх неё
+        h = rect.height()
+        bg = QColor(STRIP_BG)
+        bg.setAlphaF(0.92)
+        p.setPen(QPen(QColor(255, 255, 255, 70), 1.2))
+        p.setBrush(bg)
+        p.drawRoundedRect(rect, h / 2, h / 2)
+        minus = QRectF(rect.x(), rect.y(), h, h)
+        plus = QRectF(rect.right() - h, rect.y(), h, h)
+        on = QColor(255, 255, 255, 30)
+        for box, sign, step in ((minus, "−", -1), (plus, "+", 1)):
+            active = self._dwell_on == ("size", step)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QColor(ACCENT) if active else on)
+            p.drawEllipse(box.adjusted(3, 3, -3, -3))
+            sf = QFont(f)
+            sf.setPixelSize(max(12, round(px * 1.0)))
+            p.setFont(sf)
+            p.setPen(QColor("#06261F") if active else TEXT)
+            p.drawText(box, int(Qt.AlignmentFlag.AlignCenter), sign)
+        p.setFont(f)
+        p.setPen(TEXT)
+        p.drawText(rect.adjusted(h, 0, -h, 0), int(Qt.AlignmentFlag.AlignCenter), text)
+        self._size_minus, self._size_plus = minus, plus
+
     def _paint_hint(self, p: QPainter, region: Rect, right: float, y: float, h: float, px: float) -> None:
         """Подсказка слева от кнопок, пока ничего не выбрано: как выбирать слова без мыши."""
         f = QFont(FONT_FAMILY)
         f.setPixelSize(max(11, round(px * 0.76)))
         fm = QFontMetricsF(f)
         if self.cursor_locked:
-            text = "Курсор держит игра: слова стрелками ←→, Shift+→ фраза, Enter сохранить, −/+ размер, Esc выйти"
+            text = "Курсор держит игра: слова стрелками ←→, Shift+→ фраза, Enter сохранить, Esc выйти"
         elif self.focus_warning:
             text = self.warning_text or "Игра не отдала фокус: не кликай, наводи на слово и держи курсор на «+»"
         else:
-            text = ("Наведи на слово" if self.hover_pick else "Клик или ←→ по слову") + " · Shift фраза · −/+ размер · Esc выйти"
+            text = ("Наведи на слово" if self.hover_pick else "Клик или ←→ по слову") + " · Shift фраза · Esc выйти"
         x = max(4.0, region.x)
         room = right - x - px * 0.6
         if room < px * 8:

@@ -51,7 +51,7 @@ from PySide6.QtWidgets import (
 from lexoplay import __version__
 from lexoplay.config import HOTKEY_LABELS, MOUSE_PEEK, PEEK_KEYS, Hotkeys, Settings
 from lexoplay.games import WindowInfo
-from lexoplay.geometry import UI_SCALES, font_px_for
+from lexoplay.geometry import font_px_for
 from lexoplay.hotkeys import HotkeyError, parse, risk
 from lexoplay.lexo import Deck
 from lexoplay.store import Game, GameNotes, SavedWord, Store, StoredLine
@@ -299,9 +299,6 @@ class GamesPage(QWidget):
         mode_row.setSpacing(8)
         mode_row.addWidget(label("Текст в игре", "muted"))
         mode_row.addWidget(self._mode_combo(g), 0)
-        mode_row.addSpacing(10)
-        mode_row.addWidget(label("Размер подсказок", "muted"))
-        mode_row.addWidget(self._scale_combo(g), 0)
         mode_row.addStretch(1)
         col.addLayout(mode_row)
         if linked:
@@ -402,35 +399,6 @@ class GamesPage(QWidget):
             if mode != fresh.text_mode:
                 self.ctl.save_game(fresh.with_(text_mode=mode))
                 combo.setToolTip(self.TEXT_MODES[combo.currentIndex()][2])
-
-        combo.currentIndexChanged.connect(changed)
-        return combo
-
-    def _scale_combo(self, g: Game) -> QComboBox:
-        """Размер перевода, панели слов и карточек в этой игре: авто или свой."""
-        combo = QComboBox()
-        combo.addItem("Авто", None)
-        for s in UI_SCALES:
-            if abs(s - 1.0) > 1e-6:
-                combo.addItem(f"{round(s * 100)}%", s)
-        current = 0
-        if g.ui_scale:
-            for i in range(1, combo.count()):
-                if abs(float(combo.itemData(i)) - g.ui_scale) < 1e-6:
-                    current = i
-        combo.setCurrentIndex(current)
-        words = self.ctl.settings.hotkeys.words or "F3"
-        combo.setToolTip(
-            "Перевод, панель слов и карточки в этой игре. Авто: обычный размер, а если игра растянута "
-            "на весь экран (старая новелла 800×600 через Magpie), панель слов мельче её крупных букв.\n"
-            f"Прямо в игре: в режиме слов ({words}) клавиши − и + или Ctrl+колесо."
-        )
-
-        def changed(_i: int) -> None:
-            fresh = self.ctl.store.get_game(g.exe) or g
-            value = combo.currentData()
-            if value != fresh.ui_scale:
-                self.ctl.save_game(fresh.with_(ui_scale=value))
 
         combo.currentIndexChanged.connect(changed)
         return combo

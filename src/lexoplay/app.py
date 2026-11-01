@@ -142,7 +142,7 @@ KICK_MS = 70  # первая проверка после клика: игре н
 WATCH_OCR_SLOT = 3  # свой движок OCR для проверок смены реплики (F2 читает слотами 0–2)
 WORDS_REPEAT = {"words_left", "words_right", "words_up", "words_down", "words_shift_left", "words_shift_right"}
 # клавиши режима слов: Esc, Enter, стрелки, R, 1–5 и Shift (для Shift+стрелка)
-WORDS_VKS = {0x1B, 0x0D, 0x25, 0x26, 0x27, 0x28, 0x52, 0x31, 0x32, 0x33, 0x34, 0x35, 0x10, 0xA0, 0xA1, 0xBD, 0xBB, 0x6B, 0x6D}  # и −/+: размер подсказок
+WORDS_VKS = {0x1B, 0x0D, 0x25, 0x26, 0x27, 0x28, 0x52, 0x31, 0x32, 0x33, 0x34, 0x35, 0x10, 0xA0, 0xA1}
 # игры, которые ловят клик мыши даже без фокуса: на время режима слов их сворачиваем (настройка «Сам решает»)
 KNOWN_CLICK_GRABBERS = {"dr1_us.exe", "dr2_us.exe"}
 FREEZE_GRACE_S = 1.5  # сколько после сворачивания игры фокус может прыгать сам (в окне)
@@ -205,6 +205,19 @@ class CurrentLine:
         if self.record is not None:
             return self.record.source
         return self.utterance.text if self.utterance else ""
+
+
+@dataclass
+class EarlyHints:
+    """Учёба: запрос подсказок, отправленный прямо из потока пайплайна, сразу после OCR.
+
+    Раньше он уходил только когда главный поток доходил до реплики, и перевод иногда успевал раньше."""
+
+    t0: float
+    items: list[tuple[str, str]] = field(default_factory=list)
+    fut: asyncio.Future | None = None
+    sh: Shown | None = None
+    finished: bool = False
 
 
 @dataclass
@@ -981,11 +994,6 @@ class App(QObject):
             ("words_shift_left", "Shift+Left", "words"),
             ("words_shift_right", "Shift+Right", "words"),
             ("words_retranslate", "R", "words"),
-            # размер подсказок для этой игры: −/+ (и на цифровой клавиатуре)
-            ("words_bigger", "Equals", "words"),
-            ("words_bigger_num", "NumPlus", "words"),
-            ("words_smaller", "Minus", "words"),
-            ("words_smaller_num", "NumMinus", "words"),
             *((f"words_save_{n}", str(n), "words") for n in range(1, 6)),
         ):
             if not text:
@@ -1049,22 +1057,24 @@ class App(QObject):
         self.word_layer.relayout()
 
     def step_scale(self, step: int) -> None:
-        """−/+ или Ctrl+колесо в режиме слов: размер подсказок этой игры на шаг мельче или крупнее."""
+        """«−»/«+» у «Размер» в режиме слов (или Ctrl+колесо): размер подсказок этой игры на шаг."""
         if self.active is None:
             return
         game = self.store.get_game(self.active.exe)
         if game is None:
             return
         new = step_scale(game.ui_scale or 1.0, step)
-        self.store.save_game(game.with_(ui_scale=None if abs(new - 1.0) < 1e-6 else new))
+        if abs(new - (game.ui_scale or 1.0)) < 1e-6:
+            return  # уже самый мелкий или самый крупный
+        game = game.with_(ui_scale=None if abs(new - 1.0) < 1e-6 else new)
+        self.store.save_game(game)
+        self.word_layer.size_label = self._size_label(game)
         self._refresh_scale()
-        text = f"Размер для «{game.title}»: {round(new * 100)}%" + (" (авто)" if abs(new - 1.0) < 1e-6 else "")
-        if self.word_layer.is_open:
-            self.word_layer.notice(text)
-        else:
-            self.overlay.toast(text, 1600)
-        if self.window is not None:
-            self.window.refresh_games()
+        self.word_layer.update()
+
+    @staticmethod
+    def _size_label(game: Game | None) -> str:
+        return f"{round(game.ui_scale * 100)}%" if game is not None and game.ui_scale else "авто"
 
     def _set_zoom(self, zoom: float) -> None:
         if abs(zoom - self.zoom) < 0.05:
@@ -1599,8 +1609,6 @@ class App(QObject):
                 key = name[len("words_") :]
                 if key == "retranslate":
                     self.word_layer.request_retranslate()
-                elif key.startswith(("bigger", "smaller")):
-                    self.step_scale(1 if key.startswith("bigger") else -1)
                 elif key.startswith("save_"):
                     self.word_layer.save_explain_item(int(key[len("save_") :]) - 1)
                 else:
@@ -1941,7 +1949,14 @@ class App(QObject):
         exe, title, session_id = game.exe, game.title, session.id
 
         def study_seen(text: str, ocr: OcrResult, plan: StudyPlan, t: int = token) -> None:
-            self.bridge.call.emit(lambda: self._study_seen(t, exe, title, session_id, text, ocr, plan))
+            early = self._study_prefetch(exe, title, text, plan)  # из потока пайплайна: запрос уходит сразу
+            self.bridge.call.emit(lambda: self._study_seen(t, exe, title, session_id, text, ocr, plan, early))
+
+        if studying:
+            gloss = self._gloss_translator()
+            warm = getattr(gloss, "warm", None) if gloss is not self.translator else None
+            if warm is not None:
+                self.bg.submit(warm())  # перевод через Lexo, подсказки своим ключом: и их соединение заранее
 
         self._busy_source = None
         self._busy_recall = []
@@ -2231,7 +2246,15 @@ class App(QObject):
         return make
 
     def _study_seen(
-        self, token: int, exe: str, title: str, session_id: str, text: str, ocr: OcrResult, plan: StudyPlan
+        self,
+        token: int,
+        exe: str,
+        title: str,
+        session_id: str,
+        text: str,
+        ocr: OcrResult,
+        plan: StudyPlan,
+        early: EarlyHints | None = None,
     ) -> None:
         """Из пайплайна: реплика прочитана, перевод только начался. Свои подсказки сразу, подсказки модели
         отдельным быстрым запросом параллельно переводу (или из прошлого раза)."""
@@ -2240,7 +2263,61 @@ class App(QObject):
         sh = self._study
         if sh is None or sh.text != text or sh.exe != exe:
             sh = self._study_begin(exe, title, session_id, text, ocr, plan)
+        if early is not None and not sh.asked and not sh.pending:
+            early.sh = sh  # запрос уже идёт: дальше его места и ответ попадут в эту реплику
+            sh.pending = True
+            if early.items:
+                self._study_hints_in(sh, list(early.items), final=False)
+            if early.fut is not None and early.fut.done():
+                self._early_done(early)
+            return
         self._study_ask(sh)
+
+    def _study_prefetch(self, exe: str, title: str, text: str, plan: StudyPlan) -> EarlyHints | None:
+        """Из потока пайплайна (внутри его цикла asyncio): запрос подсказок модели уходит сразу после OCR."""
+        try:
+            if self.store.study_hints_get(exe, self.settings.target_lang, normalize_text(text)) is not None:
+                return None  # с прошлого раза: главный поток возьмёт их сам
+            tr = self._gloss_translator()
+            if tr is None:
+                return None
+            loop = asyncio.get_running_loop()
+        except Exception:
+            log.debug("учёба: ранний запрос подсказок не ушёл", exc_info=True)
+            return None
+        early = EarlyHints(time.monotonic())
+
+        def items(found: list[tuple[str, str]]) -> None:  # ещё одно место дописано
+            early.items = list(found)
+            self.bridge.call.emit(lambda: self._early_items(early))
+
+        coro = tr.hints(
+            text,
+            game=title,
+            level=self._study_level_name(),
+            room=plan.room,
+            known=tuple(dict.fromkeys([*plan.known, *(h.text for h in plan.hints)])),
+            source_lang=self.settings.source_lang,
+            target_lang=self.settings.target_lang,
+            on_items=items,
+        )
+        early.fut = loop.create_task(coro)
+        early.fut.add_done_callback(lambda _f: self.bridge.call.emit(lambda: self._early_done(early)))
+        return early
+
+    def _early_items(self, early: EarlyHints) -> None:
+        if early.sh is not None and not early.finished:
+            self._study_hints_in(early.sh, list(early.items), final=False)
+
+    def _early_done(self, early: EarlyHints) -> None:
+        if early.sh is None or early.finished or early.fut is None:
+            return  # реплика ещё не дошла до главного потока: _study_seen возьмёт ответ сам
+        early.finished = True
+        if early.fut.cancelled():
+            early.sh.pending = False
+            return
+        log.info("учёба: подсказки модели за %.2f с после OCR", time.monotonic() - early.t0)
+        self._study_fetched(early.sh, early.fut)  # type: ignore[arg-type]
 
     def _study_begin(self, exe: str, title: str, session_id: str, text: str, ocr: OcrResult, plan: StudyPlan) -> Shown:
         self._study_commit()
@@ -3075,6 +3152,7 @@ class App(QObject):
         if not views:
             return
         self.word_ctx = WordCtx(game.exe, game.title, session.id, line, views)
+        self.word_layer.size_label = self._size_label(game)
         self._refresh_scale()
         if self.client.linked:
             self.word_layer.deck_label = f"Колода {game.deck_label}"
