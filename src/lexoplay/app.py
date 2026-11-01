@@ -28,7 +28,7 @@ import socket
 import time
 import uuid
 from collections.abc import Callable, Coroutine
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime
 from typing import Any
 
@@ -340,6 +340,7 @@ class App(QObject):
         self._apply_overlay_settings()
         self.word_layer.selected.connect(self._on_word_selected)
         self.word_layer.add_clicked.connect(self._on_word_add)
+        self.word_layer.alt_clicked.connect(self._on_word_alt)
         self.word_layer.explain_clicked.connect(self._request_explain)
         self.word_layer.retranslate_clicked.connect(self._retranslate)
         self._better: AnthropicTranslator | None = None
@@ -3530,14 +3531,28 @@ class App(QObject):
         self._stat(exe, words=1)
 
     def _set_card(self, card: CardState | None) -> None:
-        if self.word_ctx is not None:
-            self.word_ctx.card = card
+        ctx = self.word_ctx
+        if ctx is not None:
+            ctx.card = card
         self.word_layer.set_card(card)
+        sense = ctx.sense if ctx is not None else None
+        phrase = sense is not None and bool(sense.phrase) and card is not None and card.phase != "loading"
+        self.word_layer.set_phrase(match_phrase(ctx.views, sense.phrase) if phrase and ctx and sense else [])
 
     def _card_from(self, sense: Sense) -> CardState:
-        return CardState(
-            "ready", sense.lemma, sense.ipa, sense.pos, list(sense.senses), in_deck=sense.in_deck, local=not self.client.linked
-        )
+        """Карточка слова. Если слово входит в выражение, которое стоит учить целиком, в карточке выбор:
+        главным то, что учить (выражение, если само слово тут почти ничего не значит), второе ниже своей кнопкой."""
+        local = not self.client.linked
+        first = sense.senses[0] if sense.senses else ""
+        if sense.phrase_lemma and sense.phrase_first:
+            return CardState(
+                "ready", sense.phrase_lemma, "", "выражение", [sense.phrase_meaning], local=local,
+                phrase_first=True, alt_label="само слово", alt_title=sense.lemma, alt_meaning=first,
+            )  # fmt: skip
+        card = CardState("ready", sense.lemma, sense.ipa, sense.pos, list(sense.senses), in_deck=sense.in_deck, local=local)
+        if sense.phrase_lemma:
+            card.alt_label, card.alt_title, card.alt_meaning = "в выражении", sense.phrase_lemma, sense.phrase_meaning
+        return card
 
     async def _lookup(self, ctx: WordCtx, selection: str) -> Sense:
         """Значение слова: через Lexo, а без привязки своим ключом."""
@@ -3617,33 +3632,55 @@ class App(QObject):
 
         self.run_bg(coro, finished)
 
+    def _word_item(self, ctx: WordCtx, *, phrase: bool) -> dict[str, str | None]:
+        """Что сохранять: выражение вокруг слова или само слово (выделенное)."""
+        sense = ctx.sense
+        if phrase and sense is not None and sense.phrase_lemma:
+            return {
+                "selection": sense.phrase, "lemma": sense.phrase_lemma, "translation": sense.phrase_meaning,
+                "ipa": None, "pos": "phrase", "marked": None,
+            }  # fmt: skip
+        return {
+            "selection": ctx.selection,
+            "lemma": sense.lemma if sense else None,
+            "translation": sense.translation if sense and sense.translation else None,
+            "ipa": sense.ipa if sense else None,
+            "pos": sense.pos if sense else None,
+            "marked": (sense.marked_translation or None) if sense else None,
+        }
+
     def _on_word_add(self) -> None:
+        """Главная кнопка карточки: слово или (если главное выражение) выражение."""
         ctx = self.word_ctx
         if ctx is None or not ctx.selection or ctx.card is None or not ctx.card.button_enabled:
             return
-        sense = ctx.sense
-        self._save_word(
-            ctx,
-            selection=ctx.selection,
-            lemma=sense.lemma if sense else None,
-            translation=sense.translation if sense and sense.translation else None,
-            ipa=sense.ipa if sense else None,
-            pos=sense.pos if sense else None,
-            marked=(sense.marked_translation or None) if sense else None,
-        )
-        word = sense.lemma if sense else ctx.selection
         card = ctx.card
+        item = self._word_item(ctx, phrase=card.phrase_first)
+        self._save_word(ctx, **item)  # type: ignore[arg-type]
+        word = item["lemma"] or item["selection"]
         if self.client.linked:
             game = self.store.get_game(ctx.exe)
-            in_deck = bool(sense and sense.in_deck)
+            in_deck = bool(ctx.sense and ctx.sense.in_deck and not card.phrase_first)
             deck = game.deck_label if game else ""
             note = "Пример из игры добавлен к карточке" if in_deck else f"Сохранено в колоду {deck}"
-            self._set_card(CardState("saved", card.title, card.ipa, card.pos, list(card.senses), in_deck=in_deck, note=note))
+            self._set_card(replace(card, phase="saved", in_deck=in_deck, note=note))
             self.overlay.toast(f"{word}: сохранено в Lexo")
         else:
             note = "Сохранено во вкладку «Слова». После привязки к Lexo уйдёт в карточки само"
-            self._set_card(CardState("saved", card.title, card.ipa, card.pos, list(card.senses), note=note, local=True))
+            self._set_card(replace(card, phase="saved", note=note, local=True))
             self.overlay.toast(f"{word}: сохранено в «Слова»")
+
+    def _on_word_alt(self) -> None:
+        """Вторая кнопка карточки: выражение вокруг слова (или само слово, если главное выражение)."""
+        ctx = self.word_ctx
+        if ctx is None or not ctx.selection or ctx.card is None or not ctx.card.alt_button or ctx.sense is None:
+            return
+        card = ctx.card
+        item = self._word_item(ctx, phrase=not card.phrase_first)
+        self._save_word(ctx, **item)  # type: ignore[arg-type]
+        self._set_card(replace(card, alt_saved=True))
+        where = "Lexo" if self.client.linked else "«Слова»"
+        self.overlay.toast(f"{item['lemma'] or item['selection']}: сохранено в {where}")
 
     def _cursor_tick(self) -> None:
         """Режим слов открыт: не держит ли курсор игра (мышь двигают, а он стоит)."""

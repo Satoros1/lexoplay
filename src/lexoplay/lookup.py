@@ -22,12 +22,18 @@ SENSE_PROMPT = """A learner whose native language is {tgt} clicked on a word in 
 Sentence: "{sentence}"
 Clicked: "{selection}"
 {translation_line}Reply with JSON only:
-{{"lemma": "<dictionary form of the clicked word or phrase; for a phrasal verb or idiom the whole expression, e.g. \\"make amends\\">",
+{{"lemma": "<dictionary form of the clicked word (of the clicked words, if several were selected)>",
  "pos": "<part of speech in English: noun, verb, adj, adv, phrase...>",
  "ipa": "<IPA transcription of the lemma, without slashes>",
- "senses": ["<meaning in {tgt} exactly as used in this sentence: the word a good translator would put in this very sentence>", "<another common meaning, optional>"],
- "marked_translation": "<the sentence translation above with the clicked word's translation wrapped in **double asterisks**, or empty if no translation was given>"}}
+ "senses": ["<meaning in {tgt} of the clicked word as used in this sentence: the same word the sentence translation above uses for it, when it has one>", "<another common meaning, optional>"],
+ "marked_translation": "<the sentence translation above with the clicked word's translation wrapped in **double asterisks**, or empty if no translation was given>",
+ "phrase": "<if the clicked word is part of a longer expression in this sentence that a learner should learn as a whole (an idiom, a phrasal verb, a set phrase or a fixed collocation whose meaning doesn't simply add up from its words), that expression exactly as it stands in the sentence; an empty string if the word stands on its own or the clicked words already are the whole expression>",
+ "phrase_lemma": "<dictionary form of that expression, with sb, sth or one's in the open slots, e.g. \\"beat around the bush\\", \\"have the mind to do sth\\">",
+ "phrase_meaning": "<meaning of that expression in {tgt} in this sentence>",
+ "phrase_first": <true if the clicked word alone means little here and the expression is what to learn, false if the word is worth learning on its own too>}}
 Short meanings, a word or a short phrase each, at most 3. No em dash characters."""
+LOOKUP_VERSION = 2  # 2: значение слова вместе с выражением вокруг него (phrase)
+
 
 
 def build_prompt(selection: str, sentence: str, sentence_translation: str | None, target_lang: str, source_lang: str) -> str:
@@ -49,19 +55,46 @@ def parse_sense(raw: str, selection: str) -> Sense:
     senses = [no_dash(str(x)) for x in data.get("senses", []) if str(x).strip()][:3]
     if not senses:
         raise ValueError("no senses")
+    lemma = str(data.get("lemma") or "").strip().strip('"') or selection.strip()
+    phrase, phrase_lemma, phrase_meaning = _phrase(data, selection, lemma)
     return Sense(
-        lemma=str(data.get("lemma") or "").strip().strip('"') or selection.strip(),
+        lemma=lemma,
         pos=str(data.get("pos") or "").strip(),
         ipa=str(data.get("ipa") or "").strip().strip("/[]"),
         senses=senses,
         marked_translation=no_dash(str(data.get("marked_translation") or "")),
+        phrase=phrase,
+        phrase_lemma=phrase_lemma,
+        phrase_meaning=phrase_meaning,
+        phrase_first=bool(phrase and data.get("phrase_first") is True),
     )
+
+
+def _phrase(data: dict, selection: str, lemma: str) -> tuple[str, str, str]:
+    """(выражение как в реплике, его словарная форма, значение) или пустые, если выражения вокруг слова нет."""
+    phrase = str(data.get("phrase") or "").strip().strip('"')
+    phrase_lemma = str(data.get("phrase_lemma") or "").strip().strip('"') or phrase
+    meaning = no_dash(str(data.get("phrase_meaning") or "").strip())
+    same = {selection.strip().lower(), lemma.strip().lower()}
+    if not phrase or not meaning or len(phrase.split()) < 2 or phrase.lower() in same or phrase_lemma.lower() in same:
+        return "", "", ""
+    return phrase, phrase_lemma, meaning
 
 
 def sense_json(s: Sense) -> str:
     """Значение слова для кеша на диске (in_deck не храним: он меняется)."""
     return json.dumps(
-        {"lemma": s.lemma, "pos": s.pos, "ipa": s.ipa, "senses": list(s.senses), "marked_translation": s.marked_translation},
+        {
+            "lemma": s.lemma,
+            "pos": s.pos,
+            "ipa": s.ipa,
+            "senses": list(s.senses),
+            "marked_translation": s.marked_translation,
+            "phrase": s.phrase,
+            "phrase_lemma": s.phrase_lemma,
+            "phrase_meaning": s.phrase_meaning,
+            "phrase_first": s.phrase_first,
+        },
         ensure_ascii=False,
     )
 
@@ -77,7 +110,9 @@ def lookup_key(model: str, target_lang: str, source_lang: str, selection: str, s
     """Ключ кеша значения: то же слово в той же реплике (с тем же переводом) той же моделью."""
     from lexoplay.dedupe import normalize_text
 
-    raw = "|".join((model, target_lang, source_lang, selection.strip().lower(), normalize_text(sentence), translation or ""))
+    raw = "|".join(
+        (f"v{LOOKUP_VERSION}", model, target_lang, source_lang, selection.strip().lower(), normalize_text(sentence), translation or "")
+    )
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()
 
 

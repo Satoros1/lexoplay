@@ -86,6 +86,11 @@ class Sense:
     marked_translation: str = ""
     in_deck: bool = False
     card_id: int | None = None
+    # слово входит в выражение, которое стоит учить целиком (идиома, фразовый глагол, устойчивое сочетание)
+    phrase: str = ""  # как в реплике
+    phrase_lemma: str = ""  # словарная форма, с sb/sth
+    phrase_meaning: str = ""
+    phrase_first: bool = False  # само слово тут почти ничего не значит: учить выражение
 
     @property
     def translation(self) -> str:
@@ -309,6 +314,10 @@ class LexoClient:
             marked_translation=str(data.get("marked_translation") or ""),
             in_deck=bool(data.get("in_deck")),
             card_id=data.get("card_id"),
+            phrase=str(data.get("phrase") or ""),
+            phrase_lemma=str(data.get("phrase_lemma") or ""),
+            phrase_meaning=str(data.get("phrase_meaning") or ""),
+            phrase_first=bool(data.get("phrase_first")),
         )
 
     async def explain(

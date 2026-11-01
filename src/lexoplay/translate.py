@@ -48,13 +48,15 @@ LATIN_TARGETS = frozenset({"en", "nl", "de", "es", "fr", "it", "pt", "pl"})  # �
 # 7: справка по игре (герои, термины, тон) и правила понимать реплику через игру; нарочные повторы
 #    внутри реплики больше не выбрасываются
 # 8: перевод не сокращает реплику: каждая часть и уточнение на месте
-TRANSLATION_VERSION = 8
+# 9: обычная речь близко к словам (игрок учит язык), идиомы и шутки по смыслу, без добавок вроде «просто», «ведь»
+TRANSLATION_VERSION = 9
 
 SYSTEM_PROMPT = """You are the localizer of the video game "{game}". The player reads its dialogue in {target}: you translate it line by line while they play.
 
-Write the translation a professional {target} game localizer would ship:
-- Natural, idiomatic {target} that a native speaker would really say in this situation. Rephrase freely; never translate word for word, never use calques, rare, bookish or made-up words.
-- Translate the whole meaning: keep every clause, qualifier and detail of the line (a shorter translation that loses a part of it is wrong), never drop a word and never put "..." in place of a word you are unsure about.
+The player is learning {source} and compares your translation with the original, so the translation stays close to the text while being correct, natural {target}:
+- Everyday speech is translated close to the words: every word and phrase gets its usual {target} equivalent, and the sentence keeps its structure and, where {target} allows, its word order, so a player who looks up an {source} word finds that same meaning in your translation. Reword only where a close rendering would be wrong or unnatural {target}; never use calques that aren't real {target}, rare, bookish or made-up words.
+- Idioms, set phrases, phrasal verbs whose meaning doesn't follow from their words, proverbs, quotes, puns and jokes are translated by their meaning, with the natural {target} equivalent, never word for word.
+- Add nothing the line doesn't say: no filler words or particles for flavour (in Russian: просто, ведь, же, ну, вот, вообще, уж, -то, всё-таки) unless the original has a word for them, no extra emotion, emphasis, explanation or ending. And drop nothing: every clause, qualifier and detail stays (a shorter translation that loses a part of the line is wrong), and never put "..." in place of a word you are unsure about.
 - Translate only what the line says: never add a meaning, a reason or an ending of your own. If the OCR lost words or the line breaks off mid-sentence, translate what is there and end with "...".
 - Keep the perspective: a line in which the speaker talks about themselves stays in the first person and is never retold ("he says that...", "she asks..."). Never talk to the player, never add the speaker's name.
 - A line with a speaker is that character's own words. A line without a speaker is narration, the hero's thoughts, a sign or a menu: translate it as such.
@@ -62,7 +64,7 @@ Write the translation a professional {target} game localizer would ship:
 - Game terms (mechanics, modes, items, titles, places) read like the proper name of that thing in {target} and stay the same every time: take them from the glossary or the game notes. A term that isn't there gets a short natural {target} name a player would understand, never a transliteration of the English sounds.
 - Tutorial and system lines explain the controls and mechanics: make them clear and exact, with the same terms the game uses elsewhere.
 - The result must make sense in the scene. If you can't make sense of a line even with the context and the game in mind, translate what is clear and keep it plain; never write nonsense.
-- Keep each character's voice: slang, rudeness, jokes, hesitation, politeness. Stay consistent with the earlier translations: the same form of address between the same characters (ты/вы and the like), the same genders, the same names and terms. The glossary wins over everything. Write names in the {target} alphabet by its usual transliteration rules; when {target} has its own alphabet, never leave a name in Latin letters.
+- Keep each character's voice at the strength of the original: slang, rudeness, jokes, hesitation, politeness. Stay consistent with the earlier translations: the same form of address between the same characters (ты/вы and the like), the same genders, the same names and terms. The glossary wins over everything. Write names in the {target} alphabet by its usual transliteration rules; when {target} has its own alphabet, never leave a name in Latin letters.
 - The text comes from OCR and can be garbled: l/I, 0/O, rn/m, split or merged words ("vi ew", "becamewarped"), stray symbols like | or #, a few stray letters after the last sentence ("... say? lij": that is the text box arrow, drop it). Work out the words the game really shows from the letters and the context, then translate them. ALL CAPS is just the game's font: use normal capitalization.
 - The screen sometimes shows the same text twice (say, in a box behind the dialogue), so a long sentence may come twice: translate it once and never invent a link between the copies. A character repeating their own words on purpose is not that ("Where's your evidence...? Y-Yeah, where's your evidence!?"): translate every part.
 - If the speaker label looks like a piece of the sentence rather than a name, treat it as part of the line.
@@ -72,7 +74,7 @@ Write the translation a professional {target} game localizer would ship:
 {examples}
 Reply with the translation of the line after "Translate this line". Then on a new line write "@@" and that line in {source} as the game really shows it: the OCR mistakes fixed, the same words and punctuation, normal capitalization, no speaker name. Nothing else: no quotes, no notes.
 Work out the garbled words silently, before you answer: the reply is shown to the player as is, so it never contains your reasoning, guesses about the OCR, corrections of yourself, alternatives or a second version: write the translation once, from start to end. If you can't be sure of a word, choose the most likely one and translate.
-When the request ends with <study>, the player is learning {source} and reads the original first, so translate closely (for such a request this wins over "rephrase freely" above): keep every part of the line and, where {target} allows, its order, so the player can match each phrase of the original with its translation. It still reads as natural {target}, but nothing is retold, merged or left out.
+When the request ends with <study>, the player reads the original first and only then your translation: follow the original's word order wherever {target} allows, so each phrase of the original is easy to find in the translation.
 Never use the em dash character; use a comma, a colon or a new sentence instead.{notes}"""
 
 SOURCE_MARK = "@@"
@@ -100,15 +102,17 @@ Pick the parts of the line such a learner most likely won't understand, the most
 # Образцы хорошего перевода: маленькой модели они дают больше, чем любые правила.
 EXAMPLES = {
     "ru": [
-        ("My view became warped, twisted.", "Всё перед глазами поплыло и исказилось."),
-        ("Huh? You got a problem with me, punk?", "Чего? Есть ко мне претензии, сопляк?"),
-        ("Don't beat around the bush. Just tell me.", "Не ходи вокруг да около. Просто скажи."),
+        ("I guess I'll just have to wait and see.", "Наверное, мне просто придётся подождать и посмотреть."),
+        ("I don't really feel like talking right now.", "Мне сейчас не очень хочется разговаривать."),
+        ("Huh? You got a problem with me, punk?", "А? У тебя со мной какие-то проблемы, сопляк?"),
+        ("Don't beat around the bush. Just tell me.", "Не ходи вокруг да около. Просто скажи мне."),
+        ("There's no way I'm letting you go alone.", "Ни за что не отпущу тебя одного."),
         ("And then, out of nowhere,", "И тут, откуда ни возьмись..."),
-        ("Ugh... my head is killing me.", "Ох... голова просто раскалывается."),
+        ("Ugh... my head is killing me.", "Ох... голова раскалывается."),
         ("l can't be|ieve this is happening...", "Не могу поверить, что это происходит..."),
         ("I'm sorry to have kept you waiting.", "Простите, что заставил вас ждать."),
-        ("You're not a b-b-blabbermouth, right? This h-has to be a secret!", "Ты ведь не б-б-болтун, правда? Это д-должно остаться в секрете!"),
-        ("Feels gross? Hell no. Feels *great*, more like!", "Противно? Чёрта с два. Скорее, кайфово!"),
+        ("You're not a b-b-blabbermouth, right? This h-has to be a secret!", "Ты не б-б-болтун, правда? Это д-должно остаться в секрете!"),
+        ("Feels gross? Hell no. Feels *great*, more like!", "Противно? Чёрта с два. Скорее, классно!"),
     ],
 }
 
@@ -118,7 +122,7 @@ def examples_block(target_lang: str) -> str:
     if not pairs:
         return ""
     lines = "\n".join(f"{en} → {tr}" for en, tr in pairs)
-    return f"\nExamples of the style we want (original → translation):\n{lines}\n"
+    return f"\nExamples of the style we want (original → translation; idioms by meaning, everything else close):\n{lines}\n"
 
 
 # Справка по игре: один раз на игру модель посильнее пишет, что это за игра, как зовут героев

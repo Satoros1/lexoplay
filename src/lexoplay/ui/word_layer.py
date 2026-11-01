@@ -93,6 +93,7 @@ def _rect(r: QRectF) -> Rect:
 class WordLayer(QWidget):
     selected = Signal(list)  # индексы выбранных слов
     add_clicked = Signal()
+    alt_clicked = Signal()  # вторая кнопка карточки: выражение вокруг слова или само слово
     explain_clicked = Signal()  # кнопка «Разбор реплики»
     retranslate_clicked = Signal()  # кнопка «Перевести иначе»
     explain_save = Signal(int)  # «+» у пункта разбора
@@ -121,6 +122,8 @@ class WordLayer(QWidget):
         self._hover: int | None = None
         self._card: CardState | None = None
         self._button_rect: QRectF | None = None
+        self._alt_rect: QRectF | None = None
+        self._phrase_idx: list[int] = []  # слова выражения, в которое входит выбранное слово
         self._card_rect: QRectF | None = None
         self._strip: Rect | None = None  # строка перевода: карточка её не закрывает
         self._speaker: str | None = None
@@ -303,6 +306,12 @@ class WordLayer(QWidget):
         self._card_word = word
         self._card = card
         self.update()
+
+    def set_phrase(self, indices: list[int]) -> None:
+        """Выражение вокруг выбранного слова: эти слова чуть подсвечены, видно, что входит в выражение."""
+        if indices != self._phrase_idx:
+            self._phrase_idx = list(indices)
+            self.update()
 
     @property
     def explain_open(self) -> bool:
@@ -518,7 +527,10 @@ class WordLayer(QWidget):
         self._idle.start()
         hover = self._hit_word(pos)
         over_button = bool(self._button_rect and self._button_rect.contains(pos))
-        self.setCursor(Qt.CursorShape.PointingHandCursor if hover is not None or over_button else Qt.CursorShape.ArrowCursor)
+        over_alt = bool(self._alt_rect and self._alt_rect.contains(pos))
+        self.setCursor(
+            Qt.CursorShape.PointingHandCursor if hover is not None or over_button or over_alt else Qt.CursorShape.ArrowCursor
+        )
         if hover != self._hover:
             self._hover = hover
             self.update()
@@ -527,6 +539,8 @@ class WordLayer(QWidget):
         target: tuple[str, int] | None = None
         if over_button and self._card is not None and self._card.button_enabled:
             target = ("add", 0)
+        elif over_alt and self._card is not None and self._card.alt_button:
+            target = ("alt", 0)
         elif hover is not None and not (self._sel == [hover] and not self._shift_down()):
             target = ("word", hover)
         if target != self._dwell_used:
@@ -538,14 +552,14 @@ class WordLayer(QWidget):
             if target is not None:
                 self._dwell_on = target
                 self._dwell_t0 = time.monotonic()
-                self._dwell.start(HOVER_ADD_MS if target[0] == "add" else HOVER_WORD_MS)
-                if target[0] == "add":
+                self._dwell.start(HOVER_ADD_MS if target[0] in ("add", "alt") else HOVER_WORD_MS)
+                if target[0] in ("add", "alt"):
                     self._dwell_anim.start()
 
     def _dwell_stop(self) -> None:
         self._dwell.stop()
         self._dwell_anim.stop()
-        if self._dwell_on is not None and self._dwell_on[0] == "add":
+        if self._dwell_on is not None and self._dwell_on[0] in ("add", "alt"):
             self.update()
         self._dwell_on = None
 
@@ -558,6 +572,10 @@ class WordLayer(QWidget):
             self._dwell_used = target
             if self._card and self._card.button_enabled:
                 self.add_clicked.emit()
+        elif target[0] == "alt":
+            self._dwell_used = target
+            if self._card and self._card.alt_button:
+                self.alt_clicked.emit()
         else:
             self._pick_word(target[1], shift=self._shift_down())
 
@@ -605,6 +623,10 @@ class WordLayer(QWidget):
         if self._button_rect and self._button_rect.contains(pos):
             if self._card and self._card.button_enabled:
                 self.add_clicked.emit()
+            return
+        if self._alt_rect and self._alt_rect.contains(pos):
+            if self._card and self._card.alt_button:
+                self.alt_clicked.emit()
             return
         if self._card_rect and self._card_rect.contains(pos):
             return
@@ -709,6 +731,12 @@ class WordLayer(QWidget):
                 p.setPen(Qt.PenStyle.NoPen)
                 p.setBrush(fill)
                 p.drawRoundedRect(r.adjusted(-3, -2, 3, 2), 4, 4)
+            elif v.index in self._phrase_idx:  # выражение вокруг выбранного слова
+                fill = QColor(ACCENT)
+                fill.setAlphaF(0.14)
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(fill)
+                p.drawRoundedRect(r.adjusted(-3, -2, 3, 2), 4, 4)
             elif v.index == self._hover and v.clickable:
                 p.setPen(Qt.PenStyle.NoPen)
                 p.setBrush(QColor(255, 255, 255, 34))
@@ -743,6 +771,7 @@ class WordLayer(QWidget):
             p.drawLine(QPointF(x0, y), QPointF(x1, y))
 
         self._button_rect = None
+        self._alt_rect = None
         self._card_rect = None
         self._explain_rect = None
         self._hint_rect: QRectF | None = None
@@ -1105,6 +1134,15 @@ class WordLayer(QWidget):
             blocks.append(("button",))
             if self.deck_label and card.phase != "saved":
                 blocks.append(("text", f_note, self.deck_label, TEXT_MUTED))
+        if card.alt_title and card.phase != "loading":
+            # выбор: выражение вокруг слова или само слово (что сохранять, решает игрок)
+            blocks.append(("text", f_note, card.alt_label, TEXT_MUTED))
+            line = f"{card.alt_title} · {card.alt_meaning}" if card.alt_meaning else card.alt_title
+            blocks.append(("text", f_more, line, TEXT))
+            if card.alt_button:
+                blocks.append(("alt",))
+            else:
+                blocks.append(("text", f_note, "Тоже сохранено", ACCENT))
         blocks.append(("text", f_note, "←→ другое слово · Shift фраза · Esc выйти", TEXT_MUTED))
 
         gap = px * 0.35
@@ -1141,6 +1179,29 @@ class WordLayer(QWidget):
                 p.setPen(Qt.PenStyle.NoPen)
                 p.setBrush(QColor(255, 255, 255, 30))
                 p.drawRoundedRect(QRectF(x, y + h * 0.15, inner * b[1], h * 0.7), h * 0.3, h * 0.3)
+            elif b[0] == "alt":
+                label = card.alt_button or ""
+                fm = QFontMetricsF(f_btn)
+                bw = fm.horizontalAdvance(label) + px * 2.2
+                btn = QRectF(x, y + px * 0.25, bw, btn_h)
+                self._alt_rect = btn
+                edge = QColor(ACCENT)
+                fill = QColor(ACCENT)
+                fill.setAlphaF(0.12)
+                p.setPen(QPen(edge, 1.4))
+                p.setBrush(fill)
+                p.drawRoundedRect(btn.adjusted(0.7, 0.7, -0.7, -0.7), btn_h / 2, btn_h / 2)
+                if self._dwell_on == ("alt", 0):  # курсор держат на кнопке: заполняется до сохранения
+                    k = min(1.0, (time.monotonic() - self._dwell_t0) * 1000 / HOVER_ADD_MS)
+                    p.save()
+                    p.setClipRect(QRectF(btn.x(), btn.y(), btn.width() * k, btn.height()))
+                    p.setPen(Qt.PenStyle.NoPen)
+                    p.setBrush(QColor(63, 193, 165, 90))
+                    p.drawRoundedRect(btn, btn_h / 2, btn_h / 2)
+                    p.restore()
+                p.setFont(f_btn)
+                p.setPen(edge)
+                p.drawText(btn, int(Qt.AlignmentFlag.AlignCenter), label)
             else:
                 label = card.button or ""
                 fm = QFontMetricsF(f_btn)

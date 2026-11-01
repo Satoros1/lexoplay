@@ -146,8 +146,12 @@ def test_study_request_asks_for_close_translation_without_touching_the_cached_sy
     assert build_user(studying).endswith('<study level="B1"/>')
     assert build_system(plain) == build_system(studying)  # системная часть та же: кеш промпта не сбрасывается
     system = build_system(plain)
-    assert "translate closely" in system and "##" not in system  # подсказки идут своим быстрым запросом
-    assert "keep every clause, qualifier and detail" in system  # и обычный перевод без сокращений
+    assert "follow the original's word order" in system and "##" not in system  # подсказки идут своим быстрым запросом
+    assert "every clause, qualifier and detail stays" in system  # перевод без сокращений
+    # обычная речь близко к словам, идиомы по смыслу, без добавок от себя
+    assert "close to the words" in system and "Idioms, set phrases" in system and "просто, ведь, же" in system
+    assert "Rephrase freely" not in system
+    assert "Не ходи вокруг да около. Просто скажи мне." in system
 
 
 class _FakeStream:

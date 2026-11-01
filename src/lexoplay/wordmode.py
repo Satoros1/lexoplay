@@ -241,6 +241,20 @@ class CardState:
     in_deck: bool = False
     note: str = ""
     local: bool = False  # без Lexo: слово сохраняется в список в LexoPlay
+    # слово входит в выражение (идиома, фразовый глагол): в карточке выбор, что сохранить. Главное в карточке
+    # то, что стоит учить (phrase_first: выражение, а слово само по себе тут почти ничего не значит), второе ниже
+    phrase_first: bool = False
+    alt_label: str = ""  # «в выражении» или «само слово»
+    alt_title: str = ""
+    alt_meaning: str = ""
+    alt_saved: bool = False
+
+    @property
+    def alt_button(self) -> str | None:
+        """Подпись второй кнопки (сохранить выражение или само слово) или None."""
+        if not self.alt_title or self.alt_saved or self.phase == "loading":
+            return None
+        return "+ слово" if self.phrase_first else "+ выражение"
 
     @property
     def subtitle(self) -> str:
