@@ -183,6 +183,8 @@ class Game:
     strip_pos: Rect | None = None
     # dialog: окно диалога внизу; page: текст на весь экран (NVL), перевод поверх каждого абзаца
     text_mode: str = "dialog"
+    # размер перевода, панели слов и карточек для этой игры (множитель); None = авто
+    ui_scale: float | None = None
 
     @property
     def page(self) -> bool:
@@ -309,6 +311,7 @@ class Store:
             ("ocr_mode", "TEXT"),
             ("strip_json", "TEXT"),
             ("text_mode", "TEXT NOT NULL DEFAULT 'dialog'"),
+            ("ui_scale", "REAL"),
         ):
             if col not in cols:  # база из 0.1–0.2
                 self._db.execute(f"ALTER TABLE games ADD COLUMN {col} {ddl}")
@@ -316,7 +319,7 @@ class Store:
 
     _COLS = (
         "exe, title, region_json, name_region_json, capture, binarize, last_played_at, "
-        "deck_mode, deck_id, deck_title, ocr_mode, strip_json, text_mode"
+        "deck_mode, deck_id, deck_title, ocr_mode, strip_json, text_mode, ui_scale"
     )
 
     @staticmethod
@@ -324,6 +327,7 @@ class Store:
         return Game(
             row[0], row[1], _rect_from(row[2]), _rect_from(row[3]), row[4], bool(row[5]), row[6],
             row[7] or "game", row[8], row[9], row[10], _rect_from(row[11]), row[12] or "dialog",
+            float(row[13]) if row[13] else None,
         )
 
     def get_game(self, exe: str) -> Game | None:
@@ -335,12 +339,13 @@ class Store:
         game = game.with_(exe=game.exe.lower())
         with self._lock:
             self._db.execute(
-                f"INSERT INTO games ({self._COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                f"INSERT INTO games ({self._COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(exe) DO UPDATE SET title=excluded.title, region_json=excluded.region_json, "
                 "name_region_json=excluded.name_region_json, capture=excluded.capture, "
                 "binarize=excluded.binarize, last_played_at=excluded.last_played_at, "
                 "deck_mode=excluded.deck_mode, deck_id=excluded.deck_id, deck_title=excluded.deck_title, "
-                "ocr_mode=excluded.ocr_mode, strip_json=excluded.strip_json, text_mode=excluded.text_mode",
+                "ocr_mode=excluded.ocr_mode, strip_json=excluded.strip_json, text_mode=excluded.text_mode, "
+                "ui_scale=excluded.ui_scale",
                 (
                     game.exe,
                     game.title,
@@ -355,6 +360,7 @@ class Store:
                     game.ocr_mode,
                     _rect_to(game.strip_pos),
                     game.text_mode if game.text_mode in ("dialog", "page") else "dialog",
+                    game.ui_scale,
                 ),
             )
             self._db.commit()

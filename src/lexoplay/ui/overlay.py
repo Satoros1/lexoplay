@@ -18,7 +18,7 @@ from PySide6.QtCore import QEasingCurve, QPointF, QRectF, Qt, QTimer, QVariantAn
 from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPainter, QPaintEvent, QPen
 from PySide6.QtWidgets import QWidget
 
-from lexoplay.geometry import Rect, denormalize, font_px_for, place_strip
+from lexoplay.geometry import Rect, denormalize, font_px_for, game_text_damp, place_strip
 from lexoplay.recall import RecallChip
 from lexoplay.ui.theme import ACCENT, FONT_FAMILY, KNOWN, STRIP_BG, TEXT, TEXT_MUTED
 
@@ -153,6 +153,7 @@ class Overlay(QWidget):
         self._busy = False
         self._toast: str | None = None
         self.font_scale = 1.0
+        self.game_zoom = 1.0  # игра растянута (Magpie): перевод поверх абзаца мельче её крупных букв
         self.opacity = 0.84
         self.show_original = False
         self.strip_place = "above"  # above | below | top
@@ -413,7 +414,7 @@ class Overlay(QWidget):
         for i, (b, r) in enumerate(zip(self._page, rects, strict=True)):
             line_px = max(8.0, b.line_h * h)
             # рамка слова от OCR примерно с кегль игры: перевод того же размера, что и оригинал
-            px = max(PAGE_MIN_PX, min(44.0, line_px * 0.95)) * self.font_scale
+            px = max(PAGE_MIN_PX, min(44.0, line_px * 0.95 / game_text_damp(self.game_zoom))) * self.font_scale
             pad = max(4.0, line_px * 0.28)
             text_w = max(60.0, r.w)
             # вниз можно занять место до следующего абзаца: русский текст обычно длиннее английского

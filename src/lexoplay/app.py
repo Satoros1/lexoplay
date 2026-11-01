@@ -54,7 +54,7 @@ from lexoplay.cursorguard import CursorGuard
 from lexoplay.debugdump import DebugDump
 from lexoplay.dedupe import LineMemory, LineRecord, normalize_text
 from lexoplay.games import NOT_GAMES, WindowInfo, clean_title, is_game_exe
-from lexoplay.geometry import Rect
+from lexoplay.geometry import Rect, step_scale
 from lexoplay.history import LineCache
 from lexoplay.hotkeys import MOD_NOREPEAT, MOD_SHIFT, Hotkey, HotkeyError, parse
 from lexoplay.lexo import Account, Deck, GameRef, LexoClient, LexoError, LexoOffline, Sense, Usage
@@ -142,7 +142,7 @@ KICK_MS = 70  # первая проверка после клика: игре н
 WATCH_OCR_SLOT = 3  # свой движок OCR для проверок смены реплики (F2 читает слотами 0–2)
 WORDS_REPEAT = {"words_left", "words_right", "words_up", "words_down", "words_shift_left", "words_shift_right"}
 # клавиши режима слов: Esc, Enter, стрелки, R, 1–5 и Shift (для Shift+стрелка)
-WORDS_VKS = {0x1B, 0x0D, 0x25, 0x26, 0x27, 0x28, 0x52, 0x31, 0x32, 0x33, 0x34, 0x35, 0x10, 0xA0, 0xA1}
+WORDS_VKS = {0x1B, 0x0D, 0x25, 0x26, 0x27, 0x28, 0x52, 0x31, 0x32, 0x33, 0x34, 0x35, 0x10, 0xA0, 0xA1, 0xBD, 0xBB, 0x6B, 0x6D}  # и −/+: размер подсказок
 # игры, которые ловят клик мыши даже без фокуса: на время режима слов их сворачиваем (настройка «Сам решает»)
 KNOWN_CLICK_GRABBERS = {"dr1_us.exe", "dr2_us.exe"}
 FREEZE_GRACE_S = 1.5  # сколько после сворачивания игры фокус может прыгать сам (в окне)
@@ -354,6 +354,7 @@ class App(QObject):
         self._retranslate_token: object | None = None
         self.word_layer.explain_save.connect(self._on_explain_save)
         self.word_layer.finished.connect(self._on_words_finished)
+        self.word_layer.zoom_step.connect(self.step_scale)
         self._explain_cache: dict[tuple[str, str], Explanation] = {}
         self.word_ctx: WordCtx | None = None
         self.current: CurrentLine | None = None
@@ -361,6 +362,7 @@ class App(QObject):
 
         self.active: Active | None = None
         self.display: Rect | None = None
+        self.zoom = 1.0  # во сколько раз игра растянута на экране (Magpie: 800×600 на весь экран)
         self.state = "idle"  # idle | busy | picking
         self.token = 0
         self.watcher: LineWatcher | None = None  # следит, не сменилась ли показанная реплика
@@ -912,6 +914,8 @@ class App(QObject):
     def save_game(self, game: Game) -> None:
         before = self.store.get_game(game.exe)
         self.store.save_game(game)
+        if self.active and self.active.exe == game.exe.lower():
+            self._refresh_scale()  # сменили размер подсказок игры в окне LexoPlay
         if before is not None and before.text_mode != game.text_mode and self.active and self.active.exe == game.exe.lower():
             self._hide_strip()  # переключили окно диалога и текст на весь экран: старый перевод не к месту
         self._set_status()
@@ -977,6 +981,11 @@ class App(QObject):
             ("words_shift_left", "Shift+Left", "words"),
             ("words_shift_right", "Shift+Right", "words"),
             ("words_retranslate", "R", "words"),
+            # размер подсказок для этой игры: −/+ (и на цифровой клавиатуре)
+            ("words_bigger", "Equals", "words"),
+            ("words_bigger_num", "NumPlus", "words"),
+            ("words_smaller", "Minus", "words"),
+            ("words_smaller_num", "NumMinus", "words"),
             *((f"words_save_{n}", str(n), "words") for n in range(1, 6)),
         ):
             if not text:
@@ -1017,15 +1026,63 @@ class App(QObject):
         self.hotkeys.set_group("game", not paused and self._game_in_focus())
         self.hotkeys.set_group("words", not paused and self.word_layer.is_open)
 
+    def _game_scale(self) -> float:
+        """Свой размер подсказок у активной игры (окно LexoPlay → Игры, или −/+ в режиме слов); 1 = авто."""
+        if self.active is None:
+            return 1.0
+        try:
+            game = self.store.get_game(self.active.exe)
+        except Exception:
+            log.debug("размер игры: не прочитался", exc_info=True)
+            return 1.0
+        return game.ui_scale if game is not None and game.ui_scale else 1.0
+
+    def _refresh_scale(self) -> None:
+        """Общий «Размер текста» из «Вида» на размер этой игры: перевод, панель слов, карточки."""
+        scale = self.settings.font_scale * self._game_scale()
+        if abs(scale - self.overlay.font_scale) < 1e-6 and abs(scale - self.word_layer.font_scale) < 1e-6:
+            return
+        self.overlay.font_scale = scale
+        self.word_layer.font_scale = scale
+        self.overlay.update()
+        self.word_layer.relayout()
+
+    def step_scale(self, step: int) -> None:
+        """−/+ или Ctrl+колесо в режиме слов: размер подсказок этой игры на шаг мельче или крупнее."""
+        if self.active is None:
+            return
+        game = self.store.get_game(self.active.exe)
+        if game is None:
+            return
+        new = step_scale(game.ui_scale or 1.0, step)
+        self.store.save_game(game.with_(ui_scale=None if abs(new - 1.0) < 1e-6 else new))
+        self._refresh_scale()
+        text = f"Размер для «{game.title}»: {round(new * 100)}%" + (" (авто)" if abs(new - 1.0) < 1e-6 else "")
+        if self.word_layer.is_open:
+            self.word_layer.notice(text)
+        else:
+            self.overlay.toast(text, 1600)
+        if self.window is not None:
+            self.window.refresh_games()
+
+    def _set_zoom(self, zoom: float) -> None:
+        if abs(zoom - self.zoom) < 0.05:
+            return
+        self.zoom = zoom
+        self.overlay.game_zoom = zoom
+        self.word_layer.game_zoom = zoom
+        self.overlay.update()
+        self.word_layer.relayout()
+
     def _apply_overlay_settings(self) -> None:
-        self.overlay.font_scale = self.settings.font_scale
+        self.overlay.font_scale = self.settings.font_scale * self._game_scale()
         self.overlay.opacity = self.settings.strip_opacity
         self.overlay.show_original = self.settings.show_original
         self.overlay.strip_place = self.settings.strip_place
         self.overlay.font_family = self.settings.strip_font
         self.overlay.font_bold = self.settings.strip_bold
         self.overlay.peek_name = self.settings.peek[2]
-        self.word_layer.font_scale = self.settings.font_scale
+        self.word_layer.font_scale = self.overlay.font_scale
         self.word_layer.font_family = self.settings.strip_font
         self.word_layer.hover_pick = self.settings.hover_pick
         self.word_layer.animate = self.overlay.fade
@@ -1419,6 +1476,7 @@ class App(QObject):
             elif self._took_focus and self.word_layer.is_open:
                 self._close_words("switch")  # фокус режима слов игрок сам вернул игре (клик по её рамке)
             self.active = Active(root, pid, game.exe)
+            self._refresh_scale()
             self.overlay.strip_custom = game.strip_pos
             self.events.watch_game(root, pid)
             self.hotkeys.set_group("game", not self._hotkeys_paused)
@@ -1480,9 +1538,14 @@ class App(QObject):
             return self.display  # игра свёрнута нами: её рамка сейчас ничего не значит
         if not self.active or not winapi.is_window(self.active.hwnd):
             return None
-        rect, _scaled = winapi.display_rect(self.active.hwnd, self.settings.magpie_mode)
+        rect, scaled = winapi.display_rect(self.active.hwnd, self.settings.magpie_mode)
         if rect.empty:
             return None
+        zoom = 1.0
+        if scaled:  # Magpie растянул окно игры: во сколько раз её буквы крупнее задуманного
+            client = winapi.client_rect_screen(self.active.hwnd)
+            zoom = rect.h / client.h if client.h > 0 else 1.0
+        self._set_zoom(zoom)
         self.display = rect
         self.overlay.set_display_rect(rect)
         self.word_layer.set_display_rect(rect)
@@ -1535,6 +1598,8 @@ class App(QObject):
                 key = name[len("words_") :]
                 if key == "retranslate":
                     self.word_layer.request_retranslate()
+                elif key.startswith(("bigger", "smaller")):
+                    self.step_scale(1 if key.startswith("bigger") else -1)
                 elif key.startswith("save_"):
                     self.word_layer.save_explain_item(int(key[len("save_") :]) - 1)
                 else:
@@ -1586,6 +1651,7 @@ class App(QObject):
             Game(exe, clean_title(winapi.window_title(hwnd), exe), deck_mode=self.settings.deck)
         )
         self.active = Active(hwnd, pid, game.exe)
+        self._refresh_scale()
         self.events.watch_game(hwnd, pid)
         self.hotkeys.set_group("game", True)
         self._set_status()
@@ -3008,7 +3074,7 @@ class App(QObject):
         if not views:
             return
         self.word_ctx = WordCtx(game.exe, game.title, session.id, line, views)
-        self.word_layer.font_scale = self.settings.font_scale
+        self._refresh_scale()
         if self.client.linked:
             self.word_layer.deck_label = f"Колода {game.deck_label}"
         else:

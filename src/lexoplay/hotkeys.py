@@ -31,6 +31,11 @@ _KEYS.update(
         "pause": 0x13,
         "scrolllock": 0x91,
         "delete": 0x2E,
+        # −/+ (основная клавиатура и цифровая): размер подсказок в режиме слов
+        "minus": 0xBD,
+        "equals": 0xBB,
+        "numplus": 0x6B,
+        "numminus": 0x6D,
         # только для режима слов (в редакторе клавиш их не выбрать)
         "escape": 0x1B,
         "esc": 0x1B,

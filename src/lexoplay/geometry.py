@@ -99,6 +99,23 @@ def place_strip(region: Rect, strip_h: float, bounds: Rect, gap: float = 8.0) ->
     return Rect(region.x, max(bounds.y, region.y), region.w, strip_h)
 
 
+UI_SCALES = (0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.35, 1.5, 1.7)  # размер подсказок для игры: шаги −/+
+
+
+def step_scale(current: float, step: int) -> float:
+    """Следующий шаг размера от текущего (−1 мельче, +1 крупнее), в пределах UI_SCALES."""
+    i = min(range(len(UI_SCALES)), key=lambda k: abs(UI_SCALES[k] - current))
+    return UI_SCALES[max(0, min(len(UI_SCALES) - 1, i + step))]
+
+
+def game_text_damp(zoom: float) -> float:
+    """Во сколько раз панель слов и перевод поверх абзаца мельче текста самой игры.
+
+    Старая новелла 800×600, растянутая на весь экран (Magpie), рисует буквы в zoom раз крупнее
+    задуманного, и копия её кегля закрывала бы полэкрана. Не растянута: 1 (кегль как у игры)."""
+    return max(1.0, zoom) ** 0.4
+
+
 def font_px_for(display_h_logical: float, base_px: float = 19.0, scale: float = 1.0) -> float:
     """Размер шрифта строки: base_px при высоте игры 1080, пропорционально дальше.
 

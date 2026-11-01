@@ -39,7 +39,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QWidget
 
-from lexoplay.geometry import Rect, denormalize, font_px_for
+from lexoplay.geometry import Rect, denormalize, font_px_for, game_text_damp
 from lexoplay.ui.theme import ACCENT, FONT_FAMILY, KNOWN, NAME, RARE, STRIP_BG, TEXT, TEXT_MUTED
 from lexoplay.wordmode import (
     CardState,
@@ -98,6 +98,7 @@ class WordLayer(QWidget):
     retranslate_clicked = Signal()  # кнопка «Перевести иначе»
     explain_save = Signal(int)  # «+» у пункта разбора
     finished = Signal(str)  # причина: esc, idle, focus, hotkey, closed, outside
+    zoom_step = Signal(int)  # Ctrl+колесо: +1 крупнее, −1 мельче (размер для этой игры)
 
     def __init__(self, placer: Placer | None = None, on_native: Callable[[int], None] | None = None) -> None:
         super().__init__(
@@ -141,6 +142,11 @@ class WordLayer(QWidget):
         self._explain_rect: QRectF | None = None
         self._explain_saves: list[QRectF] = []
         self.font_scale = 1.0
+        self.game_zoom = 1.0  # во сколько раз игра растянута (Magpie): панель тогда мельче её крупного текста
+        self._notice = ""  # короткая надпись сверху, например «Размер для этой игры: 90%»
+        self._notice_timer = QTimer(self)
+        self._notice_timer.setSingleShot(True)
+        self._notice_timer.timeout.connect(self._clear_notice)
         self.font_family = ""  # шрифт реплики в панели; пусто = как в окне LexoPlay
         self.deck_label = ""
         self.explain_key = "F7"
@@ -471,7 +477,9 @@ class WordLayer(QWidget):
         px = self._px()
         left = max(8.0, base.x)
         width = max(240.0, min(base.right, bounds.w - 8) - left)
-        size = min(px * 2.4, max(px * 1.2, reg.h * 0.16))  # примерно кегль самой игры
+        # примерно кегль самой игры; растянутая игра (800×600 на весь экран) мельче её огромных букв
+        game_like = reg.h * 0.16 * self.font_scale / game_text_damp(self.game_zoom)
+        size = min(px * 2.4, max(px * 1.2, game_like))
         room = max(base.h, bounds.h * 0.5)
         plan = self._measure(size, width)
         for _ in range(8):  # длинная реплика: шрифт помельче, пока не влезет
@@ -660,6 +668,41 @@ class WordLayer(QWidget):
 
     def wheelEvent(self, e: QWheelEvent) -> None:  # noqa: N802
         e.accept()  # колесо над игрой в новеллах листает текст: пока режим открыт, не пускаем
+        if e.modifiers() & Qt.KeyboardModifier.ControlModifier and e.angleDelta().y():
+            self._idle.start()
+            self.zoom_step.emit(1 if e.angleDelta().y() > 0 else -1)
+
+    def relayout(self) -> None:
+        """Размер сменился (−/+ или Ctrl+колесо): разложить реплику заново."""
+        if self._open:
+            self._relayout()
+            self.update()
+
+    def notice(self, text: str, ms: int = 1600) -> None:
+        self._notice = text
+        self._notice_timer.start(ms)
+        self.update()
+
+    def _clear_notice(self) -> None:
+        self._notice = ""
+        self.update()
+
+    def _paint_notice(self, p: QPainter, bounds: Rect, px: float) -> None:
+        f = QFont(FONT_FAMILY)
+        f.setPixelSize(max(12, round(px * 0.86)))
+        f.setWeight(QFont.Weight.DemiBold)
+        fm = QFontMetricsF(f)
+        w = fm.horizontalAdvance(self._notice) + px * 1.8
+        h = fm.height() + px * 0.8
+        box = QRectF((bounds.w - w) / 2, px * 0.9, w, h)
+        bg = QColor(STRIP_BG)
+        bg.setAlphaF(0.96)
+        p.setPen(QPen(QColor(255, 255, 255, 40), 1))
+        p.setBrush(bg)
+        p.drawRoundedRect(box, h / 2, h / 2)
+        p.setFont(f)
+        p.setPen(TEXT)
+        p.drawText(box, int(Qt.AlignmentFlag.AlignCenter), self._notice)
 
     def keyPressEvent(self, e: QKeyEvent) -> None:  # noqa: N802
         # обычно сюда не попадает (фокуса нет), но если окно всё же активировали
@@ -807,6 +850,8 @@ class WordLayer(QWidget):
                 self._paint_card(p, card, sel, bounds, card_px, card_avoid)
         if not self._explain_open:
             self._paint_explain_button(p, avoid, bounds, px)
+        if self._notice:
+            self._paint_notice(p, bounds, px)
         p.end()
 
     def _fit(
@@ -923,11 +968,11 @@ class WordLayer(QWidget):
         f.setPixelSize(max(11, round(px * 0.76)))
         fm = QFontMetricsF(f)
         if self.cursor_locked:
-            text = "Курсор держит игра: слова стрелками ←→, Shift+→ фраза, Enter сохранить, Esc выйти"
+            text = "Курсор держит игра: слова стрелками ←→, Shift+→ фраза, Enter сохранить, −/+ размер, Esc выйти"
         elif self.focus_warning:
             text = self.warning_text or "Игра не отдала фокус: не кликай, наводи на слово и держи курсор на «+»"
         else:
-            text = ("Наведи на слово" if self.hover_pick else "Клик или ←→ по слову") + " · Shift фраза · Esc выйти"
+            text = ("Наведи на слово" if self.hover_pick else "Клик или ←→ по слову") + " · Shift фраза · −/+ размер · Esc выйти"
         x = max(4.0, region.x)
         room = right - x - px * 0.6
         if room < px * 8:
