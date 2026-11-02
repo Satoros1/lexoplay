@@ -169,6 +169,17 @@ def native_place(widget: QWidget, rect: Rect) -> None:
     winapi.place_topmost(int(widget.winId()), rect)
 
 
+def _empty_explain(exp: Any) -> bool:
+    """Разбор без пунктов и без смысла реплики: показывать нечего (модель отказалась или ответ обрезан)."""
+    return not getattr(exp, "items", None) and not (getattr(exp, "summary", "") or "").strip()
+
+
+def native_size(hwnd: int) -> tuple[float, float]:
+    """Настоящий размер нашего окна (физические пиксели): Qt узнаёт о SetWindowPos с опозданием."""
+    r = winapi.window_rect(hwnd)
+    return float(r.w), float(r.h)
+
+
 def overlay_native(hwnd: int) -> None:
     """Окна поверх игры: не попадают в наш же снимок экрана и не забирают фокус у игры."""
     winapi.exclude_from_capture(hwnd)
@@ -347,6 +358,7 @@ class App(QObject):
         self.overlay = Overlay(placer=native_place, on_native=overlay_native)
         self.picker: RegionPicker | None = None
         self.word_layer = WordLayer(placer=native_place, on_native=overlay_native)
+        self.word_layer.native_size = native_size
         # снимок игры, пока она свёрнута на время режима слов (и пока разворачивается после)
         self.freeze_frame = FreezeFrame(placer=native_place, on_native=overlay_native)
         self.freeze_frame.clicked.connect(lambda: self._close_words("outside"))
@@ -3344,7 +3356,12 @@ class App(QObject):
         ctx.explain = ExplainState("loading")
         self.word_layer.set_explain(ctx.explain)
 
+        log.info("разбор реплики: запрос (%s)", ctx.exe)
+
         def finished(result: Any, err: BaseException | None) -> None:
+            if err is None and _empty_explain(result):
+                log.warning("разбор реплики пришёл пустым (%s): %r", ctx.exe, ctx.line.sentence[:120])
+                err = TranslationError("Разбор пришёл пустым. Нажми F7 ещё раз.")
             if err is None:
                 self._remember_explain(ctx.exe, norm, result)  # за разбор уже заплачено: сохраняем, даже если слова закрыли
             if self.word_ctx is not ctx:
@@ -3384,6 +3401,8 @@ class App(QObject):
                 log.exception("разборы на диске недоступны")
                 raw = None
             got = explanation_from_json(raw) if raw else None
+            if got is not None and _empty_explain(got):
+                got = None  # пустой разбор из прошлых версий: спрашиваем заново
             if got is not None:
                 self._remember_explain(exe, norm, got, save=False)
         return got

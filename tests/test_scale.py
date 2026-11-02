@@ -106,3 +106,28 @@ def test_size_buttons_in_word_mode(qapp):
     assert steps[1:] == [-1, -1]
     layer.finish("esc")
     layer.close()
+
+
+def test_card_stays_on_the_real_window_and_panel(qapp):
+    """Qt ещё думает, что окно шире (SetWindowPos он видит с опозданием): карточка у правого края реплики
+    всё равно целиком на настоящем окне и в пределах панели."""
+    from lexoplay.ui.word_layer import WordLayer
+    from lexoplay.wordmode import CardState, reader_views
+
+    layer = WordLayer()
+    layer.animate = False
+    layer.resize(1600, 1000)
+    layer.native_size = lambda _hwnd: (1200.0 * layer.devicePixelRatioF(), 1000.0 * layer.devicePixelRatioF())
+    views = reader_views("She stands out and bounces up to extremely rigid attention.")
+    layer.open(Rect(0, 0, 1600, 1000), Rect(0.03, 0.72, 0.94, 0.25), views)
+    last = len(layer.views) - 2  # «rigid»: у правого края
+    layer.select([last])
+    layer.set_card(CardState("ready", "rigid", ipa="ˈrɪdʒɪd", pos="adj", senses=["напряжённый", "жёсткий"]))
+    layer.grab()
+    card = layer._card_rect  # noqa: SLF001
+    panel = layer.panel
+    assert card is not None and panel is not None
+    assert card.right() <= 1200 and panel.right() <= 1200
+    assert card.right() <= panel.right() + 5
+    layer.finish("esc")
+    layer.close()

@@ -19,11 +19,12 @@ click() и release(), а App на время режима забирает у и
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 
-from PySide6.QtCore import QEasingCurve, QPointF, QRectF, Qt, QTimer, QVariantAnimation, Signal
+from PySide6.QtCore import QEasingCurve, QPoint, QPointF, QRectF, Qt, QTimer, QVariantAnimation, Signal
 from PySide6.QtGui import (
     QColor,
     QFont,
@@ -52,6 +53,8 @@ from lexoplay.wordmode import (
     word_in_line,
 )
 from lexoplay.words import clean
+
+log = logging.getLogger(__name__)
 
 Placer = Callable[[QWidget, Rect], None]
 
@@ -146,6 +149,9 @@ class WordLayer(QWidget):
         self._explain_rect: QRectF | None = None
         self._explain_saves: list[QRectF] = []
         self.font_scale = 1.0
+        # настоящий размер нашего окна в физических пикселях (App: WinAPI). Qt узнаёт о SetWindowPos
+        # не сразу, и раскладка по устаревшему размеру уводила карточку за край игры
+        self.native_size: Callable[[int], tuple[float, float]] | None = None
         self.game_zoom = 1.0  # во сколько раз игра растянута (Magpie): панель тогда мельче её крупного текста
         self._notice = ""  # короткая надпись сверху, например «Размер для этой игры: 90%»
         self._notice_timer = QTimer(self)
@@ -251,6 +257,9 @@ class WordLayer(QWidget):
         self.show()
         self._placer(self, display)
         self._relayout()
+        b = self._bounds()
+        if abs(b.w - self.width()) > 4 or abs(b.h - self.height()) > 4:
+            log.info("слой слов: Qt %sx%s, на деле %.0fx%.0f (игра %s)", self.width(), self.height(), b.w, b.h, display)
         self._idle.start()
         self.repaint()  # сразу свежий кадр
 
@@ -413,7 +422,37 @@ class WordLayer(QWidget):
 
     # ------------------------------------------------------------------ геометрия
     def _bounds(self) -> Rect:
-        return Rect(0, 0, float(self.width()), float(self.height()))
+        """Где рисовать: размер окна по Qt, но не больше настоящего окна и не за краем экрана."""
+        w, h = float(self.width()), float(self.height())
+        if self.native_size is not None:
+            try:
+                nw, nh = self.native_size(int(self.winId()))
+                k = self.devicePixelRatioF() or 1.0
+                if nw > 0 and nh > 0:
+                    w, h = min(w, nw / k), min(h, nh / k)
+            except Exception:
+                log.debug("размер окна слоя не прочитался", exc_info=True)
+        screen = self.screen()
+        if screen is not None:
+            g = screen.geometry()
+            tl = self.mapToGlobal(QPoint(0, 0))
+            sw, sh = float(g.right() + 1 - tl.x()), float(g.bottom() + 1 - tl.y())
+            if sw >= w * 0.6:
+                w = min(w, sw)
+            if sh >= h * 0.6:
+                h = min(h, sh)
+        return Rect(0, 0, max(1.0, w), max(1.0, h))
+
+    def _card_bounds(self, bounds: Rect) -> Rect:
+        """Карточка и разбор по ширине не выходят за панель с репликой: она точно на экране."""
+        panel = self._panel
+        if panel is None:
+            return bounds
+        left = max(bounds.x, panel.x() - 4)
+        right = min(bounds.right, panel.right() + 4)
+        if right - left < min(bounds.w, 340.0):
+            return bounds
+        return Rect(left, bounds.y, right - left, bounds.h)
 
     def _px(self) -> float:
         return font_px_for(float(self.height()), 17.0, self.font_scale)
@@ -847,33 +886,34 @@ class WordLayer(QWidget):
         self._explain_saves = []
         self._explain_btn = None
         self._retranslate_btn = None
+        cb = self._card_bounds(bounds)
         if self._explain_open and self._explain is not None:
             st = self._explain
-            ex_px, _av = self._fit(lambda q: self._paint_explain(p, st, avoid, bounds, q, measure=True), avoid, bounds, px, [avoid])
+            ex_px, _av = self._fit(lambda q: self._paint_explain(p, st, avoid, cb, q, measure=True), avoid, cb, px, [avoid])
             if self._card_alpha < 1.0:
                 p.save()
                 p.setOpacity(p.opacity() * max(0.0, self._card_alpha))
                 p.translate(0, (1.0 - self._card_alpha) * 8)
-                self._paint_explain(p, st, avoid, bounds, ex_px)
+                self._paint_explain(p, st, avoid, cb, ex_px)
                 p.restore()
             else:
-                self._paint_explain(p, st, avoid, bounds, ex_px)
+                self._paint_explain(p, st, avoid, cb, ex_px)
         elif self._card and self._sel:
             sel = union([denormalize(self._views[i].rect, bounds) for i in self._sel if i < len(self._views)])
             card = self._card
             # не влезает ни над панелью, ни под ней: сначала разрешаем закрыть ряд кнопок, потом мельче шрифт
             card_px, card_avoid = self._fit(
-                lambda q: self._paint_card(p, card, sel, bounds, q, avoid, measure=True),
-                sel, bounds, px, [self._card_avoid(avoid, bounds, px), avoid],
+                lambda q: self._paint_card(p, card, sel, cb, q, avoid, measure=True),
+                sel, cb, px, [self._card_avoid(avoid, bounds, px), avoid],
             )  # fmt: skip
             if self._card_alpha < 1.0:
                 p.save()
                 p.setOpacity(p.opacity() * max(0.0, self._card_alpha))
                 p.translate(0, (1.0 - self._card_alpha) * 8)  # и чуть всплывает
-                self._paint_card(p, card, sel, bounds, card_px, card_avoid)
+                self._paint_card(p, card, sel, cb, card_px, card_avoid)
                 p.restore()
             else:
-                self._paint_card(p, card, sel, bounds, card_px, card_avoid)
+                self._paint_card(p, card, sel, cb, card_px, card_avoid)
         if not self._explain_open:
             self._paint_explain_button(p, avoid, bounds, px)
         if self._notice:
