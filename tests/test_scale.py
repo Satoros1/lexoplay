@@ -131,3 +131,32 @@ def test_card_stays_on_the_real_window_and_panel(qapp):
     assert card.right() <= panel.right() + 5
     layer.finish("esc")
     layer.close()
+
+
+def test_size_hold_stops_when_buttons_move_away_and_under_explain(qapp):
+    from PySide6.QtCore import QPointF
+    from PySide6.QtTest import QTest
+
+    from lexoplay.ui.word_layer import HOVER_SIZE_MS, WordLayer
+    from lexoplay.wordmode import ExplainState, reader_views
+
+    layer = WordLayer()
+    layer.animate = False
+    layer.hover_pick = True
+    steps = []
+    layer.zoom_step.connect(steps.append)
+    layer.open(Rect(0, 0, 1422, 1067), Rect(0.04, 0.72, 0.92, 0.25), reader_views("Don't beat around the bush."))
+    layer.grab()
+    plus = layer._size_plus  # noqa: SLF001
+    layer.hover(plus.center())
+    layer._last_pos = QPointF(5, 5)  # noqa: SLF001  после шага кнопки «уехали» из-под стоящего курсора
+    QTest.qWait(int(HOVER_SIZE_MS * 2.5))
+    assert steps == []  # курсор стоит, но кнопки под ним уже нет: шагов нет
+    layer.grab()
+    layer.set_explain(ExplainState("loading"))
+    layer.grab()  # разбор открыт: ряда кнопок нет, «−»/«+» не нажимаются вслепую
+    assert layer._size_minus is None and layer._size_plus is None  # noqa: SLF001
+    layer.click(QPointF(plus.center()))
+    assert steps == []
+    layer.finish("esc")
+    layer.close()

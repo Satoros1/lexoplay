@@ -143,6 +143,7 @@ class WordLayer(QWidget):
         self._retranslate_btn: QRectF | None = None
         self._size_minus: QRectF | None = None  # «−» и «+» у «Размер» над панелью
         self._size_plus: QRectF | None = None
+        self._last_pos: QPointF | None = None  # где курсор последний раз был над слоем
         self.size_label = ""  # «Авто» или «90%»: размер подсказок этой игры (ставит App)
         self.can_retranslate = False  # у реплики есть перевод: можно попросить другой
         self.retranslating = False
@@ -566,6 +567,7 @@ class WordLayer(QWidget):
         """Курсор над слоем (движение мыши до окна доходит: его хук не забирает)."""
         if not self._open:
             return
+        self._last_pos = QPointF(pos)
         self._idle.start()
         hover = self._hit_word(pos)
         over_button = bool(self._button_rect and self._button_rect.contains(pos))
@@ -633,6 +635,10 @@ class WordLayer(QWidget):
             if self._card and self._card.alt_button:
                 self.alt_clicked.emit()
         elif target[0] == "size":
+            # после шага кнопки сдвигаются: курсор стоит на месте, но уже не над ними. Тогда не шагаем дальше,
+            # иначе размер сам уехал бы до самого мелкого или крупного
+            if self._last_pos is None or self._size_at(self._last_pos) != target[1]:
+                return
             self.zoom_step.emit(target[1])
             self._dwell_on = target  # держат дальше: следующий шаг
             self._dwell.start(HOVER_SIZE_MS)
@@ -877,6 +883,7 @@ class WordLayer(QWidget):
         self._explain_saves = []
         self._explain_btn = None
         self._retranslate_btn = None
+        self._size_minus = self._size_plus = None  # ряд кнопок под разбором не рисуется: и «−»/«+» не жмутся
         cb = self._card_bounds(bounds)
         if self._explain_open and self._explain is not None:
             st = self._explain
