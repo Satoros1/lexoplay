@@ -24,7 +24,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 
-from PySide6.QtCore import QEasingCurve, QPoint, QPointF, QRectF, Qt, QTimer, QVariantAnimation, Signal
+from PySide6.QtCore import QEasingCurve, QPointF, QRectF, Qt, QTimer, QVariantAnimation, Signal
 from PySide6.QtGui import (
     QColor,
     QFont,
@@ -422,7 +422,7 @@ class WordLayer(QWidget):
 
     # ------------------------------------------------------------------ геометрия
     def _bounds(self) -> Rect:
-        """Где рисовать: размер окна по Qt, но не больше настоящего окна и не за краем экрана."""
+        """Где рисовать: размер окна по Qt, но не больше настоящего окна (его размер знает Windows)."""
         w, h = float(self.width()), float(self.height())
         if self.native_size is not None:
             try:
@@ -432,15 +432,6 @@ class WordLayer(QWidget):
                     w, h = min(w, nw / k), min(h, nh / k)
             except Exception:
                 log.debug("размер окна слоя не прочитался", exc_info=True)
-        screen = self.screen()
-        if screen is not None:
-            g = screen.geometry()
-            tl = self.mapToGlobal(QPoint(0, 0))
-            sw, sh = float(g.right() + 1 - tl.x()), float(g.bottom() + 1 - tl.y())
-            if sw >= w * 0.6:
-                w = min(w, sw)
-            if sh >= h * 0.6:
-                h = min(h, sh)
         return Rect(0, 0, max(1.0, w), max(1.0, h))
 
     def _card_bounds(self, bounds: Rect) -> Rect:
