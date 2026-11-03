@@ -54,10 +54,13 @@ from lexoplay.games import WindowInfo
 from lexoplay.geometry import font_px_for
 from lexoplay.hotkeys import HotkeyError, parse, risk
 from lexoplay.lexo import Deck
+from lexoplay.novelwords import Deck as NovelDeck
+from lexoplay.novelwords import NovelView
 from lexoplay.store import Game, GameNotes, SavedWord, Store, StoredLine
 from lexoplay.ui import theme
 from lexoplay.ui.history_page import HistoryPage
 from lexoplay.ui.hotkey_edit import HotkeyEdit
+from lexoplay.ui.novel_dialog import NovelDialog, card_text, novel_view
 from lexoplay.ui.pages import GameNotesDialog, GlossaryDialog, WordsPage
 from lexoplay.ui.progress_page import ProgressPage
 from lexoplay.ui.theme import app_icon, draw_logo, icon
@@ -140,6 +143,12 @@ class Controller(Protocol):
     def set_game_notes(self, exe: str, text: str) -> None: ...
     def remake_game_notes(self, exe: str) -> bool: ...
     def get_last_read(self, exe: str): ...  # type: ignore[no-untyped-def]
+    def novel_info(self, exe: str) -> NovelView: ...
+    def scan_novel(self, exe: str, folder: str | None = None) -> bool: ...
+    def novel_deck(self, exe: str, index: int) -> NovelDeck | None: ...
+    def make_novel_deck(
+        self, exe: str, chosen: list[str], skipped: list[str], done: Callable[[str | None, str | None], None]
+    ) -> None: ...
     def autostart_supported(self) -> bool: ...
     def autostart_enabled(self) -> bool: ...
     def set_autostart(self, on: bool) -> bool: ...
@@ -301,6 +310,21 @@ class GamesPage(QWidget):
         mode_row.addWidget(self._mode_combo(g), 0)
         mode_row.addStretch(1)
         col.addLayout(mode_row)
+        view = novel_view(self.ctl, g.exe)
+        if view is not None:
+            novel_row = QHBoxLayout()
+            novel_row.setSpacing(8)
+            words = QPushButton("Слова новеллы…")
+            words.setObjectName("novelButton")
+            words.setToolTip("Готовность к каждой части новеллы и колода из 10–15 слов перед ней, без спойлеров")
+            words.clicked.connect(lambda: self._novel(g))
+            novel_row.addWidget(words, 0)
+            text, style = card_text(view)
+            if text:
+                novel_row.addWidget(label(text, style, wrap=True), 1)
+            else:
+                novel_row.addStretch(1)
+            col.addLayout(novel_row)
         if linked:
             deck_row = QHBoxLayout()
             deck_row.setSpacing(8)
@@ -373,6 +397,10 @@ class GamesPage(QWidget):
 
     def _glossary(self, g: Game) -> None:
         GlossaryDialog(self.ctl, g, self.window()).exec()
+
+    def _novel(self, g: Game) -> None:
+        NovelDialog(self.ctl, g, self.window()).exec()
+        self.refresh()
 
     def _reset_ocr(self, g: Game) -> None:
         fresh = self.ctl.store.get_game(g.exe) or g

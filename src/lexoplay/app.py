@@ -30,6 +30,7 @@ import uuid
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime
+from pathlib import Path
 from typing import Any
 
 from PIL import Image
@@ -37,7 +38,7 @@ from PySide6.QtCore import QObject, QPointF, QTimer, QUrl, Signal
 from PySide6.QtGui import QAction, QDesktopServices, QFont, QGuiApplication, QImage
 from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon, QWidget
 
-from lexoplay import __version__, autostart, updater
+from lexoplay import __version__, autostart, novel, novelwords, prelearn, updater
 from lexoplay.bg import BackgroundLoop
 from lexoplay.config import (
     MOUSE_PEEK,
@@ -332,6 +333,10 @@ class App(QObject):
         self._study_moved = False  # с тех пор курсор двигали: наведение считается
         self._study_hover: tuple[object, float] = (None, 0.0)  # на чём курсор и с какого момента
         self._gloss_tr: AnthropicTranslator | None = None
+        self._game_dirs: dict[str, str] = {}  # exe -> папка его exe (запоминаем в store, когда меняется)
+        self._novel_busy: dict[str, str] = {}  # exe -> "scan" | "deck"
+        self._novel_errors: dict[str, str] = {}
+        self._novel_engines: dict[str, novel.Engine] = {}
         self._gloss_sig: tuple = ()
         self._last_input = 0.0  # когда игрок последний раз кликал или жал клавишу (monotonic)
         self._busy_since = 0.0  # когда начался текущий перевод
@@ -1500,6 +1505,7 @@ class App(QObject):
                 self._close_words("switch")  # фокус режима слов игрок сам вернул игре (клик по её рамке)
             self.active = Active(root, pid, game.exe)
             self._refresh_scale()
+            self._note_game_dir(pid, game.exe)
             self.overlay.strip_custom = game.strip_pos
             self.events.watch_game(root, pid)
             self.hotkeys.set_group("game", not self._hotkeys_paused)
@@ -1673,6 +1679,7 @@ class App(QObject):
         )
         self.active = Active(hwnd, pid, game.exe)
         self._refresh_scale()
+        self._note_game_dir(pid, game.exe)
         self.events.watch_game(hwnd, pid)
         self.hotkeys.set_group("game", True)
         self._set_status()
@@ -2458,6 +2465,157 @@ class App(QObject):
             self._gloss_tr = AnthropicTranslator(key, self.settings.model, think=False)
             self._gloss_sig = sig
         return self._gloss_tr
+
+    # ------------------------------------------------------------------ слова новеллы
+    def _note_game_dir(self, pid: int, exe: str) -> None:
+        """Папка exe игры: по ней потом ищется текст новеллы. В store пишем только когда она поменялась."""
+        if exe in self._game_dirs:
+            return
+        try:
+            path = winapi.process_path(pid)
+        except Exception:
+            path = None
+        if not path:
+            return
+        folder = os.path.dirname(path)
+        self._game_dirs[exe] = folder
+        if self.store.get_meta(f"game_dir:{exe}") != folder:
+            self.store.set_meta(f"game_dir:{exe}", folder)
+
+    def _novel_known(self) -> tuple[str, Callable[[str], bool]]:
+        return self.settings.study_level, self.vocab.known
+
+    def novel_info(self, exe: str) -> novelwords.NovelView:
+        level, known = self._novel_known()
+        folder = self.store.get_meta(f"game_dir:{exe}") or ""
+        busy = self._novel_busy.get(exe)
+        if busy == "scan":
+            return novelwords.NovelView("scanning", folder=folder)
+        nv = novelwords.load(exe)
+        if nv is not None:
+            ready = novelwords.readiness(nv, level, known)
+            return novelwords.NovelView(
+                "ready",
+                summary=novelwords.summary(nv, level, known),
+                folder=nv.folder,
+                note=nv.note,
+                parts=[(p.title, r) for p, r in zip(nv.parts, ready, strict=True)],
+            )
+        err = self._novel_errors.get(exe, "")
+        if err:
+            return novelwords.NovelView("error", error=err, folder=folder)
+        if folder and os.path.isdir(folder):
+            eng = self._novel_engines.get(exe)
+            if eng is None:
+                try:
+                    eng = novel.detect(novel.game_root(Path(folder)))
+                except OSError:
+                    eng = novel.Engine("unknown", "движок не узнал", True)
+                self._novel_engines[exe] = eng
+            if not eng.readable:
+                return novelwords.NovelView("none", folder=folder, can_read=False, error=f"{eng.name}: {eng.why}")
+            what = "движок не узнал, поищу текст в файлах" if eng.key == "unknown" else eng.name
+            return novelwords.NovelView("none", summary=what, folder=folder)
+        return novelwords.NovelView("none")
+
+    def scan_novel(self, exe: str, folder: str | None = None) -> bool:
+        """Найти текст новеллы и посчитать слова (в фоне). False: папка игры неизвестна."""
+        if self._novel_busy.get(exe):
+            return True
+        if folder:
+            self.store.set_meta(f"game_dir:{exe}", folder)
+            self._novel_engines.pop(exe, None)
+        folder = folder or self.store.get_meta(f"game_dir:{exe}")
+        if not folder or not os.path.isdir(folder):
+            return False
+        game = self.store.get_game(exe)
+        title = game.title if game else exe
+        old = novelwords.load(exe)
+        self._novel_busy[exe] = "scan"
+        self._novel_errors.pop(exe, None)
+
+        def work() -> novelwords.Novel:
+            root = novel.game_root(Path(folder))
+            t0 = time.monotonic()
+            script = novel.extract(root)
+            nv = novelwords.build(exe, title, root, script)
+            if old is not None:
+                nv.taken, nv.skipped = old.taken, old.skipped
+            novelwords.save(nv)
+            log.info(
+                "новелла %s: %s, %d слов, частей %d, %.1f с",
+                exe, script.engine.name, nv.words, len(nv.parts), time.monotonic() - t0,
+            )  # fmt: skip
+            return nv
+
+        def done(_nv: object, err: BaseException | None) -> None:
+            self._novel_busy.pop(exe, None)
+            if err is not None:
+                if not isinstance(err, novel.NovelError):
+                    log.warning("слова новеллы %s: %s", exe, err, exc_info=err)
+                self._novel_errors[exe] = str(err) if isinstance(err, novel.NovelError) else f"Не вышло: {err}"
+            if self.window is not None:
+                self.window.refresh_games()
+
+        self.run_bg(asyncio.to_thread(work), done)
+        return True
+
+    def novel_deck(self, exe: str, index: int) -> novelwords.Deck | None:
+        nv = novelwords.load(exe)
+        if nv is None or not 0 <= index < len(nv.parts):
+            return None
+        level, known = self._novel_known()
+        return novelwords.deck(nv, index, level, known)
+
+    def make_novel_deck(
+        self, exe: str, chosen: list[str], skipped: list[str], done: Callable[[str | None, str | None], None]
+    ) -> None:
+        """Слова колоды к части: значения и примеры пишет модель (только по словам, без текста игры)."""
+        nv = novelwords.load(exe)
+        if nv is None:
+            done(None, "Сначала найди текст новеллы.")
+            return
+        if skipped:
+            nv.skipped |= set(skipped)
+            novelwords.save(nv)
+        if not chosen:
+            done("Отметил как знакомые: больше они не попадутся.", None)
+            return
+        tr = self._gloss_translator()
+        if tr is None:
+            done(None, "Значения слов пишет модель твоего ключа Anthropic. Добавь ключ в настройках.")
+            return
+        game = self.store.get_game(exe)
+        title = game.title if game else nv.title
+        self._novel_busy[exe] = "deck"
+
+        def back(res: object, err: BaseException | None) -> None:
+            self._novel_busy.pop(exe, None)
+            if err is not None or not isinstance(res, tuple):
+                log.warning("колода новеллы %s: %s", exe, err)
+                done(None, str(err) if isinstance(err, TranslationError) else "Значения слов не пришли. Попробуй ещё раз.")
+                return
+            items, usage = res
+            self.own_usage.add("novel", usage, self.settings.model)
+            session = self.sessions.touch(exe, title)
+            for it in items:
+                self._store_word(
+                    exe, title, session.id,
+                    selection=it.lemma, lemma=it.lemma, translation=it.meaning, ipa=it.ipa or None, pos=it.pos or None,
+                    sentence=it.example, sentence_translation=it.example_tr or None,
+                )  # fmt: skip
+            fresh = novelwords.load(exe) or nv
+            fresh.taken |= {w.lower() for w in chosen}
+            novelwords.save(fresh)
+            where = "в колоду Lexo" if self.client.linked else "в «Слова»"
+            done(f"Готово: {len(items)} слов {where}.", None)
+            if self.window is not None:
+                self.window.refresh_games()
+
+        self.run_bg(
+            prelearn.prelearn(tr, title, chosen, source_lang=self.settings.source_lang, target_lang=self.settings.target_lang),
+            back,
+        )
 
     def _study_tick(self) -> None:
         """Alt или курсор на плашке: перевод виден. Курсор на «?» (над окном диалога или на подчёркнутом месте):

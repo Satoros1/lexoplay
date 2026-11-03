@@ -101,6 +101,18 @@ def rank(token: str) -> int | None:
     return best
 
 
+def lemma(token: str) -> str:
+    """Словарная форма: самая частая из слова и его форм по окончаниям (stopped -> stop, she'd -> she)."""
+    w = norm(token)
+    ranks = _ranks()
+    best, best_r = w, ranks.get(w)
+    for b in bases(w):
+        r = ranks.get(b)
+        if r is not None and (best_r is None or r < best_r):
+            best, best_r = b, r
+    return best
+
+
 def _junk(w: str) -> bool:
     return (
         w in INTERJECTIONS
