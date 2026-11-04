@@ -368,3 +368,43 @@ def test_novel_dialog_picks_words(qapp, tmp_path: Path) -> None:  # type: ignore
     import shiboken6
 
     shiboken6.delete(dlg)  # окно без родителя: удалить до QApplication, иначе падение на выходе
+
+
+# ------------------------------------------------------------------ переводы на другие языки и имена
+ES = "Que quieres de mí, por favor dime la verdad. Yo no sé qué pasa con ella, pero es muy raro."
+DE = "Ich weiß nicht, was das ist, aber sie ist schon wieder da und mein Kopf tut weh."
+
+
+def test_other_language_files_and_lines_dropped(tmp_path: Path) -> None:
+    game = tmp_path / "game"
+    game.mkdir()
+    en = [f'    hi "{s}"' for s in lines(300, 21, "reluctant")]
+    (game / "script-a1-monday.rpy").write_text(
+        "\n".join(["label start:", *en, f'    hi "{DE}"', "translate spanish start_1:", f'    hi "{ES}"', '    hi "Hola amigo como estas"']),
+        encoding="utf-8",
+    )  # fmt: skip
+    (game / "script-a1-monday-es.rpy").write_text("\n".join(f'    hi "{ES}"' for _ in range(300)), encoding="utf-8")
+    script = novel.extract(tmp_path)
+    flat = [s for p in script.parts for s in p.lines]
+    assert not any(s in (ES, DE) or "Hola" in s for s in flat)
+    assert len(flat) == 300
+
+
+def test_translate_nodes_in_rpyc_skipped() -> None:
+    c = _renpy_classes()
+    mod = sys.modules["renpy.ast"]
+    if not hasattr(mod, "Translate"):
+        mod.Translate = type("Translate", (), {"__module__": "renpy.ast"})  # type: ignore[attr-defined]
+    say_en, say_es = c["Say"](), c["Say"]()
+    say_en.what, say_es.what = "I am not sure what you mean by that.", ES
+    tr = mod.Translate()  # type: ignore[attr-defined]
+    tr.language, tr.block = "spanish", [say_es]
+    data = zlib.compress(pickle.dumps(({}, [say_en, tr]), protocol=2))
+    assert novel.rpyc_lines(data) == ["I am not sure what you mean by that."]
+
+
+def test_names_written_lowercase_now_and_then_are_still_names(tmp_path: Path) -> None:
+    text = ["Shizune signed something quickly to me."] * 40 + ["the shizune look, she said."] + lines(50, 22)
+    sc = novel.Script(novel.Engine("renpy", "Ren'Py", True), [novel.Part("Вся новелла", text)])
+    counts = novelwords.count(sc)[0].counts
+    assert "shizune" not in counts

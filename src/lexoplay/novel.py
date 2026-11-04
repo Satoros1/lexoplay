@@ -198,6 +198,12 @@ def extract(root: Path, engine: Engine | None = None) -> Script:
         ) from exc
     chunks = [(name, [s for s in (clean(x) for x in lines) if _texty(s)]) for name, lines in chunks]
     chunks = [(n, ls) for n, ls in chunks if ls]
+    chunks, dropped = only_english(chunks)
+    log.info(
+        "новелла (%s): файлов с текстом %d, другие языки убраны (файлов %d, строк %d); крупные: %s",
+        engine.key, len(chunks), dropped[0], dropped[1],
+        ", ".join(f"{n}={sum(len(s.split()) for s in ls)}" for n, ls in sorted(chunks, key=lambda c: -len(c[1]))[:12]),
+    )  # fmt: skip
     total = sum(len(s.split()) for _n, ls in chunks for s in ls)
     if total < 2000:
         if engine.key == "unknown":
@@ -447,6 +453,8 @@ def _walk_say(root: object) -> list[str]:
         seen.add(id(o))
         if isinstance(o, _Stub):
             cls = type(o).__name__
+            if cls.startswith("Translate") and o.__dict__.get("language") not in (None, "", "None"):
+                continue  # перевод на другой язык (translate spanish ...)
             if cls in ("Say", "TranslateSay"):
                 what = o.__dict__.get("what")
                 if isinstance(what, str):
@@ -492,11 +500,26 @@ _RPY_SKIP = re.compile(
 _RPY_SAY = re.compile(r'^(?:[A-Za-z_][\w.]*(?:\s+[\w.]+)*\s+)?"((?:[^"\\]|\\.)*)"')
 
 
+_RPY_TRANSLATE = re.compile(r"^translate\s+(\w+)\s")
+
+
 def rpy_lines(text: str) -> list[str]:
     out: list[str] = []
+    skip_from: int | None = None  # внутри «translate spanish ...:»: перевод на другой язык
     for raw in text.splitlines():
         s = raw.strip()
-        if not s or _RPY_SKIP.match(s):
+        if not s:
+            continue
+        indent = len(raw) - len(raw.lstrip())
+        if skip_from is not None:
+            if indent > skip_from:
+                continue
+            skip_from = None
+        m = _RPY_TRANSLATE.match(s)
+        if m and m.group(1) != "None":
+            skip_from = indent
+            continue
+        if _RPY_SKIP.match(s):
             continue
         m = _RPY_SAY.match(s)
         if m:
@@ -911,6 +934,53 @@ OTHER_LANG = re.compile(
     r"(?:^|[/\\_.\-])(fr|de|es|it|pt|ptbr|pt-br|ru|ja|jp|zh|cn|tw|ko|kr|pl|tr|uk|ua|french|german|spanish|"
     r"italian|portuguese|russian|japanese|chinese|korean|polish|turkish)(?=$|[/\\_.\-])"
 )
+# слова, которых нет в английском: так видно переводы новеллы на другие языки (они лежат рядом с английским)
+FOREIGN = frozenset(
+    "que el los las por para una como pero muy más eso esto yo tú él ella estoy está qué sí "
+    "les des pas vous je une qui mais pour avec dans très ça c'est j'ai n'est est-ce suis sont "
+    "und ich nicht sie der das ist ein eine mit auf aber auch noch schon mein dich mich wie wenn oder nur dass bin "
+    "nie się jest czy że jak mnie ale już tylko bardzo jestem więc może tak "
+    "che non di per sono della perché questo".split()
+)
+ENGLISH = frozenset(
+    "the you and of is it that what this my your was have be not with for are just he she they we there "
+    "don't i'm it's".split()
+)
+
+
+def lang_score(lines: list[str]) -> tuple[int, int]:
+    """(английских служебных слов, неанглийских)."""
+    en = fo = 0
+    for s in lines:
+        for w in re.findall(r"[^\W\d_]+(?:'[^\W\d_]+)?", s.lower()):
+            if w in ENGLISH:
+                en += 1
+            elif w in FOREIGN:
+                fo += 1
+    return en, fo
+
+
+def only_english(chunks: list[tuple[str, list[str]]]) -> tuple[list[tuple[str, list[str]]], tuple[int, int]]:
+    """Убрать переводы на другие языки: целые файлы, где неанглийского больше, и отдельные такие строки."""
+    out: list[tuple[str, list[str]]] = []
+    files = lines = 0
+    for name, ls in chunks:
+        en, fo = lang_score(ls)
+        if fo > en:
+            files += 1
+            continue
+        keep = []
+        for s in ls:
+            e, f = lang_score([s])
+            if f >= 2 and f > e:
+                lines += 1
+            else:
+                keep.append(s)
+        if keep:
+            out.append((name, keep))
+    return out, (files, lines)
+
+
 _STOP = frozenset(
     "the you and to of a i is it that in this what my me not was your be have do".split()
 )

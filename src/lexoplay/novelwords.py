@@ -24,7 +24,7 @@ from lexoplay.novel import Script
 
 log = logging.getLogger(__name__)
 
-VERSION = 1
+VERSION = 2  # 2: без переводов на другие языки и имён, которые изредка пишут со строчной
 DECK_SIZE = 12
 # уровень игрока (study_level) -> с какого места в частотном списке слова для него незнакомые
 EDGES = {
@@ -104,10 +104,14 @@ class Deck:
         return sum(d.here for d in self.words)
 
 
+NAME_SHARE = 0.1  # слово со строчной реже, чем в каждом десятом случае: имя (Shizune, Hisao, Tokyo)
+
+
 def count(script: Script) -> list[PartStat]:
-    """Счётчики словарных форм по частям. Имена отсеиваем: слово считается, если хоть раз было со строчной."""
+    """Счётчики словарных форм по частям. Имена отсеиваем: они почти всегда с заглавной."""
     raw: list[Counter[str]] = []
-    lower: set[str] = set()
+    every: Counter[str] = Counter()
+    low: Counter[str] = Counter()
     for part in script.parts:
         c: Counter[str] = Counter()
         for line in part.lines:
@@ -117,10 +121,14 @@ def count(script: Script) -> list[PartStat]:
                     len(pieces) > 1 and compound[0].isupper()
                 )  # Battler-kun, Onii-chan: часть имени
                 for tok in pieces:
-                    c[tok] += 1
+                    w = tok.lower()
+                    c[w] += 1
+                    every[w] += 1
                     if tok[0].islower() and not named:
-                        lower.add(tok.lower())
+                        low[w] += 1
         raw.append(c)
+    lower = {w for w, n in low.items() if n >= every[w] * NAME_SHARE}
+
     cache: dict[str, str | None] = {}
 
     def lemma_of(w: str) -> str | None:  # None: в «базу» (частое или междометие)
@@ -148,8 +156,7 @@ def count(script: Script) -> list[PartStat]:
     for part, c in zip(script.parts, raw, strict=True):
         tokens = base = 0
         counts: Counter[str] = Counter()
-        for tok, n in c.items():
-            w = tok.lower()
+        for w, n in c.items():
             if w not in lower and not (rarity.bases(w) & lower):
                 continue  # Hisao, Lilly, Tokyo: имена и названия (ни разу со строчной, ни сами, ни их формы)
             tokens += n
@@ -215,6 +222,8 @@ def deck(
         if k(lem) or not _learnable(lem):
             continue
         total = sum(p.counts.get(lem, 0) for p in later)
+        if rarity.rank(lem) is None and total < 8:
+            continue  # нет в словаре частот и встречается редко: опечатка, звук или слово не по-английски
         cands.append(DeckWord(lem, here, total))
     # сначала слова, которые встретятся хотя бы трижды: одноразовое слово учить незачем
     cands.sort(

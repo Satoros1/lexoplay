@@ -121,6 +121,9 @@ class NovelDialog(QDialog):
         self._timer.timeout.connect(self._load)
         self._busy = False
         self._load()
+        view = novel_view(self.ctl, game.exe)
+        if view is not None and view.state == "none" and view.folder and view.can_read:
+            self._scan(None)  # папка уже известна: искать текст сразу, без лишней кнопки
 
     # ------------------------------------------------------------------
     def _load(self) -> None:
