@@ -334,8 +334,10 @@ class App(QObject):
         self._study_hover: tuple[object, float] = (None, 0.0)  # на чём курсор и с какого момента
         self._gloss_tr: AnthropicTranslator | None = None
         self._game_dirs: dict[str, str] = {}  # exe -> папка его exe (запоминаем в store, когда меняется)
-        self._novel_busy: dict[str, str] = {}  # exe -> "scan" | "deck"
+        self._novel_busy: dict[str, str] = {}  # exe -> "scan" | "level" | "send"
         self._novel_errors: dict[str, str] = {}
+        self._novel_progress: dict[str, str] = {}
+        self._novel_messages: dict[str, str] = {}
         self._novel_engines: dict[str, novel.Engine] = {}
         self._gloss_sig: tuple = ()
         self._last_input = 0.0  # когда игрок последний раз кликал или жал клавишу (monotonic)
@@ -2488,9 +2490,12 @@ class App(QObject):
     def novel_info(self, exe: str) -> novelwords.NovelView:
         level, known = self._novel_known()
         folder = self.store.get_meta(f"game_dir:{exe}") or ""
-        busy = self._novel_busy.get(exe)
+        busy = self._novel_busy.get(exe, "")
+        progress = self._novel_progress.get(exe, "")
+        message = self._novel_messages.get(exe, "")
+        user = novelwords.USER_LEVEL.get(level, "B1")
         if busy == "scan":
-            return novelwords.NovelView("scanning", folder=folder)
+            return novelwords.NovelView("scanning", folder=folder, busy=busy)
         nv = novelwords.load(exe)
         if nv is not None:
             ready = novelwords.readiness(nv, level, known)
@@ -2499,11 +2504,16 @@ class App(QObject):
                 summary=novelwords.summary(nv, level, known),
                 folder=nv.folder,
                 note=nv.note,
-                parts=[(p.title, r) for p, r in zip(nv.parts, ready, strict=True)],
+                parts=[(p.title, r[0], r[1]) for p, r in zip(nv.parts, ready, strict=True)],
+                busy=busy,
+                progress=progress,
+                message=message,
+                leveled=bool(nv.levels) and not novelwords.to_level(nv),
+                user_level=user,
             )
         err = self._novel_errors.get(exe, "")
         if err:
-            return novelwords.NovelView("error", error=err, folder=folder)
+            return novelwords.NovelView("error", error=err, folder=folder, user_level=user)
         if folder and os.path.isdir(folder):
             eng = self._novel_engines.get(exe)
             if eng is None:
@@ -2515,11 +2525,11 @@ class App(QObject):
             if not eng.readable:
                 return novelwords.NovelView("none", folder=folder, can_read=False, error=f"{eng.name}: {eng.why}")
             what = "движок не узнал, поищу текст в файлах" if eng.key == "unknown" else eng.name
-            return novelwords.NovelView("none", summary=what, folder=folder)
-        return novelwords.NovelView("none")
+            return novelwords.NovelView("none", summary=what, folder=folder, user_level=user)
+        return novelwords.NovelView("none", user_level=user)
 
     def scan_novel(self, exe: str, folder: str | None = None) -> bool:
-        """Найти текст новеллы и посчитать слова (в фоне). False: папка игры неизвестна."""
+        """Найти текст новеллы и посчитать слова (в фоне), потом оценить уровни. False: папка неизвестна."""
         if self._novel_busy.get(exe):
             return True
         if folder:
@@ -2533,6 +2543,7 @@ class App(QObject):
         old = novelwords.load(exe)
         self._novel_busy[exe] = "scan"
         self._novel_errors.pop(exe, None)
+        self._novel_messages.pop(exe, None)
 
         def work() -> novelwords.Novel:
             root = novel.game_root(Path(folder))
@@ -2540,11 +2551,16 @@ class App(QObject):
             script = novel.extract(root)
             nv = novelwords.build(exe, title, root, script)
             if old is not None:
-                nv.taken, nv.skipped = old.taken, old.skipped
+                nv.taken, nv.skipped, nv.levels = old.taken, old.skipped, old.levels
+            shared = novelwords.known_levels()
+            for item in novelwords.to_level(nv):
+                if item in shared:
+                    nv.levels[item] = shared[item]
             novelwords.save(nv)
             log.info(
-                "новелла %s: %s, %d слов, частей %d, %.1f с",
-                exe, script.engine.name, nv.words, len(nv.parts), time.monotonic() - t0,
+                "новелла %s: %s, %d слов, частей %d, выражений %d, %.1f с",
+                exe, script.engine.name, nv.words, len(nv.parts),
+                sum(" " in k for k in nv.order), time.monotonic() - t0,
             )  # fmt: skip
             return nv
 
@@ -2554,68 +2570,181 @@ class App(QObject):
                 if not isinstance(err, novel.NovelError):
                     log.warning("слова новеллы %s: %s", exe, err, exc_info=err)
                 self._novel_errors[exe] = str(err) if isinstance(err, novel.NovelError) else f"Не вышло: {err}"
+            else:
+                self.level_novel(exe)
             if self.window is not None:
                 self.window.refresh_games()
 
         self.run_bg(asyncio.to_thread(work), done)
         return True
 
-    def novel_deck(self, exe: str, index: int) -> novelwords.Deck | None:
-        nv = novelwords.load(exe)
-        if nv is None or not 0 <= index < len(nv.parts):
-            return None
-        level, known = self._novel_known()
-        return novelwords.deck(nv, index, level, known)
-
-    def make_novel_deck(
-        self, exe: str, chosen: list[str], skipped: list[str], done: Callable[[str | None, str | None], None]
-    ) -> None:
-        """Слова колоды к части: значения и примеры пишет модель (только по словам, без текста игры)."""
+    def level_novel(self, exe: str) -> bool:
+        """Модель ставит уровень словам и выражениям новеллы (только список слов). False: нечего или нет ключа."""
+        if self._novel_busy.get(exe):
+            return True
         nv = novelwords.load(exe)
         if nv is None:
-            done(None, "Сначала найди текст новеллы.")
+            return False
+        items = novelwords.to_level(nv)
+        if not items:
+            return False
+        tr = self._gloss_translator()
+        if tr is None:
+            self._novel_messages[exe] = "Уровень слов оценивает модель твоего ключа Anthropic. Добавь ключ в настройках."
+            return False
+        game = self.store.get_game(exe)
+        title = game.title if game else nv.title
+        self._novel_busy[exe] = "level"
+        self._novel_messages.pop(exe, None)
+        total = len(items)
+        self._novel_progress[exe] = f"Модель оценивает уровень слов: 0 из {total}"
+
+        def tick(n: int) -> None:
+            self._novel_progress[exe] = f"Модель оценивает уровень слов: {n} из {total}"
+
+        async def run() -> tuple[dict[str, str], int]:
+            got: dict[str, str] = {}
+
+            async def batch(part: list[str]) -> None:
+                levels, usage = await prelearn.levels(tr, title, part)
+                got.update(levels)
+                self.bridge.call.emit(lambda u=usage: self.own_usage.add("novel", u, self.settings.model))
+
+            _res, errors = await prelearn.in_batches(items, prelearn.LEVEL_BATCH, batch, tick)
+            if errors and not got:
+                raise errors[0]
+            return got, len(errors)
+
+        def done(res: object, err: BaseException | None) -> None:
+            self._novel_busy.pop(exe, None)
+            self._novel_progress.pop(exe, None)
+            if err is not None or not isinstance(res, tuple):
+                log.warning("уровни слов новеллы %s: %s", exe, err)
+                self._novel_messages[exe] = str(err) if isinstance(err, TranslationError) else "Уровни слов не пришли. Попробуй ещё раз."
+                return
+            got, failed = res
+            fresh = novelwords.load(exe)
+            if fresh is not None:
+                fresh.levels.update(got)
+                novelwords.save(fresh)
+                novelwords.remember_levels(got)
+            if failed:
+                self._novel_messages[exe] = "Часть слов модель не оценила: нажми «Оценить ещё раз»."
+            log.info("уровни слов новеллы %s: %d из %d", exe, len(got), total)
+            if self.window is not None:
+                self.window.refresh_games()
+
+        self.run_bg(run(), done)
+        return True
+
+    def novel_words(self, exe: str, min_level: str, min_count: int) -> list[novelwords.Candidate]:
+        nv = novelwords.load(exe)
+        if nv is None:
+            return []
+        return novelwords.candidates(nv, min_level, min_count, self.vocab.known)
+
+    def novel_default_count(self, exe: str, min_level: str) -> int:
+        nv = novelwords.load(exe)
+        if nv is None:
+            return novelwords.MIN_COUNT
+        return novelwords.default_count(nv, min_level, self.vocab.known)
+
+    def send_novel_words(self, exe: str, chosen: list[str], skipped: list[str]) -> None:
+        """Отмеченные слова: значения и примеры пишет модель, слова ложатся в колоду игры на паузе
+        (в повторение пойдут, когда игрок нажмёт «Учить» в приложении Lexo). Неотмеченные: «уже знаю»."""
+        if self._novel_busy.get(exe):
+            return
+        nv = novelwords.load(exe)
+        if nv is None:
+            self._novel_messages[exe] = "Сначала найди текст новеллы."
             return
         if skipped:
             nv.skipped |= set(skipped)
             novelwords.save(nv)
         if not chosen:
-            done("Отметил как знакомые: больше они не попадутся.", None)
+            self._novel_messages[exe] = "Отметил как знакомые: больше они не попадутся."
             return
         tr = self._gloss_translator()
         if tr is None:
-            done(None, "Значения слов пишет модель твоего ключа Anthropic. Добавь ключ в настройках.")
+            self._novel_messages[exe] = "Значения слов пишет модель твоего ключа Anthropic. Добавь ключ в настройках."
             return
         game = self.store.get_game(exe)
         title = game.title if game else nv.title
-        self._novel_busy[exe] = "deck"
+        chosen = sorted(set(chosen), key=lambda w: nv.order.get(w, 1 << 30))  # что раньше встретится, раньше учить
+        total = len(chosen)
+        linked = self.client.linked
+        self._novel_busy[exe] = "send"
+        self._novel_messages.pop(exe, None)
+        self._novel_progress[exe] = f"Модель пишет значения и примеры: 0 из {total}"
+        session = self.sessions.touch(exe, title)
+        stored = 0
 
-        def back(res: object, err: BaseException | None) -> None:
-            self._novel_busy.pop(exe, None)
-            if err is not None or not isinstance(res, tuple):
-                log.warning("колода новеллы %s: %s", exe, err)
-                done(None, str(err) if isinstance(err, TranslationError) else "Значения слов не пришли. Попробуй ещё раз.")
-                return
-            items, usage = res
+        def tick(n: int) -> None:
+            self._novel_progress[exe] = f"Модель пишет значения и примеры: {n} из {total}"
+
+        def park(items: list[prelearn.Prelearned], asked: list[str], usage: tuple[int, int] | None) -> None:
+            nonlocal stored
             self.own_usage.add("novel", usage, self.settings.model)
-            session = self.sessions.touch(exe, title)
-            for it in items:
+            by_word = {it.word: it for it in items}
+            sent: set[str] = set()
+            for w in asked:  # в порядке появления: так они и встанут в «Ждут»
+                it = by_word.get(w.lower())
+                if it is None:
+                    continue
                 self._store_word(
                     exe, title, session.id,
                     selection=it.lemma, lemma=it.lemma, translation=it.meaning, ipa=it.ipa or None, pos=it.pos or None,
-                    sentence=it.example, sentence_translation=it.example_tr or None,
+                    sentence=it.example, sentence_translation=it.example_tr or None, parked=True,
                 )  # fmt: skip
-            fresh = novelwords.load(exe) or nv
-            fresh.taken |= {w.lower() for w in chosen}
-            novelwords.save(fresh)
-            where = "в колоду Lexo" if self.client.linked else "в «Слова»"
-            done(f"Готово: {len(items)} слов {where}.", None)
+                sent.add(w)
+            stored += len(sent)
+            fresh = novelwords.load(exe)
+            if fresh is not None and sent:
+                fresh.taken |= sent
+                novelwords.save(fresh)
+
+        async def run() -> int:
+            if linked and "parked_cards" not in await self.client.features():
+                raise TranslationError(
+                    "Сервер Lexo ещё старый: на нём слова сразу пошли бы в повторение. Обнови сервер и нажми ещё раз."
+                )
+            # пачки по порядку: колода в Lexo встаёт в порядке появления слов в новелле
+            failed = 0
+            for i in range(0, total, prelearn.MEANING_BATCH * prelearn.PARALLEL):
+                group = chosen[i : i + prelearn.MEANING_BATCH * prelearn.PARALLEL]
+                parts = [group[k : k + prelearn.MEANING_BATCH] for k in range(0, len(group), prelearn.MEANING_BATCH)]
+                got = await asyncio.gather(
+                    *(prelearn.prelearn(tr, title, part, source_lang=self.settings.source_lang,
+                                        target_lang=self.settings.target_lang) for part in parts),
+                    return_exceptions=True,
+                )  # fmt: skip
+                for part, res in zip(parts, got, strict=True):
+                    if isinstance(res, BaseException):
+                        log.warning("значения слов новеллы %s: %s", exe, res)
+                        if i == 0 and all(isinstance(x, BaseException) for x in got):
+                            raise res  # не вышло ничего с первой же попытки: ключ, сеть, лимит
+                        failed += len(part)
+                        continue
+                    items, usage = res
+                    self.bridge.call.emit(lambda it=items, p=part, u=usage: park(it, p, u))
+                tick(min(total, i + len(group)))
+            return failed
+
+        def done(res: object, err: BaseException | None) -> None:
+            self._novel_busy.pop(exe, None)
+            self._novel_progress.pop(exe, None)
+            if err is not None:
+                self._novel_messages[exe] = str(err) if isinstance(err, TranslationError) else f"Не вышло: {err}"
+                return
+            where = "в колоде игры в Lexo, вкладка «Ждут»" if linked else "во вкладке «Слова»"
+            msg = f"Готово: {novelwords.plural(stored, ('слово', 'слова', 'слов'))} {where}."
+            if isinstance(res, int) and res:
+                msg += f" Ещё {res} не пришли: нажми «Отправить» ещё раз."
+            self._novel_messages[exe] = msg
             if self.window is not None:
                 self.window.refresh_games()
 
-        self.run_bg(
-            prelearn.prelearn(tr, title, chosen, source_lang=self.settings.source_lang, target_lang=self.settings.target_lang),
-            back,
-        )
+        self.run_bg(run(), done)
 
     def _study_tick(self) -> None:
         """Alt или курсор на плашке: перевод виден. Курсор на «?» (над окном диалога или на подчёркнутом месте):
@@ -3812,7 +3941,9 @@ class App(QObject):
         sentence: str,
         sentence_translation: str | None,
         marked: str | None = None,
+        parked: bool = False,
     ) -> None:
+        """parked: слово из списка новеллы. В Lexo ляжет на паузу (ждёт «Учить»), в счёт слов дня не идёт."""
         sentence, sentence_translation = self._clean_example(exe, sentence, sentence_translation)
         game = self.store.get_game(exe)
         linked = self.client.linked
@@ -3847,10 +3978,14 @@ class App(QObject):
                     "marked_translation": marked,
                     "deck": "current" if deck_mode == "current" else "game",
                     "deck_id": game.deck_id if game and deck_mode == "deck" else None,
+                    **({"parked": True} if parked else {}),
                 },
             )
-        self.vocab.add(lemma or selection)
-        self._stat(exe, words=1)
+        word = lemma or selection
+        # слово из списка новеллы: его перевод сразу виден под репликой, когда встретится в игре
+        self.vocab.add(word, translations={word.strip().lower(): translation} if parked and translation else None)
+        if not parked:
+            self._stat(exe, words=1)
 
     def _set_card(self, card: CardState | None) -> None:
         ctx = self.word_ctx

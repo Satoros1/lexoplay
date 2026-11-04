@@ -1,7 +1,9 @@
-"""«Слова новеллы»: текст новеллы из папки игры, готовность к каждой части и колода из 10–15 слов перед ней.
+"""«Слова новеллы»: текст новеллы из папки игры, сложные слова и выражения из него, отправка в колоду на паузе.
 
-Без спойлеров: части показываются только номерами («Акт 2»), реплик игры здесь нет совсем, а примеры
-к словам модель пишет свои. Текст игры остаётся на компьютере, в модель уходят только слова.
+Список общий на всю новеллу (без деления на части: так он ничего не выдаёт о сюжете), самые частые слова
+сверху. Игрок снимает галочки со знакомых, остальные ложатся в колоду игры в Lexo на паузу: учить их он
+начнёт в приложении, вкладка «Ждут», в порядке, в каком они встретятся в игре. Реплик игры здесь нет,
+примеры к словам модель пишет свои, в модель уходят только слова.
 """
 
 from __future__ import annotations
@@ -21,17 +23,19 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from lexoplay.novelwords import NovelView, plural
+from lexoplay.novelwords import COUNTS, LEVELS, Candidate, NovelView, plural
 from lexoplay.store import Game
 from lexoplay.ui import theme
 from lexoplay.ui.widgets import button, label
 
 ABOUT = (
-    "LexoPlay находит текст новеллы в папке игры и считает в нём слова. Перед каждой частью можно выучить "
-    "10–15 слов, которые в ней встретятся чаще всего, и читать уже без словаря. Без спойлеров: части видны "
-    "только номерами, а примеры к словам модель пишет свои, не из игры. Текст игры никуда не отправляется."
+    "LexoPlay находит текст новеллы в папке игры и отбирает сложные для тебя слова и выражения, которые "
+    "в ней часто встречаются. Сними галочки со знакомых, остальные лягут в колоду игры на паузу: учить их "
+    "начнёшь в приложении Lexo, вкладка «Ждут». Без спойлеров: список общий на всю новеллу, а примеры "
+    "к словам модель пишет свои. В модель уходят только слова, текст игры остаётся у тебя."
 )
 TIMES = ("раз", "раза", "раз")
+WORDS = ("слово", "слова", "слов")
 
 
 def novel_view(ctl: Any, exe: str) -> NovelView | None:
@@ -41,7 +45,7 @@ def novel_view(ctl: Any, exe: str) -> NovelView | None:
         return None
     try:
         view = fn(exe)
-    except Exception:
+    except Exception:  # окно не должно падать из-за подсчёта
         return None
     return view if isinstance(view, NovelView) else None
 
@@ -59,14 +63,28 @@ def card_text(view: NovelView | None) -> tuple[str, str]:
     return view.summary or "текст ещё не искали", "muted"
 
 
+def readiness_text(view: NovelView) -> str:
+    """«Акт 1: знаешь 87%, с колодой 95%» по строке на часть."""
+    rows = []
+    for title, have, deck in view.parts:
+        row = f"{title}: знаешь {round(have * 100)}%"
+        if deck - have >= 0.005:
+            row += f", с колодой {round(deck * 100)}%"
+        rows.append(row)
+    return "\n".join(rows)
+
+
 class NovelDialog(QDialog):
-    POLL_MS = 600
+    POLL_MS = 700
 
     def __init__(self, ctl: Any, game: Game, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.ctl, self.game = ctl, game
+        self._unchecked: set[str] = set()  # снятые галочки переживают смену фильтров
+        self._shown: list[Candidate] = []
+        self._last_key: tuple[object, ...] | None = None
         self.setWindowTitle(f"Слова новеллы: {game.title}")
-        self.setMinimumSize(560, 600)
+        self.setMinimumSize(600, 720)
         self.setStyleSheet(theme.stylesheet())
         lay = QVBoxLayout(self)
         lay.setContentsMargins(22, 20, 22, 20)
@@ -81,74 +99,116 @@ class NovelDialog(QDialog):
         self.folder = QPushButton("Указать папку игры…")
         self.folder.setToolTip("Если LexoPlay не знает, где лежит игра, или нашёл не ту папку")
         self.folder.clicked.connect(self._pick_folder)
+        self.level_btn = QPushButton("Оценить ещё раз")
+        self.level_btn.setToolTip("Модель ставит словам уровень A1–C2 по списку слов")
+        self.level_btn.clicked.connect(self._level)
         row.addWidget(self.scan)
         row.addWidget(self.folder)
+        row.addWidget(self.level_btn)
         row.addStretch(1)
         lay.addLayout(row)
+        self.ready = label("", "version", wrap=True)
+        lay.addWidget(self.ready)
 
-        self.deck_box = QWidget()
-        box = QVBoxLayout(self.deck_box)
+        self.words_box = QWidget()
+        box = QVBoxLayout(self.words_box)
         box.setContentsMargins(0, 6, 0, 0)
         box.setSpacing(8)
-        part_row = QHBoxLayout()
-        part_row.addWidget(label("Колода к части", "muted"))
-        self.parts = QComboBox()
-        self.parts.currentIndexChanged.connect(self._show_deck)
-        part_row.addWidget(self.parts, 1)
-        box.addLayout(part_row)
-        self.deck_info = label("", "muted", wrap=True)
-        box.addWidget(self.deck_info)
+        filters = QHBoxLayout()
+        filters.addWidget(label("Уровень от", "muted"))
+        self.min_level = QComboBox()
+        for lv in LEVELS[2:]:
+            self.min_level.addItem(lv, lv)
+        self.min_level.currentIndexChanged.connect(self._filters_changed)
+        filters.addWidget(self.min_level)
+        filters.addSpacing(12)
+        filters.addWidget(label("встречается от", "muted"))
+        self.min_count = QComboBox()
+        for n in COUNTS:
+            self.min_count.addItem(plural(n, TIMES), n)
+        self.min_count.currentIndexChanged.connect(self._filters_changed)
+        filters.addWidget(self.min_count)
+        filters.addStretch(1)
+        box.addLayout(filters)
+        self.list_info = label("", "muted", wrap=True)
+        box.addWidget(self.list_info)
         self.list = QListWidget()
         self.list.setObjectName("novelWords")
+        self.list.itemChanged.connect(self._item_changed)
         box.addWidget(self.list, 1)
-        box.addWidget(label("Сними галочку со слов, которые уже знаешь: больше они не попадутся.", "version", wrap=True))
+        toggles = QHBoxLayout()
+        self.all_on = QPushButton("Отметить все")
+        self.all_on.clicked.connect(lambda: self._check_all(True))
+        self.all_off = QPushButton("Снять все")
+        self.all_off.clicked.connect(lambda: self._check_all(False))
+        toggles.addWidget(self.all_on)
+        toggles.addWidget(self.all_off)
+        toggles.addStretch(1)
+        box.addLayout(toggles)
+        lay.addWidget(self.words_box, 1)
         self.result = label("", "muted", wrap=True)
-        box.addWidget(self.result)
-        lay.addWidget(self.deck_box, 1)
+        lay.addWidget(self.result)
 
         bottom = QHBoxLayout()
         bottom.addStretch(1)
-        self.add = button(" В колоду", "primary", "check")
-        self.add.clicked.connect(self._add)
+        self.send = button(" Отправить", "primary", "check")
+        self.send.clicked.connect(self._send)
         close = QPushButton("Закрыть")
         close.clicked.connect(self.reject)
-        bottom.addWidget(self.add)
+        bottom.addWidget(self.send)
         bottom.addWidget(close)
         lay.addLayout(bottom)
 
         self._timer = QTimer(self)
         self._timer.setInterval(self.POLL_MS)
         self._timer.timeout.connect(self._load)
-        self._busy = False
+        self._defaults_set = False
         self._load()
         view = novel_view(self.ctl, game.exe)
         if view is not None and view.state == "none" and view.folder and view.can_read:
             self._scan(None)  # папка уже известна: искать текст сразу, без лишней кнопки
+        elif view is not None and view.state == "ready" and not view.leveled and not view.busy:
+            self._level()  # текст посчитан, а уровни ещё нет (или оценка прервалась)
 
     # ------------------------------------------------------------------
     def _load(self) -> None:
         view = novel_view(self.ctl, self.game.exe) or NovelView()
-        scanning = view.state == "scanning"
-        self.scan.setEnabled(not scanning and view.can_read)
+        busy = view.busy or view.state == "scanning"
+        self.scan.setEnabled(not busy and view.can_read)
         self.scan.setText(" Пересчитать" if view.state == "ready" else " Найти текст")
-        self.folder.setEnabled(not scanning)
-        if scanning:
+        self.folder.setEnabled(not busy)
+        self.level_btn.setVisible(view.state == "ready" and not view.leveled and not busy)
+        if busy:
             self._timer.start()
         else:
             self._timer.stop()
         self.status.setText(self._status(view))
-        ready = view.state == "ready" and bool(view.parts)
-        self.deck_box.setVisible(ready)
-        self.add.setVisible(ready)
-        if ready:
-            keep = max(0, self.parts.currentIndex())
-            self.parts.blockSignals(True)
-            self.parts.clear()
-            for title, share in view.parts:
-                self.parts.addItem(f"{title} · знаешь {round(share * 100)}% слов")
-            self.parts.setCurrentIndex(min(keep, len(view.parts) - 1))
-            self.parts.blockSignals(False)
-            self._show_deck()
+        self.ready.setText(readiness_text(view) if view.state == "ready" else "")
+        self.ready.setVisible(view.state == "ready" and len(view.parts) > 1)
+        show = view.state == "ready" and (view.leveled or bool(self._shown) or not view.busy)
+        self.words_box.setVisible(show)
+        self.send.setVisible(show)
+        self.result.setText(view.progress or view.message)
+        if view.state == "ready" and not self._defaults_set:
+            self._set_defaults(view)
+        key = (view.state, view.leveled, view.busy, view.summary)
+        if key != self._last_key:  # список заново только когда поменялись данные, а не на каждый опрос
+            self._last_key = key
+            if view.state == "ready":
+                self._fill()
+        self._update_send(view)
+
+    def _set_defaults(self, view: NovelView) -> None:
+        self._defaults_set = True
+        start = LEVELS[min(len(LEVELS) - 1, LEVELS.index(view.user_level) + 1)] if view.user_level in LEVELS else "B2"
+        self.min_level.blockSignals(True)
+        self.min_level.setCurrentIndex(max(0, self.min_level.findData(start)))
+        self.min_level.blockSignals(False)
+        fn = getattr(self.ctl, "novel_default_count", None)
+        n = fn(self.game.exe, start) if fn is not None else COUNTS[1]
+        self.min_count.blockSignals(True)
+        self.min_count.setCurrentIndex(max(0, self.min_count.findData(n if isinstance(n, int) else COUNTS[1])))
+        self.min_count.blockSignals(False)
 
     def _status(self, view: NovelView) -> str:
         if view.state == "scanning":
@@ -164,6 +224,75 @@ class NovelDialog(QDialog):
             )
         return f"Папка игры: {view.folder}. {view.summary.capitalize()}." if view.summary else f"Папка игры: {view.folder}."
 
+    def _fill(self) -> None:
+        fn = getattr(self.ctl, "novel_words", None)
+        level, count = self.min_level.currentData(), self.min_count.currentData()
+        words = fn(self.game.exe, level, count) if fn is not None and level and count else None
+        self._shown = list(words) if isinstance(words, list) else []
+        self.list.blockSignals(True)
+        self.list.clear()
+        for c in self._shown:
+            kind = "выражение · " if c.phrase else ""
+            item = QListWidgetItem(f"{c.text}    {kind}{c.level} · {plural(c.total, TIMES)}")
+            item.setData(Qt.ItemDataRole.UserRole, c.text)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Unchecked if c.text in self._unchecked else Qt.CheckState.Checked)
+            self.list.addItem(item)
+        self.list.blockSignals(False)
+        self._update_info()
+
+    def _update_info(self) -> None:
+        if not self._shown:
+            self.list_info.setText("Слов с такими условиями нет: попробуй уровень пониже или порог поменьше.")
+            return
+        phrases = sum(c.phrase for c in self._shown)
+        words = len(self._shown) - phrases
+        what = plural(words, WORDS) + (f" и {plural(phrases, ('выражение', 'выражения', 'выражений'))}" if phrases else "")
+        self.list_info.setText(
+            f"{what}. Сверху самые частые. Сними галочки со знакомых: стрелки и пробел, так быстрее."
+        )
+
+    def _filters_changed(self) -> None:
+        self._fill()
+        view = novel_view(self.ctl, self.game.exe)
+        if view is not None:
+            self._update_send(view)
+
+    def _item_changed(self, item: QListWidgetItem) -> None:
+        word = str(item.data(Qt.ItemDataRole.UserRole))
+        if item.checkState() == Qt.CheckState.Checked:
+            self._unchecked.discard(word)
+        else:
+            self._unchecked.add(word)
+        view = novel_view(self.ctl, self.game.exe)
+        if view is not None:
+            self._update_send(view)
+
+    def _check_all(self, on: bool) -> None:
+        for i in range(self.list.count()):
+            self.list.item(i).setCheckState(Qt.CheckState.Checked if on else Qt.CheckState.Unchecked)
+
+    def _chosen(self) -> tuple[list[str], list[str]]:
+        chosen, skipped = [], []
+        for i in range(self.list.count()):
+            item = self.list.item(i)
+            word = str(item.data(Qt.ItemDataRole.UserRole))
+            (chosen if item.checkState() == Qt.CheckState.Checked else skipped).append(word)
+        return chosen, skipped
+
+    def _update_send(self, view: NovelView) -> None:
+        chosen, skipped = self._chosen()
+        if chosen:
+            self.send.setText(f" Отправить {plural(len(chosen), WORDS)}")
+        elif skipped:
+            self.send.setText(" Отметить как знакомые")
+        else:
+            self.send.setText(" Отправить")
+        self.send.setEnabled(not view.busy and bool(chosen or skipped))
+        self.all_on.setEnabled(not view.busy)
+        self.all_off.setEnabled(not view.busy)
+
+    # ------------------------------------------------------------------
     def _scan(self, folder: str | None) -> None:
         self.result.setText("")
         fn = getattr(self.ctl, "scan_novel", None)
@@ -181,45 +310,20 @@ class NovelDialog(QDialog):
         if folder:
             self._scan(folder)
 
-    def _show_deck(self) -> None:
-        self.list.clear()
-        fn = getattr(self.ctl, "novel_deck", None)
-        deck = fn(self.game.exe, self.parts.currentIndex()) if fn is not None and self.parts.currentIndex() >= 0 else None
-        if deck is None or not deck.words:
-            self.deck_info.setText("Незнакомых слов, которые тут часто встречаются, нет: можно просто читать.")
-            self.add.setEnabled(False)
-            return
-        self.deck_info.setText(
-            f"Сейчас знаешь {round(deck.now * 100)}% слов этой части. "
-            f"Эти {len(deck.words)} встретятся в ней {plural(deck.hits, TIMES)}, "
-            f"с ними будет {round(deck.after * 100)}%."
-        )
-        for w in deck.words:
-            item = QListWidgetItem(f"{w.lemma}  ·  здесь {plural(w.here, TIMES)}, до конца новеллы {w.total}")
-            item.setData(Qt.ItemDataRole.UserRole, w.lemma)
-            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            item.setCheckState(Qt.CheckState.Checked)
-            self.list.addItem(item)
-        self.add.setEnabled(not self._busy)
+    def _level(self) -> None:
+        fn = getattr(self.ctl, "level_novel", None)
+        if fn is not None:
+            fn(self.game.exe)
+        self._load()
 
-    def _add(self) -> None:
-        fn = getattr(self.ctl, "make_novel_deck", None)
-        if fn is None or self._busy:
+    def _send(self) -> None:
+        fn = getattr(self.ctl, "send_novel_words", None)
+        if fn is None:
             return
-        chosen, skipped = [], []
-        for i in range(self.list.count()):
-            item = self.list.item(i)
-            word = str(item.data(Qt.ItemDataRole.UserRole))
-            (chosen if item.checkState() == Qt.CheckState.Checked else skipped).append(word)
-        self._busy = True
-        self.add.setEnabled(False)
-        self.result.setText("Модель пишет значения и примеры…" if chosen else "")
-        fn(self.game.exe, chosen, skipped, self._added)
-
-    def _added(self, ok: str | None, err: str | None) -> None:
-        try:
-            self._busy = False
-            self.result.setText(ok or err or "")
-            self._load()
-        except RuntimeError:
-            pass  # окно закрыли, пока модель отвечала
+        chosen, skipped = self._chosen()
+        if not chosen and not skipped:
+            return
+        fn(self.game.exe, chosen, skipped)
+        self._unchecked -= set(skipped)  # они теперь «уже знаю» и из списка уйдут
+        self._last_key = None
+        self._load()

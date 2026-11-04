@@ -267,32 +267,86 @@ def test_long_linear_script_split_in_parts() -> None:
 
 # ------------------------------------------------------------------ слова
 def _script() -> novel.Script:
-    p1 = novel.Part("Акт 1", ["Hisao looked at the reluctant cat.", *lines(200, 13)] + ["She was reluctant again and reluctant."] * 3)
-    p2 = novel.Part("Акт 2", ["Hisao smiled with a meticulous grin."] * 5 + ["The meticulous plan worked, meticulous as ever."] * 2)
+    p1 = novel.Part(
+        "Акт 1",
+        ["Hisao looked at the reluctant cat.", *lines(200, 13)]
+        + ["She was reluctant again and reluctant."] * 3
+        + ["We always end up here somehow.", "They ended up laughing."] * 3,
+    )
+    p2 = novel.Part(
+        "Акт 2",
+        ["Hisao smiled with a meticulous grin."] * 5
+        + ["The meticulous plan worked, meticulous as ever."] * 2
+        + ["Did you end up going? Up there, I mean."] * 2,
+    )
     return novel.Script(novel.Engine("renpy", "Ren'Py", True), [p1, p2])
 
 
-def test_counts_skip_names_and_decks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("LEXOPLAY_HOME", str(tmp_path))
+def _leveled(tmp_path: Path) -> novelwords.Novel:
+    nv = novelwords.build("ks.exe", "Katawa Shoujo", tmp_path, _script())
+    nv.levels.update({"reluctant": "B2", "meticulous": "C1", "grin": "B2", "end up": "B2", "fidget": "C1",
+                      "linger": "C1", "murmur": "B2", "frown": "B1", "solemn": "C1", "gaze": "B2", "shrug": "B1",
+                      "stumble": "B2", "nod": "A2"})  # fmt: skip
+    return nv
+
+
+def test_counts_names_phrases_and_order(tmp_path: Path) -> None:
     nv = novelwords.build("ks.exe", "Katawa Shoujo", tmp_path, _script())
     assert all("hisao" not in p.counts for p in nv.parts)  # имя: со строчной ни разу
     assert nv.parts[0].counts.get("reluctant", 0) >= 7
-    d = novelwords.deck(nv, 1, "b1", lambda w: False)
-    assert d.words[0].lemma == "meticulous" and d.words[0].here == 9
-    assert d.after > d.now and d.hits >= 9
-    nv.skipped.add("meticulous")
-    assert all(w.lemma != "meticulous" for w in novelwords.deck(nv, 1, "b1", lambda w: False).words)
+    assert nv.parts[0].phrases.get("end up") == 6 and nv.parts[1].phrases.get("end up") == 2  # «going? Up» не выражение
+    assert nv.total("end up") == 8
+    assert nv.order["reluctant"] < nv.order["meticulous"]  # раньше встречается: раньше в колоде
+    assert "end up" in novelwords.to_level(nv)
+    assert not any(" " in k and k.split()[0] in ("it", "them", "you") for k in nv.order)
+
+
+def test_candidates_filter_by_level_count_and_known(tmp_path: Path) -> None:
+    nv = _leveled(tmp_path)
+    nv.levels["hisao"] = "NAME"
+    got = novelwords.candidates(nv, "B2", 5, lambda w: False)
+    texts = [c.text for c in got]
+    assert "meticulous" in texts and "reluctant" in texts and "end up" in texts
+    assert all(c.level in ("B2", "C1", "C2") and c.total >= 5 for c in got)
+    assert [c.total for c in got] == sorted((c.total for c in got), reverse=True)
+    assert next(c for c in got if c.text == "end up").phrase
+    assert "meticulous" not in [c.text for c in novelwords.candidates(nv, "C2", 4, lambda w: False)]
+    nv.skipped.add("reluctant")
+    nv.taken.add("meticulous")
+    left = [c.text for c in novelwords.candidates(nv, "B2", 4, lambda w: w == "end up")]
+    assert "reluctant" not in left and "meticulous" not in left and "end up" not in left
+    # готовность: «знаешь» без колоды, «с колодой» вместе с отправленными
+    have, deck = novelwords.readiness(nv, "b1", lambda w: False)[1]
+    assert deck > have
+    assert "знаешь" in novelwords.summary(nv, "b1", lambda w: False)
+
+
+def test_default_count_scales_with_novel_size(tmp_path: Path) -> None:
+    nv = _leveled(tmp_path)
+    assert novelwords.default_count(nv, "B2", lambda w: False) == novelwords.MIN_COUNT  # короткий текст
+    nv.parts[0].tokens = 1_200_000  # как Umineko: порог выше
+    assert novelwords.default_count(nv, "B2", lambda w: False) == 12
+    assert novelwords.next_level("b1") == "B2" and novelwords.next_level("b2") == "C1"
+
+
+def test_save_load_and_shared_levels(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LEXOPLAY_HOME", str(tmp_path))
+    nv = _leveled(tmp_path)
+    nv.skipped.add("grin")
     novelwords.save(nv)
     back = novelwords.load("ks.exe")
-    assert back is not None and back.parts[1].counts == nv.parts[1].counts and "meticulous" in back.skipped
-    assert "Ren'Py" in novelwords.summary(back, "b1", lambda w: False) and "2 акта" in novelwords.summary(back, "b1", lambda w: False)
+    assert back is not None and back.parts[1].phrases == nv.parts[1].phrases and back.levels == nv.levels
+    assert back.order == nv.order and "grin" in back.skipped
+    novelwords.remember_levels({"linger": "C1", "kenji": "NAME"})
+    shared = novelwords.known_levels()
+    assert shared.get("linger") == "C1" and "kenji" not in shared  # имя одной новеллы не имя везде
 
 
 def test_lemma() -> None:
     assert rarity.lemma("Stopped") == "stop"
     assert rarity.lemma("talked") == "talk"
     nv = novel.Script(novel.Engine("x", "x", True), [novel.Part("Вся новелла", ["They linger here.", "Lingering, lingered."])])
-    assert novelwords.count(nv)[0].counts == {"linger": 3}  # нет в частотном списке: к форме из самой новеллы
+    assert novelwords.count(nv)[0][0].counts == {"linger": 3}  # нет в частотном списке: к форме из самой новеллы
 
 
 def test_prelearn_parse_keeps_order_and_drops_junk() -> None:
@@ -306,6 +360,24 @@ def test_prelearn_parse_keeps_order_and_drops_junk() -> None:
     assert [i.word for i in items] == ["gaze", "linger"]
     assert "—" not in items[1].meaning and items[1].ipa == "ˈlɪŋɡə"
     assert "Katawa" in prelearn.build("Katawa Shoujo", ["gaze"])
+    got = prelearn.parse_levels("1. linger|B2\nKenji | NAME\nend up - B1\nfoo|ZZ\nbar|X", ["linger", "kenji", "end up", "foo", "bar"])
+    assert got == {"linger": "B2", "kenji": "NAME", "end up": "B1", "bar": "X"}
+    assert "Katawa" in prelearn.build_levels("Katawa Shoujo", ["linger"])
+
+
+def test_in_batches_keeps_going_after_a_failed_batch() -> None:
+    import asyncio
+
+    seen: list[int] = []
+
+    async def run(batch: list[int]) -> int:
+        if 5 in batch:
+            raise RuntimeError("boom")
+        return sum(batch)
+
+    res, errs = asyncio.run(prelearn.in_batches(list(range(10)), 3, run, seen.append))
+    assert sorted(res) == [3, 9, 21]  # пачка [3, 4, 5] упала, остальные дошли
+    assert len(errs) == 1 and seen[-1] == 10
 
 
 # ------------------------------------------------------------------ окно «Слова новеллы»
@@ -321,49 +393,69 @@ def qapp():  # type: ignore[no-untyped-def]
 class NovelCtl:
     def __init__(self, nv: novelwords.Novel) -> None:
         self.nv = nv
-        self.made: list[tuple[list[str], list[str]]] = []
-        self.scanned: list[str | None] = []
+        self.sent: list[tuple[list[str], list[str]]] = []
+        self.leveled: list[str] = []
 
     def novel_info(self, exe: str) -> novelwords.NovelView:
         ready = novelwords.readiness(self.nv, "b1", lambda w: False)
         return novelwords.NovelView(
             "ready",
             summary=novelwords.summary(self.nv, "b1", lambda w: False),
-            parts=[(p.title, r) for p, r in zip(self.nv.parts, ready, strict=True)],
+            parts=[(p.title, r[0], r[1]) for p, r in zip(self.nv.parts, ready, strict=True)],
+            leveled=not novelwords.to_level(self.nv),
+            user_level="B1",
         )
 
     def scan_novel(self, exe: str, folder: str | None = None) -> bool:
-        self.scanned.append(folder)
         return True
 
-    def novel_deck(self, exe: str, index: int) -> novelwords.Deck:
-        return novelwords.deck(self.nv, index, "b1", lambda w: False)
+    def level_novel(self, exe: str) -> bool:
+        self.leveled.append(exe)
+        return True
 
-    def make_novel_deck(self, exe, chosen, skipped, done) -> None:  # type: ignore[no-untyped-def]
-        self.made.append((chosen, skipped))
-        done(f"Готово: {len(chosen)} слов.", None)
+    def novel_words(self, exe: str, min_level: str, min_count: int) -> list[novelwords.Candidate]:
+        return novelwords.candidates(self.nv, min_level, min_count, lambda w: False)
+
+    def novel_default_count(self, exe: str, min_level: str) -> int:
+        return novelwords.default_count(self.nv, min_level, lambda w: False)
+
+    def send_novel_words(self, exe: str, chosen: list[str], skipped: list[str]) -> None:
+        self.sent.append((chosen, skipped))
+        self.nv.skipped |= set(skipped)
+        self.nv.taken |= set(chosen)
 
 
-def test_novel_dialog_picks_words(qapp, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+def test_novel_dialog_lists_hard_words_and_sends(qapp, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
     from PySide6.QtCore import Qt
 
     from lexoplay.store import Game
     from lexoplay.ui.novel_dialog import NovelDialog, card_text, novel_view
 
-    nv = novelwords.build("ks.exe", "Katawa Shoujo", tmp_path, _script())
+    nv = _leveled(tmp_path)
+    for item in novelwords.to_level(nv):
+        nv.levels.setdefault(item, "A2")  # всё остальное модель сочла лёгким
     ctl = NovelCtl(nv)
     dlg = NovelDialog(ctl, Game("ks.exe", "Katawa Shoujo"))
-    assert dlg.parts.count() == 2 and "Акт 1" in dlg.parts.itemText(0)
-    dlg.parts.setCurrentIndex(1)
-    assert dlg.list.count() >= 1 and dlg.list.item(0).data(Qt.ItemDataRole.UserRole) == "meticulous"
-    assert "—" not in dlg.deck_info.text()
-    dlg.list.item(0).setCheckState(Qt.CheckState.Unchecked)
-    dlg.add.click()
-    chosen, skipped = ctl.made[0]
-    assert skipped == ["meticulous"] and "meticulous" not in chosen
-    assert dlg.result.text().startswith("Готово")
+    assert dlg.min_level.currentData() == "B2"  # игрок B1: сложное с B2
+    assert dlg.min_count.currentData() == novelwords.MIN_COUNT
+    texts = [dlg.list.item(i).data(Qt.ItemDataRole.UserRole) for i in range(dlg.list.count())]
+    assert "meticulous" in texts and "end up" in texts and "nod" not in texts and "frown" not in texts
+    assert "Акт 1: знаешь" in dlg.ready.text()
+    assert "—" not in dlg.list_info.text() and "—" not in dlg.ready.text()
+    first = dlg.list.item(0)
+    first.setCheckState(Qt.CheckState.Unchecked)
+    assert dlg.send.text().strip().startswith("Отправить") and str(len(texts) - 1) in dlg.send.text()
+    # снятая галочка переживает смену фильтров
+    dlg.min_count.setCurrentIndex(dlg.min_count.findData(novelwords.COUNTS[1]))
+    dlg.min_count.setCurrentIndex(dlg.min_count.findData(novelwords.MIN_COUNT))
+    assert dlg.list.item(0).checkState() == Qt.CheckState.Unchecked
+    dlg.send.click()
+    chosen, skipped = ctl.sent[0]
+    assert skipped == [texts[0]] and texts[0] not in chosen and len(chosen) == len(texts) - 1
+    assert dlg.list.count() == 0  # всё отправлено или знакомо
     assert card_text(novel_view(ctl, "ks.exe"))[0].startswith("Ren'Py")
     assert novel_view(object(), "x") is None
+    assert not ctl.leveled  # уровни уже есть: модель второй раз не зовём
     dlg.close()
     import shiboken6
 
@@ -406,5 +498,5 @@ def test_translate_nodes_in_rpyc_skipped() -> None:
 def test_names_written_lowercase_now_and_then_are_still_names(tmp_path: Path) -> None:
     text = ["Shizune signed something quickly to me."] * 40 + ["the shizune look, she said."] + lines(50, 22)
     sc = novel.Script(novel.Engine("renpy", "Ren'Py", True), [novel.Part("Вся новелла", text)])
-    counts = novelwords.count(sc)[0].counts
+    counts = novelwords.count(sc)[0][0].counts
     assert "shizune" not in counts

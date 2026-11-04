@@ -234,6 +234,11 @@ class LexoClient:
         data = await self._request("GET", "/desktop/me")
         return Account.from_json(data["user"]), Usage.from_json(data.get("usage")), str(data.get("device_name", ""))
 
+    async def features(self) -> set[str]:
+        """Что умеет сервер (с vocab_final_27: parked_cards). Старый сервер поля не отдаёт: пусто."""
+        data = await self._request("GET", "/desktop/me")
+        return {str(f) for f in data.get("features") or []}
+
     async def unlink(self) -> None:
         try:
             await self._request("DELETE", "/desktop/device")

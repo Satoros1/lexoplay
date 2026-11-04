@@ -1344,6 +1344,145 @@ def _own_key_flow(out_dir: Path) -> Callable[[], tuple[str, object]]:
     return run
 
 
+def _novel_flow(out_dir: Path) -> Callable[[], tuple[str, object]]:
+    """Слова новеллы целиком: папка Ren'Py → подсчёт → уровни от модели → окно со списком → слова в Lexo на паузе."""
+
+    def run() -> tuple[str, object]:
+        import tempfile
+        import types
+
+        import httpx
+        from PySide6.QtWidgets import QApplication
+
+        app_q = QApplication.instance() or QApplication(sys.argv[:1])
+        tmp = tempfile.mkdtemp(prefix="lexoplay-selftest-novel-")
+        os.environ["LEXOPLAY_HOME"] = tmp
+        from lexoplay.app import App
+        from lexoplay.bg import BackgroundLoop
+        from lexoplay.config import Settings
+        from lexoplay.lexo import LexoClient
+        from lexoplay.store import Game, Store
+        from lexoplay.ui.novel_dialog import NovelDialog
+
+        folder = Path(tmp) / "Selftest VN"
+        (folder / "game").mkdir(parents=True)
+        filler = "I think we should go back now, it is getting late and I am tired."
+        act1 = [filler] * 300 + ["She was reluctant to say it, so we ended up waiting."] * 6
+        act2 = [filler] * 300 + ["His meticulous notes made me end up smiling, Hisao said."] * 6
+        for name, rows in (("script-a1-monday.rpy", act1), ("script-a2-emi.rpy", act2)):
+            body = "label start:\n" + "\n".join(f'    hi "{r}"' for r in rows)
+            (folder / "game" / name).write_text(body, encoding="utf-8")
+
+        calls: list[tuple[str, object]] = []
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            body = json.loads(req.content) if req.content else None
+            calls.append((req.url.path, body))
+            if req.url.path == "/desktop/me":
+                user = {"username": "selftest", "native_lang": "ru", "learning_lang": "en", "premium": False}
+                return httpx.Response(
+                    200,
+                    json={"user": user, "usage": {"used": 0, "limit": 50}, "device_name": "CI", "features": ["parked_cards"]},
+                )
+            if req.url.path == "/desktop/cards":
+                return httpx.Response(200, json={"card_id": len(calls), "text": "x", "translation": "y", "status": "created", "deck": "Selftest VN"})
+            if req.url.path == "/desktop/vocab":
+                return httpx.Response(200, json={"items": [], "server_time": "2026-11-04T00:00:00Z"})
+            if req.url.path.endswith("/end"):
+                return httpx.Response(200, json={"words_added": 0})
+            return httpx.Response(404, json={"detail": "not found"})
+
+        hard = {"reluctant": "B2", "meticulous": "C1", "end up": "B2", "hisao": "NAME"}
+
+        class Messages:
+            async def create(self, **kw):  # type: ignore[no-untyped-def]
+                prompt = kw["messages"][0]["content"]
+                calls.append(("anthropic", prompt[:40]))
+                if "CEFR" in prompt:
+                    items = prompt.split("nothing else:\n", 1)[1].splitlines()
+                    text = "\n".join(f"{i}|{hard.get(i, 'A2')}" for i in items)
+                else:
+                    words = prompt.split("come up in it often:\n", 1)[1].split("\nFor each word", 1)[0].splitlines()
+                    text = "\n".join(
+                        json.dumps({"word": w, "lemma": w, "pos": "adj", "ipa": "x", "meaning": f"значение {w}",
+                                    "example": f"A plain example with {w}.", "example_tr": "Простой пример."})
+                        for w in words
+                    )  # fmt: skip
+                block = types.SimpleNamespace(type="text", text=text)
+                return types.SimpleNamespace(content=[block], usage=types.SimpleNamespace(input_tokens=100, output_tokens=50))
+
+        fake_tr = types.SimpleNamespace(
+            _anthropic=types.SimpleNamespace(BadRequestError=type("BadRequestError", (Exception,), {})),
+            _client=types.SimpleNamespace(messages=Messages()),
+            _model="claude-selftest",
+        )
+
+        def pump(cond: Callable[[], bool], seconds: float = 15.0) -> bool:
+            end = time.time() + seconds
+            while time.time() < end:
+                app_q.processEvents()
+                if cond():
+                    return True
+                time.sleep(0.02)
+            return cond()
+
+        store = Store(Path(tmp) / "local.db")
+        game = store.save_game(Game("vn.exe", "Selftest VN"))
+        store.set_meta("game_dir:vn.exe", str(folder))
+        bg = BackgroundLoop("selftest-novel")
+        app = App(app_q, Settings(), store, bg)
+        app.client = LexoClient("https://lexo.test", "tok", transport=httpx.MockTransport(handler))
+        app._gloss_translator = lambda: fake_tr  # type: ignore[method-assign,assignment,return-value]
+        info: dict[str, object] = {}
+        try:
+            app.start()
+            dlg = NovelDialog(app, game)
+            dlg.show()
+            info["leveled"] = pump(lambda: (v := app.novel_info(game.exe)).state == "ready" and v.leveled and not v.busy)
+            view = app.novel_info(game.exe)
+            info["summary"] = view.summary
+            info["parts"] = [p[0] for p in view.parts]
+            for _ in range(20):
+                app_q.processEvents()
+                time.sleep(0.02)
+            dlg._load()  # noqa: SLF001
+            info["listed"] = [dlg.list.item(i).text() for i in range(dlg.list.count())]
+            dlg.grab().save(str(out_dir / "novel-dialog.png"))
+            words = app.novel_words(game.exe, "B2", 4)
+            info["words"] = [(w.text, w.level, w.total) for w in words]
+            app.send_novel_words(game.exe, [w.text for w in words if w.text != "reluctant"], ["reluctant"])
+            info["sent"] = pump(
+                lambda: not app.novel_info(game.exe).busy
+                and sum(c[0] == "/desktop/cards" for c in calls) >= 2
+                and app.outbox.counts() == (0, 0)
+            )
+            info["message"] = app.novel_info(game.exe).message
+            info["after"] = [w.text for w in app.novel_words(game.exe, "B2", 4)]
+            info["known_now"] = app.vocab.known("meticulous")
+            dlg._load()  # noqa: SLF001
+            dlg.grab().save(str(out_dir / "novel-dialog-sent.png"))
+            dlg.close()
+        finally:
+            app.shutdown()
+        cards = [c[1] for c in calls if c[0] == "/desktop/cards"]
+        info["cards"] = [(c.get("lemma"), c.get("parked"), c.get("sentence")) for c in cards if isinstance(c, dict)]
+        info["anthropic_calls"] = sum(c[0] == "anthropic" for c in calls)
+        ok = (
+            info["leveled"]
+            and info["parts"] == ["Акт 1", "Акт 2"]
+            and {w for w, _lv, _n in info["words"]} == {"reluctant", "meticulous", "end up"}
+            and info["sent"]
+            and [c[0] for c in info["cards"]] == ["end up", "meticulous"]  # в порядке появления в новелле
+            and all(c[1] is True for c in info["cards"])
+            and str(info["message"]).startswith("Готово")
+            and info["after"] == []
+            and info["known_now"]
+        )
+        return ("ok" if ok else "fail"), info
+
+    return run
+
+
 def _qt_checks(out_dir: Path) -> None:
     from PySide6.QtCore import Qt
     from PySide6.QtGui import QColor, QPalette
@@ -1987,6 +2126,7 @@ def _qt_checks(out_dir: Path) -> None:
     _check("app_own_key_flow", _own_key_flow(out_dir))
     _check("app_page_flow", _page_flow(out_dir))
     _check("app_study_flow", _study_flow(out_dir))
+    _check("app_novel_flow", _novel_flow(out_dir))
 
 
 def run(report: str) -> int:
