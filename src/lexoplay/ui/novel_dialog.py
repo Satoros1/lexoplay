@@ -23,7 +23,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from lexoplay.novelwords import COUNTS, LEVELS, Candidate, NovelView, plural
+import math
+
+from lexoplay.novelwords import COUNTS, LEVELS, PORTION, Candidate, NovelView, plural
 from lexoplay.store import Game
 from lexoplay.ui import theme
 from lexoplay.ui.widgets import button, label
@@ -83,6 +85,7 @@ class NovelDialog(QDialog):
         self._unchecked: set[str] = set()  # снятые галочки переживают смену фильтров
         self._shown: list[Candidate] = []
         self._all: list[Candidate] = []  # весь список при текущих уровне и пороге, по всем частям
+        self._groups: dict[str, list[Candidate]] = {}  # «0:1» (часть 1, порция 2) или «all» -> слова
         self._last_key: tuple[object, ...] | None = None
         self.setWindowTitle(f"Слова новеллы: {game.title}")
         self.setMinimumSize(600, 720)
@@ -120,7 +123,10 @@ class NovelDialog(QDialog):
         part_lay.setContentsMargins(0, 0, 0, 0)
         part_lay.addWidget(label("Слова к части", "muted"))
         self.part = QComboBox()
-        self.part.setToolTip("Слово попадает в ту часть, где встречается впервые: его надо знать с неё")
+        self.part.setToolTip(
+            "Слово попадает в ту часть, где встречается впервые: его надо знать с неё. "
+            f"Большая часть делится на порции примерно по {PORTION} слов, по порядку появления."
+        )
         self.part.currentIndexChanged.connect(lambda: self._fill(auto=False))
         part_lay.addWidget(self.part, 1)
         box.addWidget(self.part_row)
@@ -243,11 +249,11 @@ class NovelDialog(QDialog):
             words = fn(self.game.exe, level, count) if fn is not None and level and count else None
             self._all = list(words) if isinstance(words, list) else []
             self._fill_parts()
-        part = self.part.currentData()
-        if self.part_row.isHidden() or part is None or part < 0:
+        key = self.part.currentData()
+        if self.part_row.isHidden() or key is None:
             self._shown = list(self._all)
         else:
-            self._shown = [c for c in self._all if c.part == part]
+            self._shown = sorted(self._groups.get(str(key), []), key=lambda c: (-c.total, c.order))
         self.list.blockSignals(True)
         self.list.clear()
         for c in self._shown:
@@ -261,39 +267,53 @@ class NovelDialog(QDialog):
         self._update_info()
 
     def _fill_parts(self) -> None:
-        """«Акт 1 · 182 слова»: сколько слов впервые встречается в каждой части."""
+        """«Акт 1 · 52 слова», «Акт 2, порция 1 из 3 · 60 слов», «Вся новелла · 320 слов».
+        Слово в части, где встречается впервые; часть больше PORTION слов делится по порядку появления."""
         view = novel_view(self.ctl, self.game.exe)
-        titles = [p[0] for p in view.parts] if view is not None else []
-        self.part_row.setVisible(len(titles) > 1)
-        if len(titles) <= 1:
+        titles = [p[0] for p in view.parts] if view is not None and view.parts else ["Вся новелла"]
+        options: list[tuple[str, str, list[Candidate]]] = []
+        for i, title in enumerate(titles):
+            items = sorted((c for c in self._all if c.part == i), key=lambda c: c.order)
+            k = max(1, math.ceil(len(items) / PORTION))
+            size = math.ceil(len(items) / k) if items else 0
+            for j in range(k):
+                chunk = items[j * size : (j + 1) * size]
+                count = plural(len(chunk), WORDS)
+                if k == 1:
+                    text = f"{title} · {count}"
+                elif len(titles) == 1:
+                    text = f"Порция {j + 1} из {k} · {count}"
+                else:
+                    text = f"{title}, порция {j + 1} из {k} · {count}"
+                options.append((f"{i}:{j}", text, chunk))
+        if len(options) > 1:
+            options.append(("all", f"Вся новелла · {plural(len(self._all), WORDS)}", list(self._all)))
+        self._groups = {key: chunk for key, _t, chunk in options}
+        self.part_row.setVisible(len(options) > 1)
+        if len(options) <= 1:
             return
-        per = [0] * len(titles)
-        for c in self._all:
-            if 0 <= c.part < len(per):
-                per[c.part] += 1
         keep = self.part.currentData()
-        if keep is None or (keep >= 0 and per[keep] == 0):
-            keep = next((i for i, n in enumerate(per) if n), -1)  # первая часть, где слова ещё есть
+        if keep not in self._groups or (keep != "all" and not self._groups[keep]):
+            keep = next((key for key, _t, chunk in options if chunk), "all")  # первая порция, где слова ещё есть
         self.part.blockSignals(True)
         self.part.clear()
-        for i, (title, n) in enumerate(zip(titles, per, strict=True)):
-            self.part.addItem(f"{title} · {plural(n, WORDS)}", i)
-        self.part.addItem(f"Вся новелла · {plural(len(self._all), WORDS)}", -1)
+        for key, text, _chunk in options:
+            self.part.addItem(text, key)
         self.part.setCurrentIndex(max(0, self.part.findData(keep)))
         self.part.blockSignals(False)
 
     def _update_info(self) -> None:
         if not self._shown:
             if self._all:
-                self.list_info.setText("В этой части новых сложных слов нет: выбери другую.")
+                self.list_info.setText("Здесь новых сложных слов нет: выбери другую часть.")
             else:
                 self.list_info.setText("Слов с такими условиями нет: попробуй уровень пониже или порог поменьше.")
             return
         phrases = sum(c.phrase for c in self._shown)
         words = len(self._shown) - phrases
         what = plural(words, WORDS) + (f" и {plural(phrases, ('выражение', 'выражения', 'выражений'))}" if phrases else "")
-        part = self.part.currentData()
-        where = " впервые встречаются в этой части" if not self.part_row.isHidden() and part is not None and part >= 0 else ""
+        key = self.part.currentData()
+        where = " впервые встречаются здесь" if not self.part_row.isHidden() and key not in (None, "all") else ""
         self.list_info.setText(f"{what}{where}. Сверху самые частые. Знакомые снимай стрелками и пробелом.")
 
     def _filters_changed(self) -> None:

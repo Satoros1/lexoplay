@@ -227,40 +227,68 @@ _KIND = {
     "day": "День",
     "part": "Часть",
 }
+_PROLOGUE, _EPILOGUE = -1, 1000
+_NUMBER = re.compile(r"(\d+)")
+
+
+def _words(lines: list[str]) -> int:
+    return sum(len(s.split()) for s in lines)
+
+
+def _chapter(name: str) -> tuple[str, int] | None:
+    stem = Path(name.split(":", 1)[0]).stem.lower()
+    if "prologue" in stem or "prolog" in stem:
+        return "", _PROLOGUE
+    if "epilogue" in stem or "epilog" in stem:
+        return "", _EPILOGUE
+    m = _CHAPTER.search(stem)
+    return (_KIND[m.group(1)], int(m.group(2))) if m else None
+
+
+def _natural(name: str) -> tuple[object, ...]:
+    """script10 после script9: числа в именах файлов сравниваются как числа."""
+    return tuple(int(x) if x.isdigit() else x for x in _NUMBER.split(name.lower()))
 
 
 def split_parts(chunks: list[tuple[str, list[str]]], ordered: bool) -> tuple[list[Part], str]:
-    """Главы по именам файлов (script-a1-monday → «Акт 1»), иначе по объёму, иначе одна часть."""
-    keys: list[tuple[str, int] | None] = []
-    for name, _lines in chunks:
-        m = _CHAPTER.search(Path(name).stem.lower())
-        keys.append((_KIND[m.group(1)], int(m.group(2))) if m else None)
-    words = [sum(len(s.split()) for s in ls) for _n, ls in chunks]
+    """Части новеллы. Как устроена сама игра, если это видно: акты и главы по именам файлов
+    (script-a1-monday → «Акт 1», пролог и эпилог отдельно). Иначе по порядку чтения части примерно
+    по 3 часа (PART_WORDS слов): порядок даёт сам движок (Ren'Py: от метки start по переходам),
+    номера в именах файлов или один большой файл скрипта. Короткая новелла: одна часть."""
+    keys = [_chapter(name) for name, _lines in chunks]
+    words = [_words(ls) for _n, ls in chunks]
     total = sum(words) or 1
     covered = sum(w for w, k in zip(words, keys, strict=True) if k)
-    nums = {k[1] for k in keys if k}
+    nums = {k[1] for k in keys if k and k[1] not in (_PROLOGUE, _EPILOGUE)}
     if len(nums) >= 2 and covered >= total * 0.6:
-        kind = Counter(k[0] for k in keys if k).most_common(1)[0][0]
+        kind = Counter(k[0] for k in keys if k and k[0]).most_common(1)[0][0]
         first = min(nums)
         groups: dict[int, list[str]] = {}
         for (_name, lines), k in zip(chunks, keys, strict=True):
-            groups.setdefault(k[1] if k else first, []).extend(
-                lines
-            )  # общее без номера: к первой части
-        return [Part(f"{kind} {n}", groups[n]) for n in sorted(groups)], ""
+            groups.setdefault(k[1] if k else first, []).extend(lines)  # общее без номера: к первой части
+        titles = {_PROLOGUE: "Пролог", _EPILOGUE: "Эпилог"}
+        return [Part(titles.get(n, f"{kind} {n}"), groups[n]) for n in sorted(groups)], ""
+    note = "Глав в файлах игры нет: новелла поделена на части примерно по 3 часа чтения, по порядку."
+    if not ordered:  # порядок по номерам в именах файлов (script1, script2 …) или по одному большому файлу
+        numbered = sum(
+            w for (name, _ls), w in zip(chunks, words, strict=True) if _NUMBER.search(Path(name.split(":", 1)[0]).stem)
+        )
+        chunks = sorted(chunks, key=lambda c: _natural(c[0]))
+        if numbered < total * 0.6 and max(words) < total * 0.8:
+            note = "Глав в файлах игры нет: новелла поделена на части примерно по 3 часа чтения. Порядок частей примерный."
     lines = [s for _n, ls in chunks for s in ls]
-    if ordered and total > PART_WORDS * 1.5:
-        n = min(10, max(2, round(total / PART_WORDS)))
-        size = total / n
-        parts: list[Part] = [Part("Часть 1")]
-        acc = 0
-        for s in lines:
-            if acc >= size * len(parts) and len(parts) < n:
-                parts.append(Part(f"Часть {len(parts) + 1}"))
-            parts[-1].lines.append(s)
-            acc += len(s.split())
-        return parts, "Глав в файлах игры нет: новелла поделена на части примерно поровну."
-    return [Part("Вся новелла", lines)], "Глав в файлах игры нет: слова по всей новелле сразу."
+    if total <= PART_WORDS * 1.25:
+        return [Part("Вся новелла", lines)], ""
+    n = min(12, max(2, round(total / PART_WORDS)))
+    size = total / n
+    parts: list[Part] = [Part("Часть 1")]
+    acc = 0
+    for s in lines:
+        if acc >= size * len(parts) and len(parts) < n:
+            parts.append(Part(f"Часть {len(parts) + 1}"))
+        parts[-1].lines.append(s)
+        acc += len(s.split())
+    return parts, note
 
 
 # ------------------------------------------------------------------ текст
@@ -476,7 +504,7 @@ def _walk_say(root: object) -> list[str]:
     return out
 
 
-def rpyc_lines(data: bytes) -> list[str]:
+def _rpyc_tree(data: bytes) -> object:
     raw = data
     if data.startswith(b"RENPY RPC2"):
         pos, chunks = 10, {}
@@ -488,8 +516,81 @@ def rpyc_lines(data: bytes) -> list[str]:
             chunks[slot] = data[start : start + length]
         raw = chunks.get(1, b"")
     obj = _unpickle(zlib.decompress(raw))
-    stmts = obj[1] if isinstance(obj, tuple) and len(obj) == 2 else obj
-    return _walk_say(stmts)
+    return obj[1] if isinstance(obj, tuple) and len(obj) == 2 else obj
+
+
+# Порядок чтения в Ren'Py: реплики по меткам и переходы между ними. («say», текст), («jump», метка),
+# («call», метка), («ret», ""). Метка "" : то, что в файле до первой метки.
+Event = tuple[str, str]
+Blocks = list[tuple[str, list[Event]]]
+
+
+def _ast_events(stmts: object) -> Blocks:
+    blocks: Blocks = [("", [])]
+    seen: set[int] = set()
+
+    def walk(nodes: object, evs: list[Event], glob: str) -> None:
+        if not isinstance(nodes, (list, tuple)):
+            return
+        for o in nodes:
+            if not isinstance(o, _Stub) or id(o) in seen:
+                continue
+            seen.add(id(o))
+            d = o.__dict__
+            cls = type(o).__name__
+            if cls.startswith("Translate") and d.get("language") not in (None, "", "None"):
+                continue  # перевод на другой язык
+            if cls == "Label" and isinstance(d.get("name"), str):
+                name = d["name"]
+                own: list[Event] = []
+                blocks.append((name, own))
+                walk(d.get("block"), own, name if not name.startswith(".") else glob)
+                continue
+            if cls in ("Say", "TranslateSay"):
+                if isinstance(d.get("what"), str):
+                    evs.append(("say", d["what"]))
+            elif cls == "Menu":
+                for item in d.get("items") or []:
+                    if isinstance(item, (list, tuple)) and len(item) >= 3 and isinstance(item[0], str):
+                        if item[2] is not None:
+                            evs.append(("say", item[0]))
+                            walk(item[2], evs, glob)
+            elif cls == "Jump":
+                if not d.get("expression") and isinstance(d.get("target"), str):
+                    evs.append(("jump", d["target"]))
+            elif cls == "Call":
+                if not d.get("expression") and isinstance(d.get("label"), str):
+                    evs.append(("call", d["label"]))
+            elif cls == "Return":
+                evs.append(("ret", ""))
+            elif cls == "If":
+                for entry in d.get("entries") or []:
+                    if isinstance(entry, (list, tuple)) and len(entry) >= 2:
+                        walk(entry[1], evs, glob)
+            else:
+                walk(d.get("block"), evs, glob)  # While, Translate, Init и всё, где есть вложенный блок
+                for sp in d.get("subparses") or []:  # свои операторы игры с блоком внутри
+                    if isinstance(sp, _Stub):
+                        walk(sp.__dict__.get("block"), evs, glob)
+
+    walk(stmts if isinstance(stmts, (list, tuple)) else [stmts], blocks[0][1], "")
+    return blocks
+
+
+def rpyc_events(data: bytes) -> Blocks:
+    """События по меткам. Если структура разобралась плохо (реплик меньше, чем видит плоский обход),
+    отдаём все реплики одним блоком: текст важнее порядка."""
+    tree = _rpyc_tree(data)
+    blocks = _ast_events(tree)
+    flat = _walk_say(tree)
+    got = sum(k == "say" for _l, evs in blocks for k, _t in evs)
+    if got < len(flat) * 0.9:
+        return [("", [("say", t) for t in flat])]
+    return blocks
+
+
+def rpyc_lines(data: bytes) -> list[str]:
+    return [t for _l, evs in rpyc_events(data) for k, t in evs if k == "say"]
 
 
 _RPY_SKIP = re.compile(
@@ -503,8 +604,13 @@ _RPY_SAY = re.compile(r'^(?:[A-Za-z_][\w.]*(?:\s+[\w.]+)*\s+)?"((?:[^"\\]|\\.)*)
 _RPY_TRANSLATE = re.compile(r"^translate\s+(\w+)\s")
 
 
-def rpy_lines(text: str) -> list[str]:
-    out: list[str] = []
+_RPY_LABEL = re.compile(r"^label\s+([\w.]+)")
+_RPY_JUMP = re.compile(r"^(jump|call)\s+(?!expression\b|screen\b)([\w.]+)")
+
+
+def rpy_events(text: str) -> Blocks:
+    blocks: Blocks = [("", [])]
+    glob = ""
     skip_from: int | None = None  # внутри «translate spanish ...:»: перевод на другой язык
     for raw in text.splitlines():
         s = raw.strip()
@@ -519,12 +625,91 @@ def rpy_lines(text: str) -> list[str]:
         if m and m.group(1) != "None":
             skip_from = indent
             continue
+        if m := _RPY_LABEL.match(s):
+            name = m.group(1)
+            if name.startswith("."):
+                name = glob + name
+            else:
+                glob = name
+            blocks.append((name, []))
+            continue
+        evs = blocks[-1][1]
+        if m := _RPY_JUMP.match(s):
+            target = glob + m.group(2) if m.group(2).startswith(".") else m.group(2)
+            evs.append((m.group(1), target))
+            continue
+        if s == "return" or s.startswith("return "):
+            evs.append(("ret", ""))
+            continue
         if _RPY_SKIP.match(s):
             continue
         m = _RPY_SAY.match(s)
         if m:
-            out.append(m.group(1))
-    return out
+            evs.append(("say", m.group(1)))
+    return blocks
+
+
+def rpy_lines(text: str) -> list[str]:
+    return [t for _l, evs in rpy_events(text) for k, t in evs if k == "say"]
+
+
+def flow_order(files: list[tuple[str, Blocks]]) -> tuple[list[tuple[str, list[str]]], bool]:
+    """Реплики в порядке чтения: от метки start по jump и call, вглубь (выборы в меню по очереди),
+    в конце метки дальше по файлу, если она не кончилась jump или return. Куда переходы не ведут
+    (экраны, меню дополнений), идёт в конец. ordered=False, если от start дошли меньше чем до половины."""
+    labels: dict[str, tuple[str, list[Event]]] = {}
+    seq: list[str] = []
+    after: dict[str, str] = {}
+    for file, blocks in files:
+        prev = None
+        for i, (label, evs) in enumerate(blocks):
+            key = label or f"{file}#{i}"
+            if key in labels:
+                key = f"{file}#{i}:{label}"
+            labels[key] = (file, evs)
+            seq.append(key)
+            if prev is not None and label:
+                after[prev] = key
+            prev = key
+    total = sum(k == "say" for _f, evs in labels.values() for k, _t in evs)
+    if "start" not in labels or not total:
+        return [(labels[k][0] + ":" + k, [t for kind, t in labels[k][1] if kind == "say"]) for k in seq], False
+    out: dict[str, list[str]] = {}
+    visited: set[str] = set()
+
+    def visit(first: str) -> None:
+        stack: list[list[object]] = [[first, 0]]
+        visited.add(first)
+        out[first] = []
+        while stack:
+            frame = stack[-1]
+            lab, i = str(frame[0]), int(frame[1])  # type: ignore[call-overload]
+            evs = labels[lab][1]
+            if i >= len(evs):
+                stack.pop()
+                last = evs[-1][0] if evs else ""
+                nxt = after.get(lab)
+                if last not in ("jump", "ret") and nxt and nxt not in visited:
+                    visited.add(nxt)
+                    out[nxt] = []
+                    stack.append([nxt, 0])
+                continue
+            frame[1] = i + 1
+            kind, val = evs[i]
+            if kind == "say":
+                out[lab].append(val)
+            elif kind in ("jump", "call") and val in labels and val not in visited:
+                visited.add(val)
+                out[val] = []
+                stack.append([val, 0])
+
+    visit("start")
+    reached = sum(len(v) for v in out.values())
+    for k in seq:  # куда от start не дошли: в конец, в порядке файлов
+        if k not in visited:
+            visited.add(k)
+            out[k] = [t for kind, t in labels[k][1] if kind == "say"]
+    return [(labels[k][0] + ":" + k, lines) for k, lines in out.items()], reached >= total * 0.5
 
 
 def rpa_entries(path: Path, exts: tuple[str, ...]) -> Iterator[tuple[str, bytes]]:
@@ -613,18 +798,18 @@ def _renpy(root: Path) -> tuple[list[tuple[str, list[str]]], bool]:
                 rpy.setdefault(name, _decode(data))
             else:
                 rpyc.setdefault(name, data)
-    out: list[tuple[str, list[str]]] = []
-    for name in sorted(set(rpy) | set(rpyc)):
+    files: list[tuple[str, Blocks]] = []
+    for name in sorted(set(rpy) | set(rpyc), key=_natural):
         if name in rpy:
-            out.append((name, rpy_lines(rpy[name])))
+            files.append((name, rpy_events(rpy[name])))
         else:
             try:
-                out.append((name, rpyc_lines(rpyc[name])))
+                files.append((name, rpyc_events(rpyc[name])))
             except Exception:
                 log.debug("rpyc %s не прочитался", name, exc_info=True)
-    if not out:
+    if not files:
         raise NovelError("Ren'Py: файлов скрипта в папке game не нашлось.")
-    return out, False
+    return flow_order(files)
 
 
 # ------------------------------------------------------------------ RPG Maker MV/MZ

@@ -440,12 +440,12 @@ def test_novel_dialog_lists_hard_words_and_sends(qapp, tmp_path: Path) -> None: 
     assert dlg.min_level.currentData() == "B2"  # игрок B1: сложное с B2
     assert dlg.min_count.currentData() == novelwords.MIN_COUNT
     # по частям: слово там, где встречается впервые; сначала первая часть
-    assert dlg.part.currentData() == 0 and dlg.part.itemText(0).startswith("Акт 1 · ")
+    assert dlg.part.currentData() == "0:0" and dlg.part.itemText(0).startswith("Акт 1 · ")
     assert dlg.part.itemText(dlg.part.count() - 1).startswith("Вся новелла · ")
     texts = [dlg.list.item(i).data(Qt.ItemDataRole.UserRole) for i in range(dlg.list.count())]
     assert "reluctant" in texts and "end up" in texts and "eerie" not in texts
     assert "nod" not in texts and "frown" not in texts
-    assert "впервые встречаются в этой части" in dlg.list_info.text()
+    assert "впервые встречаются здесь" in dlg.list_info.text()
     assert "Акт 1: знаешь" in dlg.ready.text()
     assert "—" not in dlg.list_info.text() and "—" not in dlg.ready.text()
     first = dlg.list.item(0)
@@ -459,7 +459,7 @@ def test_novel_dialog_lists_hard_words_and_sends(qapp, tmp_path: Path) -> None: 
     chosen, skipped = ctl.sent[0]
     assert skipped == [texts[0]] and texts[0] not in chosen and len(chosen) == len(texts) - 1
     # часть разобрана: окно само переходит к следующей, где слова ещё есть
-    assert dlg.part.currentData() == 1
+    assert dlg.part.currentData() == "1:0"
     left = [dlg.list.item(i).data(Qt.ItemDataRole.UserRole) for i in range(dlg.list.count())]
     assert left == ["eerie"]
     assert card_text(novel_view(ctl, "ks.exe"))[0].startswith("Ren'Py")
@@ -509,3 +509,89 @@ def test_names_written_lowercase_now_and_then_are_still_names(tmp_path: Path) ->
     sc = novel.Script(novel.Engine("renpy", "Ren'Py", True), [novel.Part("Вся новелла", text)])
     counts = novelwords.count(sc)[0][0].counts
     assert "shizune" not in counts
+
+
+# ------------------------------------------------------------------ порядок чтения и части
+def test_renpy_flow_follows_jumps_from_start(tmp_path: Path) -> None:
+    game = tmp_path / "game"
+    game.mkdir()
+    # файлы по алфавиту идут не в порядке игры: порядок даёт start и переходы
+    (game / "aaa_ending.rpy").write_text(
+        "label ending:\n" + "\n".join(f'    "{s}"' for s in lines(2500, 31, "sardonic")) + "\n    return\n",
+        encoding="utf-8",
+    )
+    (game / "zzz_start.rpy").write_text(
+        "label start:\n"
+        + "\n".join(f'    "{s}"' for s in lines(2500, 32, "quixotic"))
+        + "\n    call middle\n    jump ending\nlabel middle:\n"
+        + "\n".join(f'    "{s}"' for s in lines(2500, 33, "eerie"))
+        + "\n    return\n",
+        encoding="utf-8",
+    )
+    script = novel.extract(tmp_path)
+    assert len(script.parts) >= 2 and script.parts[0].title == "Часть 1"
+    flat = [s for p in script.parts for s in p.lines]
+    first = {w: next(i for i, s in enumerate(flat) if w in s.lower()) for w in ("quixotic", "eerie", "sardonic")}
+    assert first["quixotic"] < first["eerie"] < first["sardonic"]
+    assert "по порядку" in script.note
+
+
+def test_rpyc_flow_events() -> None:
+    c = _renpy_classes()
+    mod = sys.modules["renpy.ast"]
+    for name in ("Jump", "Call", "Return"):
+        if not hasattr(mod, name):
+            setattr(mod, name, type(name, (), {"__module__": "renpy.ast"}))
+    say1, say2 = c["Say"](), c["Say"]()
+    say1.what, say2.what = "First line of the game here.", "A line from the called label."
+    jump = mod.Call()
+    jump.label, jump.expression = "later", False
+    start, later = c["Label"](), c["Label"]()
+    start.name, start.block = "start", [say1, jump]
+    ret = mod.Return()
+    later.name, later.block = "later", [say2, ret]
+    data = zlib.compress(pickle.dumps(({}, [later, start]), protocol=2))
+    blocks = novel.rpyc_events(data)
+    assert ("start", [("say", say1.what), ("call", "later")]) in blocks
+    chunks, ordered = novel.flow_order([("script", blocks)])
+    assert ordered and [ls for _n, ls in chunks if ls][:2] == [[say1.what], [say2.what]]
+
+
+def test_parts_from_prologue_chapters_epilogue_and_numbers() -> None:
+    chunks = [("epilogue.ks", lines(50, 41)), ("chapter2.ks", lines(50, 42)), ("prologue.ks", lines(50, 43)),
+              ("chapter1.ks", lines(50, 44))]  # fmt: skip
+    parts, _note = novel.split_parts(chunks, ordered=False)
+    assert [p.title for p in parts] == ["Пролог", "Глава 1", "Глава 2", "Эпилог"]
+    numbered = [(f"scene{i}.txt", lines(600, 50 + i)) for i in (10, 2, 1, 9)]  # ~5 тыс. слов в каждом
+    parts, note = novel.split_parts([(n, ls * 3) for n, ls in numbered], ordered=False)
+    assert len(parts) >= 2 and "примерный" not in note
+    order = [n for n, _ls in sorted(numbered, key=lambda c: novel._natural(c[0]))]
+    assert order == ["scene1.txt", "scene2.txt", "scene9.txt", "scene10.txt"]
+    short, _ = novel.split_parts([("a.txt", lines(100, 60))], ordered=True)
+    assert [p.title for p in short] == ["Вся новелла"]
+
+
+def test_big_part_split_in_portions_by_first_appearance(qapp, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+    from PySide6.QtCore import Qt
+
+    from lexoplay.store import Game
+    from lexoplay.ui.novel_dialog import NovelDialog
+
+    nv = _leveled(tmp_path)
+    for i in range(130):  # 130 сложных слов в первом акте: три порции по порядку появления
+        w = f"zz{chr(97 + i // 26)}{chr(97 + i % 26)}word"
+        nv.parts[0].counts[w] = 10 + i % 7
+        nv.order[w] = 100_000 + i
+        nv.levels[w] = "C1"
+    ctl = NovelCtl(nv)
+    dlg = NovelDialog(ctl, Game("ks.exe", "Katawa Shoujo"))
+    texts = [dlg.part.itemText(i) for i in range(dlg.part.count())]
+    assert texts[0].startswith("Акт 1, порция 1 из 3 · ") and texts[2].startswith("Акт 1, порция 3 из 3 · ")
+    assert texts[-1].startswith("Вся новелла · ")
+    first = {dlg.list.item(i).data(Qt.ItemDataRole.UserRole) for i in range(dlg.list.count())}
+    assert "reluctant" in first and "zzafword" in first and "zzezword" not in first  # начало акта в первой порции
+    assert dlg.list.count() <= novelwords.PORTION
+    dlg.close()
+    import shiboken6
+
+    shiboken6.delete(dlg)

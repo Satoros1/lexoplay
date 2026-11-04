@@ -1,4 +1,4 @@
 """LexoPlay: перевод реплик в играх по клавише и слова из них в Lexo."""
 
-__version__ = "0.6.50"
+__version__ = "0.6.51"
 APP_NAME = "LexoPlay"
