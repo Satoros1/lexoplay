@@ -277,6 +277,7 @@ def _script() -> novel.Script:
         "Акт 2",
         ["Hisao smiled with a meticulous grin."] * 5
         + ["The meticulous plan worked, meticulous as ever."] * 2
+        + ["The eerie silence felt eerie tonight."] * 3
         + ["Did you end up going? Up there, I mean."] * 2,
     )
     return novel.Script(novel.Engine("renpy", "Ren'Py", True), [p1, p2])
@@ -286,7 +287,7 @@ def _leveled(tmp_path: Path) -> novelwords.Novel:
     nv = novelwords.build("ks.exe", "Katawa Shoujo", tmp_path, _script())
     nv.levels.update({"reluctant": "B2", "meticulous": "C1", "grin": "B2", "end up": "B2", "fidget": "C1",
                       "linger": "C1", "murmur": "B2", "frown": "B1", "solemn": "C1", "gaze": "B2", "shrug": "B1",
-                      "stumble": "B2", "nod": "A2"})  # fmt: skip
+                      "stumble": "B2", "nod": "A2", "eerie": "B2"})  # fmt: skip
     return nv
 
 
@@ -438,8 +439,13 @@ def test_novel_dialog_lists_hard_words_and_sends(qapp, tmp_path: Path) -> None: 
     dlg = NovelDialog(ctl, Game("ks.exe", "Katawa Shoujo"))
     assert dlg.min_level.currentData() == "B2"  # игрок B1: сложное с B2
     assert dlg.min_count.currentData() == novelwords.MIN_COUNT
+    # по частям: слово там, где встречается впервые; сначала первая часть
+    assert dlg.part.currentData() == 0 and dlg.part.itemText(0).startswith("Акт 1 · ")
+    assert dlg.part.itemText(dlg.part.count() - 1).startswith("Вся новелла · ")
     texts = [dlg.list.item(i).data(Qt.ItemDataRole.UserRole) for i in range(dlg.list.count())]
-    assert "meticulous" in texts and "end up" in texts and "nod" not in texts and "frown" not in texts
+    assert "reluctant" in texts and "end up" in texts and "eerie" not in texts
+    assert "nod" not in texts and "frown" not in texts
+    assert "впервые встречаются в этой части" in dlg.list_info.text()
     assert "Акт 1: знаешь" in dlg.ready.text()
     assert "—" not in dlg.list_info.text() and "—" not in dlg.ready.text()
     first = dlg.list.item(0)
@@ -452,7 +458,10 @@ def test_novel_dialog_lists_hard_words_and_sends(qapp, tmp_path: Path) -> None: 
     dlg.send.click()
     chosen, skipped = ctl.sent[0]
     assert skipped == [texts[0]] and texts[0] not in chosen and len(chosen) == len(texts) - 1
-    assert dlg.list.count() == 0  # всё отправлено или знакомо
+    # часть разобрана: окно само переходит к следующей, где слова ещё есть
+    assert dlg.part.currentData() == 1
+    left = [dlg.list.item(i).data(Qt.ItemDataRole.UserRole) for i in range(dlg.list.count())]
+    assert left == ["eerie"]
     assert card_text(novel_view(ctl, "ks.exe"))[0].startswith("Ren'Py")
     assert novel_view(object(), "x") is None
     assert not ctl.leveled  # уровни уже есть: модель второй раз не зовём

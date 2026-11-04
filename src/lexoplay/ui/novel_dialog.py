@@ -82,6 +82,7 @@ class NovelDialog(QDialog):
         self.ctl, self.game = ctl, game
         self._unchecked: set[str] = set()  # снятые галочки переживают смену фильтров
         self._shown: list[Candidate] = []
+        self._all: list[Candidate] = []  # весь список при текущих уровне и пороге, по всем частям
         self._last_key: tuple[object, ...] | None = None
         self.setWindowTitle(f"Слова новеллы: {game.title}")
         self.setMinimumSize(600, 720)
@@ -114,6 +115,15 @@ class NovelDialog(QDialog):
         box = QVBoxLayout(self.words_box)
         box.setContentsMargins(0, 6, 0, 0)
         box.setSpacing(8)
+        self.part_row = QWidget()
+        part_lay = QHBoxLayout(self.part_row)
+        part_lay.setContentsMargins(0, 0, 0, 0)
+        part_lay.addWidget(label("Слова к части", "muted"))
+        self.part = QComboBox()
+        self.part.setToolTip("Слово попадает в ту часть, где встречается впервые: его надо знать с неё")
+        self.part.currentIndexChanged.connect(lambda: self._fill(auto=False))
+        part_lay.addWidget(self.part, 1)
+        box.addWidget(self.part_row)
         filters = QHBoxLayout()
         filters.addWidget(label("Уровень от", "muted"))
         self.min_level = QComboBox()
@@ -224,11 +234,20 @@ class NovelDialog(QDialog):
             )
         return f"Папка игры: {view.folder}. {view.summary.capitalize()}." if view.summary else f"Папка игры: {view.folder}."
 
-    def _fill(self) -> None:
-        fn = getattr(self.ctl, "novel_words", None)
-        level, count = self.min_level.currentData(), self.min_count.currentData()
-        words = fn(self.game.exe, level, count) if fn is not None and level and count else None
-        self._shown = list(words) if isinstance(words, list) else []
+    def _fill(self, auto: bool = True) -> None:
+        """auto: данные или фильтры поменялись. Если выбранная часть опустела (всё отправлено),
+        переходим к следующей, где слова ещё есть."""
+        if auto:
+            fn = getattr(self.ctl, "novel_words", None)
+            level, count = self.min_level.currentData(), self.min_count.currentData()
+            words = fn(self.game.exe, level, count) if fn is not None and level and count else None
+            self._all = list(words) if isinstance(words, list) else []
+            self._fill_parts()
+        part = self.part.currentData()
+        if self.part_row.isHidden() or part is None or part < 0:
+            self._shown = list(self._all)
+        else:
+            self._shown = [c for c in self._all if c.part == part]
         self.list.blockSignals(True)
         self.list.clear()
         for c in self._shown:
@@ -241,16 +260,41 @@ class NovelDialog(QDialog):
         self.list.blockSignals(False)
         self._update_info()
 
+    def _fill_parts(self) -> None:
+        """«Акт 1 · 182 слова»: сколько слов впервые встречается в каждой части."""
+        view = novel_view(self.ctl, self.game.exe)
+        titles = [p[0] for p in view.parts] if view is not None else []
+        self.part_row.setVisible(len(titles) > 1)
+        if len(titles) <= 1:
+            return
+        per = [0] * len(titles)
+        for c in self._all:
+            if 0 <= c.part < len(per):
+                per[c.part] += 1
+        keep = self.part.currentData()
+        if keep is None or (keep >= 0 and per[keep] == 0):
+            keep = next((i for i, n in enumerate(per) if n), -1)  # первая часть, где слова ещё есть
+        self.part.blockSignals(True)
+        self.part.clear()
+        for i, (title, n) in enumerate(zip(titles, per, strict=True)):
+            self.part.addItem(f"{title} · {plural(n, WORDS)}", i)
+        self.part.addItem(f"Вся новелла · {plural(len(self._all), WORDS)}", -1)
+        self.part.setCurrentIndex(max(0, self.part.findData(keep)))
+        self.part.blockSignals(False)
+
     def _update_info(self) -> None:
         if not self._shown:
-            self.list_info.setText("Слов с такими условиями нет: попробуй уровень пониже или порог поменьше.")
+            if self._all:
+                self.list_info.setText("В этой части новых сложных слов нет: выбери другую.")
+            else:
+                self.list_info.setText("Слов с такими условиями нет: попробуй уровень пониже или порог поменьше.")
             return
         phrases = sum(c.phrase for c in self._shown)
         words = len(self._shown) - phrases
         what = plural(words, WORDS) + (f" и {plural(phrases, ('выражение', 'выражения', 'выражений'))}" if phrases else "")
-        self.list_info.setText(
-            f"{what}. Сверху самые частые. Сними галочки со знакомых: стрелки и пробел, так быстрее."
-        )
+        part = self.part.currentData()
+        where = " впервые встречаются в этой части" if not self.part_row.isHidden() and part is not None and part >= 0 else ""
+        self.list_info.setText(f"{what}{where}. Сверху самые частые. Знакомые снимай стрелками и пробелом.")
 
     def _filters_changed(self) -> None:
         self._fill()
