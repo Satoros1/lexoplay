@@ -420,6 +420,11 @@ class NovelCtl:
     def novel_default_count(self, exe: str, min_level: str) -> int:
         return novelwords.default_count(self.nv, min_level, lambda w: False)
 
+    def novel_sent(self, exe: str) -> list[novelwords.Candidate]:
+        import dataclasses
+
+        return [dataclasses.replace(c, meaning=f"перевод {c.text}", example="An example.") for c in novelwords.sent(self.nv)]
+
     def send_novel_words(self, exe: str, chosen: list[str], skipped: list[str]) -> None:
         self.sent.append((chosen, skipped))
         self.nv.skipped |= set(skipped)
@@ -462,6 +467,16 @@ def test_novel_dialog_lists_hard_words_and_sends(qapp, tmp_path: Path) -> None: 
     assert dlg.part.currentData() == "1:0"
     left = [dlg.list.item(i).data(Qt.ItemDataRole.UserRole) for i in range(dlg.list.count())]
     assert left == ["eerie"]
+    # отправленные видны во вкладке «Уже в колоде»: с переводом, без галочек, по тем же частям
+    assert dlg.tabs.tabText(1) == f"Уже в колоде · {len(chosen)}"
+    dlg.tabs.setCurrentIndex(1)
+    assert dlg.part.currentData() == "0:0" and dlg.send.isHidden() and dlg.filters_box.isHidden()
+    rows = [dlg.list.item(i) for i in range(dlg.list.count())]
+    assert {r.data(Qt.ItemDataRole.UserRole) for r in rows} == set(chosen)
+    assert all("·    перевод " in r.text() and not r.flags() & Qt.ItemFlag.ItemIsUserCheckable for r in rows)
+    assert "уже в колоде на паузе" in dlg.list_info.text() and dlg._chosen() == ([], [])
+    dlg.tabs.setCurrentIndex(0)
+    assert not dlg.send.isHidden() or dlg.words_box.isHidden()
     assert card_text(novel_view(ctl, "ks.exe"))[0].startswith("Ren'Py")
     assert novel_view(object(), "x") is None
     assert not ctl.leveled  # уровни уже есть: модель второй раз не зовём

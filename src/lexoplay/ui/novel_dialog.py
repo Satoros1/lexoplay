@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 from PySide6.QtCore import Qt, QTimer
@@ -19,11 +20,10 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QPushButton,
+    QTabBar,
     QVBoxLayout,
     QWidget,
 )
-
-import math
 
 from lexoplay.novelwords import COUNTS, LEVELS, PORTION, Candidate, NovelView, plural
 from lexoplay.store import Game
@@ -118,6 +118,17 @@ class NovelDialog(QDialog):
         box = QVBoxLayout(self.words_box)
         box.setContentsMargins(0, 6, 0, 0)
         box.setSpacing(8)
+        # «Разобрать»: новые сложные слова с галочками. «Уже в колоде»: отправленные, с переводом,
+        # чтобы пробежаться по ним глазами перед частью
+        self._mode = "new"
+        self._mode_picked = False
+        self.tabs = QTabBar()
+        self.tabs.setObjectName("novelTabs")
+        self.tabs.addTab("Разобрать")
+        self.tabs.addTab("Уже в колоде")
+        self.tabs.setDrawBase(False)
+        self.tabs.currentChanged.connect(self._tab_changed)
+        box.addWidget(self.tabs)
         self.part_row = QWidget()
         part_lay = QHBoxLayout(self.part_row)
         part_lay.setContentsMargins(0, 0, 0, 0)
@@ -130,7 +141,9 @@ class NovelDialog(QDialog):
         self.part.currentIndexChanged.connect(lambda: self._fill(auto=False))
         part_lay.addWidget(self.part, 1)
         box.addWidget(self.part_row)
-        filters = QHBoxLayout()
+        self.filters_box = QWidget()
+        filters = QHBoxLayout(self.filters_box)
+        filters.setContentsMargins(0, 0, 0, 0)
         filters.addWidget(label("Уровень от", "muted"))
         self.min_level = QComboBox()
         for lv in LEVELS[2:]:
@@ -145,14 +158,16 @@ class NovelDialog(QDialog):
         self.min_count.currentIndexChanged.connect(self._filters_changed)
         filters.addWidget(self.min_count)
         filters.addStretch(1)
-        box.addLayout(filters)
+        box.addWidget(self.filters_box)
         self.list_info = label("", "muted", wrap=True)
         box.addWidget(self.list_info)
         self.list = QListWidget()
         self.list.setObjectName("novelWords")
         self.list.itemChanged.connect(self._item_changed)
         box.addWidget(self.list, 1)
-        toggles = QHBoxLayout()
+        self.toggles_box = QWidget()
+        toggles = QHBoxLayout(self.toggles_box)
+        toggles.setContentsMargins(0, 0, 0, 0)
         self.all_on = QPushButton("Отметить все")
         self.all_on.clicked.connect(lambda: self._check_all(True))
         self.all_off = QPushButton("Снять все")
@@ -160,7 +175,7 @@ class NovelDialog(QDialog):
         toggles.addWidget(self.all_on)
         toggles.addWidget(self.all_off)
         toggles.addStretch(1)
-        box.addLayout(toggles)
+        box.addWidget(self.toggles_box)
         lay.addWidget(self.words_box, 1)
         self.result = label("", "muted", wrap=True)
         lay.addWidget(self.result)
@@ -203,7 +218,7 @@ class NovelDialog(QDialog):
         self.ready.setVisible(view.state == "ready" and len(view.parts) > 1)
         show = view.state == "ready" and (view.leveled or bool(self._shown) or not view.busy)
         self.words_box.setVisible(show)
-        self.send.setVisible(show)
+        self.send.setVisible(show and self._mode == "new")
         self.result.setText(view.progress or view.message)
         if view.state == "ready" and not self._defaults_set:
             self._set_defaults(view)
@@ -247,7 +262,16 @@ class NovelDialog(QDialog):
             fn = getattr(self.ctl, "novel_words", None)
             level, count = self.min_level.currentData(), self.min_count.currentData()
             words = fn(self.game.exe, level, count) if fn is not None and level and count else None
-            self._all = list(words) if isinstance(words, list) else []
+            fresh = list(words) if isinstance(words, list) else []
+            fn_sent = getattr(self.ctl, "novel_sent", None)
+            got = fn_sent(self.game.exe) if fn_sent is not None else None
+            sent = list(got) if isinstance(got, list) else []
+            self.tabs.setTabText(0, f"Разобрать · {len(fresh)}")
+            self.tabs.setTabText(1, f"Уже в колоде · {len(sent)}")
+            self.tabs.setTabEnabled(1, bool(sent) or self._mode == "sent")
+            if not self._mode_picked and self._mode == "new" and not fresh and sent:
+                self._set_mode("sent")  # разбирать нечего: сразу показать отправленные
+            self._all = sent if self._mode == "sent" else fresh
             self._fill_parts()
         key = self.part.currentData()
         if self.part_row.isHidden() or key is None:
@@ -258,6 +282,14 @@ class NovelDialog(QDialog):
         self.list.clear()
         for c in self._shown:
             kind = "выражение · " if c.phrase else ""
+            if self._mode == "sent":
+                item = QListWidgetItem(f"{c.text}    ·    {c.meaning}" if c.meaning else c.text)
+                tip = f"{kind}{c.level} · {plural(c.total, TIMES)}" if c.level else plural(c.total, TIMES)
+                item.setToolTip(f"{tip}\n{c.example}" if c.example else tip)
+                item.setData(Qt.ItemDataRole.UserRole, c.text)
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)  # только посмотреть
+                self.list.addItem(item)
+                continue
             item = QListWidgetItem(f"{c.text}    {kind}{c.level} · {plural(c.total, TIMES)}")
             item.setData(Qt.ItemDataRole.UserRole, c.text)
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
@@ -302,7 +334,40 @@ class NovelDialog(QDialog):
         self.part.setCurrentIndex(max(0, self.part.findData(keep)))
         self.part.blockSignals(False)
 
+    def _set_mode(self, mode: str) -> None:
+        self._mode = mode
+        self.tabs.blockSignals(True)
+        self.tabs.setCurrentIndex(1 if mode == "sent" else 0)
+        self.tabs.blockSignals(False)
+        new = mode == "new"
+        self.filters_box.setVisible(new)
+        self.toggles_box.setVisible(new)
+        self.send.setVisible(new and not self.words_box.isHidden())
+        self.part.setToolTip(
+            "Слово попадает в ту часть, где встречается впервые: его надо знать с неё. "
+            f"Большая часть делится на порции примерно по {PORTION} слов, по порядку появления."
+        )
+
+    def _tab_changed(self, index: int) -> None:
+        self._mode_picked = True
+        self._set_mode("sent" if index == 1 else "new")
+        self._fill()
+        view = novel_view(self.ctl, self.game.exe)
+        if view is not None:
+            self._update_send(view)
+
     def _update_info(self) -> None:
+        if self._mode == "sent":
+            if not self._shown:
+                self.list_info.setText("Отсюда в колоду пока ничего не ушло." if not self._all else "В этой части отправленных слов нет.")
+                return
+            key = self.part.currentData()
+            where = " этой части" if not self.part_row.isHidden() and key not in (None, "all") else ""
+            self.list_info.setText(
+                f"{plural(len(self._shown), WORDS)}{where} уже в колоде на паузе. Пробегись по ним глазами перед "
+                "чтением: в игре их перевод подскажется под репликой. Наведи на слово, чтобы увидеть пример."
+            )
+            return
         if not self._shown:
             if self._all:
                 self.list_info.setText("Здесь новых сложных слов нет: выбери другую часть.")
@@ -337,7 +402,10 @@ class NovelDialog(QDialog):
             self.list.item(i).setCheckState(Qt.CheckState.Checked if on else Qt.CheckState.Unchecked)
 
     def _chosen(self) -> tuple[list[str], list[str]]:
-        chosen, skipped = [], []
+        chosen: list[str] = []
+        skipped: list[str] = []
+        if self._mode != "new":
+            return chosen, skipped
         for i in range(self.list.count()):
             item = self.list.item(i)
             word = str(item.data(Qt.ItemDataRole.UserRole))

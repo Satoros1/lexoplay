@@ -2643,6 +2643,26 @@ class App(QObject):
             return []
         return novelwords.candidates(nv, min_level, min_count, self.vocab.known)
 
+    def novel_sent(self, exe: str) -> list[novelwords.Candidate]:
+        """Отправленные в колоду слова новеллы с переводом и примером (из сохранённых слов)."""
+        nv = novelwords.load(exe)
+        if nv is None:
+            return []
+        saved: dict[str, SavedWord] = {}
+        for w in self.store.words_list():
+            if w.exe == exe:
+                for key in (w.selection, w.lemma):
+                    if key:
+                        saved.setdefault(key.strip().lower(), w)
+        out = []
+        for c in novelwords.sent(nv):
+            w = saved.get(c.text)
+            if w is None:
+                continue  # удалено во вкладке «Слова»
+            example = " / ".join(x for x in (w.sentence, w.sentence_translation) if x)
+            out.append(replace(c, meaning=w.translation or "", example=example))
+        return out
+
     def novel_default_count(self, exe: str, min_level: str) -> int:
         nv = novelwords.load(exe)
         if nv is None:
@@ -2693,7 +2713,7 @@ class App(QObject):
                     continue
                 self._store_word(
                     exe, title, session.id,
-                    selection=it.lemma, lemma=it.lemma, translation=it.meaning, ipa=it.ipa or None, pos=it.pos or None,
+                    selection=w, lemma=it.lemma, translation=it.meaning, ipa=it.ipa or None, pos=it.pos or None,
                     sentence=it.example, sentence_translation=it.example_tr or None, parked=True,
                 )  # fmt: skip
                 sent.add(w)

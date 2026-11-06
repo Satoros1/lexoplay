@@ -102,6 +102,8 @@ class Candidate:
     order: int
     phrase: bool
     part: int = 0  # в какой части встречается впервые: к ней его и учить
+    meaning: str = ""  # уже в колоде: перевод, который написала модель
+    example: str = ""
 
 
 @dataclass(slots=True)
@@ -313,8 +315,22 @@ def candidates(novel: Novel, min_level: str, min_count: int, known: Callable[[st
             continue
         if known(item):
             continue
-        part = next((i for i, p in enumerate(novel.parts) if item in p.counts or item in p.phrases), 0)
-        out.append(Candidate(item, lv, total, novel.order.get(item, 1 << 30), " " in item, part))
+        out.append(Candidate(item, lv, total, novel.order.get(item, 1 << 30), " " in item, _first_part(novel, item)))
+    out.sort(key=lambda c: (-c.total, c.order))
+    return out
+
+
+def _first_part(novel: Novel, item: str) -> int:
+    return next((i for i, p in enumerate(novel.parts) if item in p.counts or item in p.phrases), 0)
+
+
+def sent(novel: Novel) -> list[Candidate]:
+    """Уже отправленные отсюда в колоду: чтобы пробежаться по ним глазами перед частью."""
+    out = [
+        Candidate(item, novel.levels.get(item, ""), novel.total(item), novel.order.get(item, 1 << 30),
+                  " " in item, _first_part(novel, item))
+        for item in novel.taken
+    ]  # fmt: skip
     out.sort(key=lambda c: (-c.total, c.order))
     return out
 

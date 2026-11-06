@@ -1459,6 +1459,7 @@ def _novel_flow(out_dir: Path) -> Callable[[], tuple[str, object]]:
             info["message"] = app.novel_info(game.exe).message
             info["after"] = [w.text for w in app.novel_words(game.exe, "B2", 4)]
             info["known_now"] = app.vocab.known("meticulous")
+            info["sent_list"] = [(c.text, c.meaning) for c in app.novel_sent(game.exe)]
             dlg._load()  # noqa: SLF001
             dlg.grab().save(str(out_dir / "novel-dialog-sent.png"))
             dlg.close()
@@ -1477,6 +1478,7 @@ def _novel_flow(out_dir: Path) -> Callable[[], tuple[str, object]]:
             and str(info["message"]).startswith("Готово")
             and info["after"] == []
             and info["known_now"]
+            and sorted(info["sent_list"]) == [("end up", "значение end up"), ("meticulous", "значение meticulous")]
         )
         return ("ok" if ok else "fail"), info
 
