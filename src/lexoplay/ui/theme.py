@@ -125,6 +125,11 @@ QPushButton#chipButton:hover {{ background: {GREEN_SOFT}; }}
 QPushButton#filterChip {{ border: 1px solid {BORDER_STRONG}; border-radius: 8px; padding: 7px 12px; min-height: 22px;
                          background: {CARD}; font-weight: 600; }}
 QPushButton#filterChip:checked {{ background: {GREEN_SOFT}; border-color: {GREEN}; color: {GREEN_INK}; }}
+QTabBar::tab {{ border: 1px solid {BORDER_STRONG}; border-radius: 8px; padding: 6px 12px; margin-right: 6px;
+               background: {CARD}; font-weight: 600; font-size: 10pt; color: {INK}; }}
+QTabBar::tab:selected {{ background: {GREEN_SOFT}; border-color: {GREEN}; color: {GREEN_INK}; }}
+QTabBar::tab:hover:!selected {{ background: #EFEDE6; }}
+QTabBar::tab:disabled {{ color: #A9A69D; border-color: {BORDER}; }}
 QPushButton#segment {{ border: none; border-radius: 7px; padding: 4px 11px; min-height: 16px; font-size: 9pt;
                       background: transparent; color: {MUTED}; }}
 QPushButton#segment:hover {{ background: #ECEAE4; }}

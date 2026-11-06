@@ -610,3 +610,31 @@ def test_big_part_split_in_portions_by_first_appearance(qapp, tmp_path: Path) ->
     import shiboken6
 
     shiboken6.delete(dlg)
+
+
+def test_novel_words_have_their_own_tab_on_words_page(qapp, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+    from lexoplay.store import SavedWord, Store
+    from lexoplay.ui.pages import WordsPage
+
+    store = Store(tmp_path / "local.db")
+    store.word_add(SavedWord("ks.exe", "Katawa Shoujo", "freckle", translation="веснушка", created_at=1.0, lexo=True))
+    store.word_add(
+        SavedWord("ks.exe", "Katawa Shoujo", "linger", translation="задерживаться", created_at=2.0, lexo=True, novel=True)
+    )
+    words = store.words_list()
+    assert [w.novel for w in words] == [True, False]
+
+    class Ctl:
+        def saved_words(self) -> list[SavedWord]:
+            return words
+
+    page = WordsPage(Ctl(), lambda: True, lambda: "F3")  # type: ignore[arg-type]
+    page.refresh()
+    assert [page.source.tabText(i) for i in range(3)] == ["Все · 2", "Из игр · 1", "Из новелл · 1"]
+    page.source.setCurrentIndex(2)
+    assert [w.selection for w in page.visible_words()] == ["linger"] and not page.source_note.isHidden()
+    page.source.setCurrentIndex(1)
+    assert [w.selection for w in page.visible_words()] == ["freckle"] and page.source_note.isHidden()
+    import shiboken6
+
+    shiboken6.delete(page)

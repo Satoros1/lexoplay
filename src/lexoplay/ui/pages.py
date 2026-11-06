@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QSizePolicy,
+    QTabBar,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -200,6 +201,23 @@ class WordsPage(QWidget):
         scroll.verticalScrollBar().valueChanged.connect(self._near_bottom)
         self.note = label("", "muted", wrap=True)
         lay.addWidget(self.note)
+        # «Из новелл»: слова, отобранные в «Слова новеллы» до игры, отдельно от пойманных в игре
+        self.source = QTabBar()
+        self.source.setObjectName("wordsSource")
+        self.source.setDrawBase(False)
+        for text in ("Все", "Из игр", "Из новелл"):
+            self.source.addTab(text)
+        self.source.currentChanged.connect(lambda _i: self._filter())
+        lay.addWidget(self.source)
+        self.source_note = label(
+            "Слова, которые ты отобрал в «Игры» → «Слова новеллы…». В Lexo они ждут на паузе во вкладке «Ждут», "
+            "по актам их удобно смотреть там же, во вкладке «Уже в колоде». Пример к ним написала модель; "
+            "встретишь слово в игре, и пример заменится репликой из игры.",
+            "muted",
+            wrap=True,
+        )
+        self.source_note.hide()
+        lay.addWidget(self.source_note)
 
         self.toolbar = QWidget()  # поиск прилипает к верху, когда список прокручен ниже него
         bar = QHBoxLayout(self.toolbar)
@@ -255,7 +273,12 @@ class WordsPage(QWidget):
             )
         self.note.setText(text)
         self.export_btn.setEnabled(bool(self._words))
-        sig = tuple((w.id, w.seen, w.lexo, w.sentence) for w in self._words)
+        novel = sum(1 for w in self._words if w.novel)
+        self.source.setTabText(0, f"Все · {len(self._words)}")
+        self.source.setTabText(1, f"Из игр · {len(self._words) - novel}")
+        self.source.setTabText(2, f"Из новелл · {novel}")
+        self.source.setVisible(bool(self._words))
+        sig = tuple((w.id, w.seen, w.lexo, w.sentence, w.novel) for w in self._words)
         if sig == self._sig and self._rows:
             return  # ничего не поменялось: список не строим заново, вкладка открывается сразу
         self._sig = sig
@@ -281,8 +304,16 @@ class WordsPage(QWidget):
         if self._feed_left <= 0 or self._rendered >= len(self._visible):
             self._feed.stop()
 
+    def _from_source(self) -> list[SavedWord]:
+        tab = self.source.currentIndex()
+        if tab == 1:
+            return [w for w in self._words if not w.novel]
+        if tab == 2:
+            return [w for w in self._words if w.novel]
+        return self._words
+
     def visible_words(self) -> list[SavedWord]:
-        found = [w for w in self._words if word_matches(w, self.query)]
+        found = [w for w in self._from_source() if word_matches(w, self.query)]
         return sort_words(found, self.sort.currentData() or "new")
 
     def _render(self) -> None:
@@ -291,19 +322,26 @@ class WordsPage(QWidget):
         self._rows = {}
         self._rendered = 0
         self._visible = words = self.visible_words()
-        total = len(self._words)
+        total = len(self._from_source())
+        self.source_note.setVisible(self.source.currentIndex() == 2)
         if self.query:
             self.summary.setText(f"Найдено: {len(words)} из {total}" if words else f"Ничего не нашлось среди {total} слов")
         else:
             self.summary.setText(f"Слов: {total}" if total else "")
         self.summary.setVisible(bool(total))
-        self.search.setVisible(bool(total))
-        self.sort.setVisible(bool(total))
+        self.search.setVisible(bool(self._words))
+        self.sort.setVisible(bool(self._words))
         if not words:
             empty = QWidget()
             el = QVBoxLayout(empty)
             el.setContentsMargins(18, 14, 18, 14)
-            el.addWidget(label("Слов пока нет." if not total else "Попробуй другое слово или перевод.", "muted"))
+            if total:
+                text = "Попробуй другое слово или перевод."
+            elif self.source.currentIndex() == 2:
+                text = "Из новелл слов пока нет: их добавляют в «Игры» → «Слова новеллы…»."
+            else:
+                text = "Слов пока нет."
+            el.addWidget(label(text, "muted"))
             self.box_lay.addWidget(empty)
         # первые строки сразу (их и видно), остальные между кадрами: вкладка открывается без задержки
         self._append(FIRST_ROWS)
@@ -362,7 +400,10 @@ class WordsPage(QWidget):
         if extra:
             head += f' <span style="color:{theme.MUTED}; font-size:10pt; font-weight:400">&nbsp;{html.escape(extra)}</span>'
         top.addWidget(rich_label(head, "title", wrap=False))
-        top.addWidget(label("в Lexo" if w.lexo else "только здесь", "chip" if w.lexo else "chipGray"))
+        if w.novel and w.lexo:
+            top.addWidget(label("ждёт в Lexo", "chip"))
+        else:
+            top.addWidget(label("в Lexo" if w.lexo else "только здесь", "chip" if w.lexo else "chipGray"))
         top.addStretch(1)
         if self.can_explain and w.sentence:
             opened = w.id in self.explain_open

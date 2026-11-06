@@ -3980,6 +3980,7 @@ class App(QObject):
                 sentence_translation=sentence_translation,
                 created_at=time.time(),
                 lexo=linked,
+                novel=parked,
             )
         )
         if linked:
