@@ -273,12 +273,8 @@ class WordsPage(QWidget):
             )
         self.note.setText(text)
         self.export_btn.setEnabled(bool(self._words))
-        novel = sum(1 for w in self._words if w.novel)
-        self.source.setTabText(0, f"Все · {len(self._words)}")
-        self.source.setTabText(1, f"Из игр · {len(self._words) - novel}")
-        self.source.setTabText(2, f"Из новелл · {novel}")
-        self.source.setVisible(bool(self._words))
-        sig = tuple((w.id, w.seen, w.lexo, w.sentence, w.novel) for w in self._words)
+        self._count_tabs()
+        sig = self._signature()
         if sig == self._sig and self._rows:
             return  # ничего не поменялось: список не строим заново, вкладка открывается сразу
         self._sig = sig
@@ -303,6 +299,16 @@ class WordsPage(QWidget):
         self._feed_left -= n
         if self._feed_left <= 0 or self._rendered >= len(self._visible):
             self._feed.stop()
+
+    def _signature(self) -> tuple:
+        return tuple((w.id, w.seen, w.lexo, w.sentence, w.novel) for w in self._words)
+
+    def _count_tabs(self) -> None:
+        novel = sum(1 for w in self._words if w.novel)
+        self.source.setTabText(0, f"Все · {len(self._words)}")
+        self.source.setTabText(1, f"Из игр · {len(self._words) - novel}")
+        self.source.setTabText(2, f"Из новелл · {novel}")
+        self.source.setVisible(bool(self._words))
 
     def _from_source(self) -> list[SavedWord]:
         tab = self.source.currentIndex()
@@ -481,7 +487,8 @@ class WordsPage(QWidget):
         self.ctl.delete_word(word_id)
         self._words = [w for w in self._words if w.id != word_id]
         self._visible = [w for w in self._visible if w.id != word_id]
-        self._sig = tuple((w.id, w.seen, w.lexo, w.sentence) for w in self._words)
+        self._sig = self._signature()
+        self._count_tabs()
         row = self._rows.pop(word_id, None)
         if row is None:
             self._render()
@@ -493,7 +500,7 @@ class WordsPage(QWidget):
         if not self._visible:
             self._render()
             return
-        total = len(self._words)
+        total = len(self._from_source())
         self.summary.setText(f"Найдено: {len(self._visible)} из {total}" if self.query else f"Слов: {total}")
         self.export_btn.setEnabled(bool(self._words))
         if self._rendered < len(self._visible):
