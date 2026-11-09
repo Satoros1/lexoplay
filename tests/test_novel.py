@@ -638,3 +638,70 @@ def test_novel_words_have_their_own_tab_on_words_page(qapp, tmp_path: Path) -> N
     import shiboken6
 
     shiboken6.delete(page)
+
+
+def test_loaded_novel_is_cached_until_the_file_changes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LEXOPLAY_HOME", str(tmp_path))
+    nv = _leveled(tmp_path)
+    novelwords.save(nv)
+    assert nv.rev == 1 and novelwords.load("ks.exe") is nv  # с диска второй раз не читаем
+    nv.skipped.add("grin")
+    novelwords.save(nv)
+    assert nv.rev == 2 and novelwords.load("ks.exe") is nv
+    # файл поменяли мимо save (другая копия программы): читаем заново
+    path = novelwords._path("ks.exe")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["skipped"] = ["grin", "gaze"]
+    path.write_text(json.dumps(data), encoding="utf-8")
+    fresh = novelwords.load("ks.exe")
+    assert fresh is not nv and fresh is not None and fresh.skipped == {"grin", "gaze"}
+    assert fresh.total("end up") == 8 and fresh.totals() is fresh.totals()
+    novelwords.forget("ks.exe")
+    assert novelwords.load("ks.exe") is None
+
+
+def test_check_all_updates_once_and_errors_stand_out(qapp, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]
+    from PySide6.QtCore import Qt
+
+    from lexoplay.store import Game
+    from lexoplay.ui.novel_dialog import NovelDialog
+
+    nv = _leveled(tmp_path)
+    for item in novelwords.to_level(nv):
+        nv.levels.setdefault(item, "A2")
+    ctl = NovelCtl(nv)
+    calls = 0
+    real = ctl.novel_info
+
+    def counted(exe: str) -> novelwords.NovelView:
+        nonlocal calls
+        calls += 1
+        view = real(exe)
+        view.message = "Сервер Lexo ещё старый: обнови сервер и нажми ещё раз."
+        return view
+
+    ctl.novel_info = counted  # type: ignore[method-assign]
+    dlg = NovelDialog(ctl, Game("ks.exe", "Katawa Shoujo"))
+    assert dlg.result.objectName() == "warn"  # ошибку видно
+    opened = calls
+    dlg.all_off.click()
+    assert all(dlg.list.item(i).checkState() == Qt.CheckState.Unchecked for i in range(dlg.list.count()))
+    assert dlg.send.text().strip() == "Отметить как знакомые"
+    dlg.list.item(0).setCheckState(Qt.CheckState.Checked)
+    dlg.min_count.setCurrentIndex(dlg.min_count.findData(novelwords.COUNTS[1]))
+    assert calls == opened  # галочки и фильтры не пересчитывают новеллу заново
+    dlg.close()
+    import shiboken6
+
+    shiboken6.delete(dlg)
+
+
+def test_novel_words_make_no_session_in_history(tmp_path: Path) -> None:
+    from lexoplay.store import SavedWord, Store
+
+    store = Store(tmp_path / "local.db")
+    store.word_add(SavedWord("ks.exe", "KS", "freckle", translation="веснушка", created_at=100.0))
+    store.word_add(SavedWord("ks.exe", "KS", "linger", translation="медлить", created_at=5000.0, novel=True))
+    assert store.history_events("ks.exe") == [("ks.exe", 100.0, "word")]  # отправка списка не сессия игры
+    assert [w.selection for w in store.words_range("ks.exe", 0, 10_000)] == ["freckle"]
+    assert [w.selection for w in store.words_novel("KS.exe")] == ["linger"]

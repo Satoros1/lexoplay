@@ -611,9 +611,10 @@ class Store:
 
     # --- история по сессиям (timeline.py собирает сессии из этих событий)
     def history_events(self, exe: str | None = None) -> list[tuple[str, float, str]]:
-        """[(exe, время, "line" | "word")]: когда видели реплику и когда сохранили слово."""
+        """[(exe, время, "line" | "word")]: когда видели реплику и когда сохранили слово.
+        Слова из списка новеллы не событие игры: их отправляют пачкой до чтения, сессии из них не выходит."""
         line_sql = "SELECT exe, seen_at, 'line' FROM lines"
-        word_sql = "SELECT LOWER(exe), created_at, 'word' FROM words WHERE exe IS NOT NULL AND exe != ''"
+        word_sql = "SELECT LOWER(exe), created_at, 'word' FROM words WHERE exe IS NOT NULL AND exe != '' AND novel = 0"
         args: tuple = ()
         if exe:
             line_sql += " WHERE exe = ?"
@@ -675,7 +676,7 @@ class Store:
         with self._lock:
             rows = self._db.execute(
                 f"SELECT {self._WORD_COLS} FROM words WHERE LOWER(exe) = ? AND created_at >= ? AND created_at <= ? "
-                "ORDER BY created_at",
+                "AND novel = 0 ORDER BY created_at",
                 (exe.lower(), start, end),
             ).fetchall()
         return [self._word(r) for r in rows]
@@ -749,7 +750,7 @@ class Store:
             self._db.commit()
             return int(cur.lastrowid or 0)
 
-    def words_list(self, *, only_local: bool = False, limit: int = 2000) -> list[SavedWord]:
+    def words_list(self, *, only_local: bool = False, limit: int = 20_000) -> list[SavedWord]:
         sql = f"SELECT {self._WORD_COLS} FROM words"
         if only_local:
             sql += " WHERE lexo = 0"
@@ -796,6 +797,15 @@ class Store:
                 "SELECT source FROM lines WHERE exe = ? ORDER BY id DESC LIMIT ?", (exe.lower(), limit)
             ).fetchall()
         return [r[0] for r in rows]
+
+    def words_novel(self, exe: str) -> list[SavedWord]:
+        """Слова этой игры из списка «Слова новеллы», все, от новых к старым."""
+        with self._lock:
+            rows = self._db.execute(
+                f"SELECT {self._WORD_COLS} FROM words WHERE novel = 1 AND LOWER(exe) = ? ORDER BY id DESC",
+                (exe.lower(),),
+            ).fetchall()
+        return [self._word(r) for r in rows]
 
     def words_mark_lexo(self, ids: list[int]) -> None:
         with self._lock:

@@ -194,16 +194,17 @@ class NovelDialog(QDialog):
         self._timer.setInterval(self.POLL_MS)
         self._timer.timeout.connect(self._load)
         self._defaults_set = False
+        self._view = NovelView()  # последнее, что отдал контроллер: по мелочам его заново не спрашиваем
         self._load()
-        view = novel_view(self.ctl, game.exe)
-        if view is not None and view.state == "none" and view.folder and view.can_read:
+        view = self._view
+        if view.state == "none" and view.folder and view.can_read:
             self._scan(None)  # папка уже известна: искать текст сразу, без лишней кнопки
-        elif view is not None and view.state == "ready" and not view.leveled and not view.busy:
+        elif view.state == "ready" and not view.leveled and not view.busy:
             self._level()  # текст посчитан, а уровни ещё нет (или оценка прервалась)
 
     # ------------------------------------------------------------------
     def _load(self) -> None:
-        view = novel_view(self.ctl, self.game.exe) or NovelView()
+        view = self._view = novel_view(self.ctl, self.game.exe) or NovelView()
         busy = view.busy or view.state == "scanning"
         self.scan.setEnabled(not busy and view.can_read)
         self.scan.setText(" Пересчитать" if view.state == "ready" else " Найти текст")
@@ -220,7 +221,15 @@ class NovelDialog(QDialog):
         self.words_box.setVisible(show)
         self.send.setVisible(show and self._mode == "new")
         self.result.setText(view.progress or view.message)
-        if view.state == "ready" and not self._defaults_set:
+        # ошибка заметнее обычной строки: «сервер старый», «нет ключа», «не пришли»
+        bad = bool(view.message) and not view.progress and not view.message.startswith(("Готово", "Отметил"))
+        name = "warn" if bad else "muted"
+        if self.result.objectName() != name:
+            self.result.setObjectName(name)
+            self.result.style().unpolish(self.result)
+            self.result.style().polish(self.result)
+        # порог по умолчанию зависит от числа сложных слов: ждём, пока модель их оценит
+        if view.state == "ready" and view.leveled and not self._defaults_set:
             self._set_defaults(view)
         key = (view.state, view.leveled, view.busy, view.summary)
         if key != self._last_key:  # список заново только когда поменялись данные, а не на каждый опрос
@@ -301,8 +310,7 @@ class NovelDialog(QDialog):
     def _fill_parts(self) -> None:
         """«Акт 1 · 52 слова», «Акт 2, порция 1 из 3 · 60 слов», «Вся новелла · 320 слов».
         Слово в части, где встречается впервые; часть больше PORTION слов делится по порядку появления."""
-        view = novel_view(self.ctl, self.game.exe)
-        titles = [p[0] for p in view.parts] if view is not None and view.parts else ["Вся новелла"]
+        titles = [p[0] for p in self._view.parts] or ["Вся новелла"]
         options: list[tuple[str, str, list[Candidate]]] = []
         for i, title in enumerate(titles):
             items = sorted((c for c in self._all if c.part == i), key=lambda c: c.order)
@@ -352,9 +360,7 @@ class NovelDialog(QDialog):
         self._mode_picked = True
         self._set_mode("sent" if index == 1 else "new")
         self._fill()
-        view = novel_view(self.ctl, self.game.exe)
-        if view is not None:
-            self._update_send(view)
+        self._update_send(self._view)
 
     def _update_info(self) -> None:
         if self._mode == "sent":
@@ -383,9 +389,7 @@ class NovelDialog(QDialog):
 
     def _filters_changed(self) -> None:
         self._fill()
-        view = novel_view(self.ctl, self.game.exe)
-        if view is not None:
-            self._update_send(view)
+        self._update_send(self._view)
 
     def _item_changed(self, item: QListWidgetItem) -> None:
         word = str(item.data(Qt.ItemDataRole.UserRole))
@@ -393,13 +397,20 @@ class NovelDialog(QDialog):
             self._unchecked.discard(word)
         else:
             self._unchecked.add(word)
-        view = novel_view(self.ctl, self.game.exe)
-        if view is not None:
-            self._update_send(view)
+        self._update_send(self._view)
 
     def _check_all(self, on: bool) -> None:
+        self.list.blockSignals(True)  # одно обновление на весь список, а не по одному на строку
         for i in range(self.list.count()):
-            self.list.item(i).setCheckState(Qt.CheckState.Checked if on else Qt.CheckState.Unchecked)
+            item = self.list.item(i)
+            item.setCheckState(Qt.CheckState.Checked if on else Qt.CheckState.Unchecked)
+            word = str(item.data(Qt.ItemDataRole.UserRole))
+            if on:
+                self._unchecked.discard(word)
+            else:
+                self._unchecked.add(word)
+        self.list.blockSignals(False)
+        self._update_send(self._view)
 
     def _chosen(self) -> tuple[list[str], list[str]]:
         chosen: list[str] = []
@@ -436,9 +447,7 @@ class NovelDialog(QDialog):
         self._load()
 
     def _pick_folder(self) -> None:
-        view = novel_view(self.ctl, self.game.exe)
-        start = view.folder if view is not None else ""
-        folder = QFileDialog.getExistingDirectory(self, "Папка игры", start)
+        folder = QFileDialog.getExistingDirectory(self, "Папка игры", self._view.folder)
         if folder:
             self._scan(folder)
 

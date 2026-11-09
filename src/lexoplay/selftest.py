@@ -1464,6 +1464,22 @@ def _novel_flow(out_dir: Path) -> Callable[[], tuple[str, object]]:
             dlg._load()  # noqa: SLF001
             dlg.grab().save(str(out_dir / "novel-dialog-sent.png"))
             dlg.close()
+            # слово новеллы, сохранённое без привязки: после привязки тоже ложится на паузу,
+            # а на старый сервер (без parked_cards) не уходит вовсе
+            from lexoplay.store import SavedWord
+
+            store.word_add(SavedWord("vn.exe", "Selftest VN", "solemn", "solemn", "торжественный",
+                                     sentence="A solemn promise.", created_at=time.time(), novel=True))  # fmt: skip
+            before = sum(c[0] == "/desktop/cards" for c in calls)
+            app._push_local_words()  # noqa: SLF001
+            app.client.server_features = set()
+            app._push_local_words(novel=True)  # noqa: SLF001
+            info["held_back"] = [w.selection for w in store.words_list(only_local=True)]
+            app.client.server_features = {"parked_cards"}
+            app._push_local_words(novel=True)  # noqa: SLF001
+            info["late_sent"] = pump(
+                lambda: sum(c[0] == "/desktop/cards" for c in calls) == before + 1 and app.outbox.counts() == (0, 0)
+            )
         finally:
             app.shutdown()
         cards = [c[1] for c in calls if c[0] == "/desktop/cards"]
@@ -1474,13 +1490,16 @@ def _novel_flow(out_dir: Path) -> Callable[[], tuple[str, object]]:
             and info["parts"] == ["Акт 1", "Акт 2"]
             and {w for w, _lv, _n in info["words"]} == {"reluctant", "meticulous", "end up"}
             and info["sent"]
-            and [c[0] for c in info["cards"]] == ["end up", "meticulous"]  # в порядке появления в новелле
+            and [c[0] for c in info["cards"]][:2] == ["end up", "meticulous"]  # в порядке появления в новелле
             and all(c[1] is True for c in info["cards"])
             and str(info["message"]).startswith("Готово")
             and info["after"] == []
             and info["known_now"]
             and sorted(info["sent_list"]) == [("end up", "значение end up"), ("meticulous", "значение meticulous")]
             and info["novel_saved"] == ["end up", "meticulous"]
+            and info["held_back"] == ["solemn"]
+            and info["late_sent"]
+            and info["cards"][-1][:2] == ("solemn", True)
         )
         return ("ok" if ok else "fail"), info
 

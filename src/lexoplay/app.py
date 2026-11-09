@@ -338,6 +338,9 @@ class App(QObject):
         self._novel_errors: dict[str, str] = {}
         self._novel_progress: dict[str, str] = {}
         self._novel_messages: dict[str, str] = {}
+        self._novel_detecting: set[str] = set()  # движок определяется в фоне
+        # готовность по частям считается ~0.1 с: держим результат, пока не поменялись слова или словарь
+        self._novel_ready: dict[str, tuple[tuple[object, ...], tuple[list[tuple[float, float]], str, bool]]] = {}
         self._novel_engines: dict[str, novel.Engine] = {}
         self._gloss_sig: tuple = ()
         self._last_input = 0.0  # когда игрок последний раз кликал или жал клавишу (monotonic)
@@ -1179,9 +1182,16 @@ class App(QObject):
 
         self.run_bg(self.client.link(code, self._device_name()), finished)
 
-    def _push_local_words(self) -> None:
-        """Слова, сохранённые без Lexo, после привязки сами уходят в карточки."""
-        words = self.store.words_list(only_local=True)
+    def _push_local_words(self, novel: bool = False) -> None:
+        """Слова, сохранённые без Lexo, после привязки сами уходят в карточки.
+        novel: слова из «Слова новеллы». Их шлём отдельно, когда уже известно, что умеет сервер."""
+        words = self.store.words_list(only_local=True, limit=100_000)
+        if not novel:
+            words = [w for w in words if not w.novel]
+        elif "parked_cards" in self.client.server_features:
+            words = [w for w in words if w.novel]  # в Lexo лягут на паузу, как и при обычной отправке
+        else:
+            return  # сервер старый: слова новелл сразу пошли бы в повторение, пусть пока лежат здесь
         if not words:
             return
         by_game: dict[str, list[SavedWord]] = {}
@@ -1207,8 +1217,11 @@ class App(QObject):
                         "marked_translation": None,
                         "deck": "current" if deck_mode == "current" else "game",
                         "deck_id": game.deck_id if game and deck_mode == "deck" else None,
+                        **({"parked": True} if w.novel else {}),
                     },
                 )
+            if novel:
+                continue  # сессии у них нет: это не слова из игры
             self.outbox.enqueue(
                 "end",
                 {
@@ -1276,6 +1289,7 @@ class App(QObject):
                 self.lexo_offline = False
                 self.server_note = ""
                 self._refresh_vocab(full=True)
+                self._push_local_words(novel=True)
             elif isinstance(err, LexoOffline):
                 self.lexo_offline = True
             elif isinstance(err, LexoError):
@@ -2498,17 +2512,25 @@ class App(QObject):
             return novelwords.NovelView("scanning", folder=folder, busy=busy)
         nv = novelwords.load(exe)
         if nv is not None:
-            ready = novelwords.readiness(nv, level, known)
+            key = (id(nv), nv.rev, level, self.vocab.version)
+            hit = self._novel_ready.get(exe)
+            if hit is not None and (hit[0] == key or (busy == "send" and hit[0][0] == id(nv))):
+                ready, summary, leveled = hit[1]  # пока идёт отправка, проценты не пересчитываем на каждый опрос
+            else:
+                ready = novelwords.readiness(nv, level, known)
+                summary = novelwords.summary(nv, level, known, ready)
+                leveled = bool(nv.levels) and not novelwords.to_level(nv)
+                self._novel_ready[exe] = (key, (ready, summary, leveled))
             return novelwords.NovelView(
                 "ready",
-                summary=novelwords.summary(nv, level, known),
+                summary=summary,
                 folder=nv.folder,
                 note=nv.note,
                 parts=[(p.title, r[0], r[1]) for p, r in zip(nv.parts, ready, strict=True)],
                 busy=busy,
                 progress=progress,
                 message=message,
-                leveled=bool(nv.levels) and not novelwords.to_level(nv),
+                leveled=leveled,
                 user_level=user,
             )
         err = self._novel_errors.get(exe, "")
@@ -2517,16 +2539,27 @@ class App(QObject):
         if folder and os.path.isdir(folder):
             eng = self._novel_engines.get(exe)
             if eng is None:
-                try:
-                    eng = novel.detect(novel.game_root(Path(folder)))
-                except OSError:
-                    eng = novel.Engine("unknown", "движок не узнал", True)
-                self._novel_engines[exe] = eng
+                self._detect_engine(exe, folder)  # в фоне: в большой папке это заметная пауза
+                return novelwords.NovelView("none", folder=folder, user_level=user)
             if not eng.readable:
                 return novelwords.NovelView("none", folder=folder, can_read=False, error=f"{eng.name}: {eng.why}")
             what = "движок не узнал, поищу текст в файлах" if eng.key == "unknown" else eng.name
             return novelwords.NovelView("none", summary=what, folder=folder, user_level=user)
         return novelwords.NovelView("none", user_level=user)
+
+    def _detect_engine(self, exe: str, folder: str) -> None:
+        if exe in self._novel_detecting:
+            return
+        self._novel_detecting.add(exe)
+
+        def done(res: object, err: BaseException | None) -> None:
+            self._novel_detecting.discard(exe)
+            unknown = novel.Engine("unknown", "движок не узнал", True)
+            self._novel_engines[exe] = res if isinstance(res, novel.Engine) and err is None else unknown
+            if self.window is not None:
+                self.window.refresh_games()
+
+        self.run_bg(asyncio.to_thread(lambda: novel.detect(novel.game_root(Path(folder)))), done)
 
     def scan_novel(self, exe: str, folder: str | None = None) -> bool:
         """Найти текст новеллы и посчитать слова (в фоне), потом оценить уровни. False: папка неизвестна."""
@@ -2649,11 +2682,10 @@ class App(QObject):
         if nv is None:
             return []
         saved: dict[str, SavedWord] = {}
-        for w in self.store.words_list():
-            if w.exe == exe:
-                for key in (w.selection, w.lemma):
-                    if key:
-                        saved.setdefault(key.strip().lower(), w)
+        for w in self.store.words_novel(exe):
+            for key in (w.selection, w.lemma):
+                if key:
+                    saved.setdefault(key.strip().lower(), w)
         out = []
         for c in novelwords.sent(nv):
             w = saved.get(c.text)
@@ -2755,6 +2787,10 @@ class App(QObject):
             self._novel_progress.pop(exe, None)
             if err is not None:
                 self._novel_messages[exe] = str(err) if isinstance(err, TranslationError) else f"Не вышло: {err}"
+                return
+            if not stored:
+                self._novel_messages[exe] = "Слова не сохранились. Нажми «Отправить» ещё раз, а если повторится, собери отчёт об ошибке."
+                log.warning("слова новеллы %s: из %d не сохранилось ни одного", exe, total)
                 return
             where = "в колоде игры в Lexo, вкладка «Ждут»" if linked else "во вкладке «Слова»"
             msg = f"Готово: {novelwords.plural(stored, ('слово', 'слова', 'слов'))} {where}."

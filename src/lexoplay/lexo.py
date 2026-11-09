@@ -160,6 +160,7 @@ class LexoClient:
     ) -> None:
         self.server = (server or DEFAULT_SERVER).rstrip("/")
         self.token = token
+        self.server_features: set[str] = set()  # из последнего /desktop/me
         self._timeout = timeout
         self._transport = transport
         self._http: httpx.AsyncClient | None = None
@@ -232,12 +233,13 @@ class LexoClient:
 
     async def me(self) -> tuple[Account, Usage | None, str]:
         data = await self._request("GET", "/desktop/me")
+        self.server_features = {str(f) for f in data.get("features") or []}
         return Account.from_json(data["user"]), Usage.from_json(data.get("usage")), str(data.get("device_name", ""))
 
     async def features(self) -> set[str]:
         """Что умеет сервер (с vocab_final_27: parked_cards). Старый сервер поля не отдаёт: пусто."""
-        data = await self._request("GET", "/desktop/me")
-        return {str(f) for f in data.get("features") or []}
+        await self.me()
+        return self.server_features
 
     async def unlink(self) -> None:
         try:

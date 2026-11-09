@@ -75,21 +75,26 @@ class Novel:
     levels: dict[str, str] = field(default_factory=dict)  # оценка модели: A1..C2, NAME, X
     taken: set[str] = field(default_factory=set)  # уже отправлены в колоду отсюда
     skipped: set[str] = field(default_factory=set)  # «уже знаю»
+    rev: int = field(default=0, compare=False)  # растёт с каждым save: по нему видно, что данные поменялись
+    _totals: dict[str, int] | None = field(default=None, repr=False, compare=False)
 
     @property
     def words(self) -> int:
         return sum(p.tokens for p in self.parts)
 
     def total(self, item: str) -> int:
-        return sum(p.counts.get(item, 0) + p.phrases.get(item, 0) for p in self.parts)
+        return self.totals().get(item, 0)
 
     def totals(self) -> dict[str, int]:
-        """Слова и выражения -> сколько раз во всей новелле."""
-        out: Counter[str] = Counter()
-        for p in self.parts:
-            out.update(p.counts)
-            out.update(p.phrases)
-        return dict(out)
+        """Слова и выражения -> сколько раз во всей новелле. Считается один раз: счётчики после
+        подсчёта не меняются. Возвращаемый словарь не менять."""
+        if self._totals is None:
+            out: Counter[str] = Counter()
+            for p in self.parts:
+                out.update(p.counts)
+                out.update(p.phrases)
+            self._totals = dict(out)
+        return self._totals
 
 
 @dataclass(frozen=True, slots=True)
@@ -273,6 +278,7 @@ def knows(novel: Novel, level: str) -> Callable[[str], bool]:
 def readiness(novel: Novel, level: str, known: Callable[[str], bool]) -> list[tuple[float, float]]:
     """По частям: (доля слов, которые игрок знает, доля вместе со словами в колоде)."""
     k = knows(novel, level)
+    memo: dict[str, int] = {}  # слово повторяется в каждой части: 2 знает сам, 1 в колоде, 0 нет
     out = []
     for p in novel.parts:
         if not p.tokens:
@@ -280,18 +286,23 @@ def readiness(novel: Novel, level: str, known: Callable[[str], bool]) -> list[tu
             continue
         have = deck = p.base
         for lem, n in p.counts.items():
-            if k(lem):
+            state = memo.get(lem)
+            if state is None:
+                state = memo[lem] = 2 if k(lem) else 1 if lem in novel.taken or known(lem) else 0
+            if state == 2:
                 have += n
-                deck += n
-            elif lem in novel.taken or known(lem):
+            if state:
                 deck += n
         out.append((have / p.tokens, deck / p.tokens))
     return out
 
 
-def summary(novel: Novel, level: str, known: Callable[[str], bool]) -> str:
-    """«Ren'Py · 462 тыс. слов · 4 акта · знаешь 88%»."""
-    ready = readiness(novel, level, known)
+def summary(
+    novel: Novel, level: str, known: Callable[[str], bool], ready: list[tuple[float, float]] | None = None
+) -> str:
+    """«Ren'Py · 462 тыс. слов · 4 акта · знаешь 88%». ready: уже посчитанная readiness, чтобы не считать дважды."""
+    if ready is None:
+        ready = readiness(novel, level, known)
     total = novel.words or 1
     share = sum(r[0] * p.tokens for r, p in zip(ready, novel.parts, strict=True)) / total
     bits = [novel.engine_name, f"{thousands(novel.words)} слов"]
@@ -370,9 +381,31 @@ def _write(path: Path, data: object) -> None:
     tmp.replace(path)
 
 
+# Новелла в памяти: файл на мегабайт не читаем с диска на каждое обновление окна. Ключ: путь файла,
+# штамп (время и размер) говорит, что файл с тех пор не меняли.
+_CACHE: dict[str, tuple[tuple[int, int], Novel]] = {}
+
+
+def _stamp(path: Path) -> tuple[int, int] | None:
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return st.st_mtime_ns, st.st_size
+
+
 def save(novel: Novel) -> None:
+    path = _path(novel.exe)
+    _save(path, novel)
+    novel.rev += 1
+    stamp = _stamp(path)
+    if stamp is not None:
+        _CACHE[str(path)] = (stamp, novel)
+
+
+def _save(path: Path, novel: Novel) -> None:
     _write(
-        _path(novel.exe),
+        path,
         {
             "version": VERSION,
             "exe": novel.exe,
@@ -395,7 +428,22 @@ def save(novel: Novel) -> None:
 
 
 def load(exe: str) -> Novel | None:
+    """Один и тот же объект, пока файл не поменялся: менять его можно только вместе с save."""
     path = _path(exe)
+    stamp = _stamp(path)
+    if stamp is None:
+        _CACHE.pop(str(path), None)
+        return None
+    hit = _CACHE.get(str(path))
+    if hit is not None and hit[0] == stamp:
+        return hit[1]
+    novel = _load(path)
+    if novel is not None:
+        _CACHE[str(path)] = (stamp, novel)
+    return novel
+
+
+def _load(path: Path) -> Novel | None:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         if data.get("version") != VERSION:
@@ -420,13 +468,15 @@ def load(exe: str) -> Novel | None:
     except FileNotFoundError:
         return None
     except (OSError, ValueError, KeyError, TypeError):
-        log.warning("слова новеллы %s не прочитались", exe, exc_info=True)
+        log.warning("слова новеллы %s не прочитались", path.name, exc_info=True)
         return None
 
 
 def forget(exe: str) -> None:
+    path = _path(exe)
+    _CACHE.pop(str(path), None)
     try:
-        _path(exe).unlink()
+        path.unlink()
     except OSError:
         pass
 
