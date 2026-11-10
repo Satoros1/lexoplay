@@ -316,10 +316,7 @@ def test_candidates_filter_by_level_count_and_known(tmp_path: Path) -> None:
     nv.taken.add("meticulous")
     left = [c.text for c in novelwords.candidates(nv, "B2", 4, lambda w: w == "end up")]
     assert "reluctant" not in left and "meticulous" not in left and "end up" not in left
-    # готовность: «знаешь» без колоды, «с колодой» вместе с отправленными
-    have, deck = novelwords.readiness(nv, "b1", lambda w: False)[1]
-    assert deck > have
-    assert "знаешь" in novelwords.summary(nv, "b1", lambda w: False)
+    assert novelwords.summary(nv) == "Ren'Py · 2 тыс. слов · 2 акта"  # без «знаешь N%»: число вводило в заблуждение
 
 
 def test_default_count_scales_with_novel_size(tmp_path: Path) -> None:
@@ -398,11 +395,10 @@ class NovelCtl:
         self.leveled: list[str] = []
 
     def novel_info(self, exe: str) -> novelwords.NovelView:
-        ready = novelwords.readiness(self.nv, "b1", lambda w: False)
         return novelwords.NovelView(
             "ready",
-            summary=novelwords.summary(self.nv, "b1", lambda w: False),
-            parts=[(p.title, r[0], r[1]) for p, r in zip(self.nv.parts, ready, strict=True)],
+            summary=novelwords.summary(self.nv),
+            parts=[p.title for p in self.nv.parts],
             leveled=not novelwords.to_level(self.nv),
             user_level="B1",
         )
@@ -451,8 +447,8 @@ def test_novel_dialog_lists_hard_words_and_sends(qapp, tmp_path: Path) -> None: 
     assert "reluctant" in texts and "end up" in texts and "eerie" not in texts
     assert "nod" not in texts and "frown" not in texts
     assert "впервые встречаются здесь" in dlg.list_info.text()
-    assert "Акт 1: знаешь" in dlg.ready.text()
-    assert "—" not in dlg.list_info.text() and "—" not in dlg.ready.text()
+    assert "знаешь" not in dlg.status.text()
+    assert "—" not in dlg.list_info.text()
     first = dlg.list.item(0)
     first.setCheckState(Qt.CheckState.Unchecked)
     assert dlg.send.text().strip().startswith("Отправить") and str(len(texts) - 1) in dlg.send.text()

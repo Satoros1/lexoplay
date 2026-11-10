@@ -339,8 +339,8 @@ class App(QObject):
         self._novel_progress: dict[str, str] = {}
         self._novel_messages: dict[str, str] = {}
         self._novel_detecting: set[str] = set()  # движок определяется в фоне
-        # готовность по частям считается ~0.1 с: держим результат, пока не поменялись слова или словарь
-        self._novel_ready: dict[str, tuple[tuple[object, ...], tuple[list[tuple[float, float]], str, bool]]] = {}
+        # «модель уже оценила все слова»: проверка идёт по всему списку, держим ответ, пока новелла та же
+        self._novel_leveled: dict[str, tuple[tuple[int, int], bool]] = {}
         self._novel_engines: dict[str, novel.Engine] = {}
         self._gloss_sig: tuple = ()
         self._last_input = 0.0  # когда игрок последний раз кликал или жал клавишу (monotonic)
@@ -2498,11 +2498,8 @@ class App(QObject):
         if self.store.get_meta(f"game_dir:{exe}") != folder:
             self.store.set_meta(f"game_dir:{exe}", folder)
 
-    def _novel_known(self) -> tuple[str, Callable[[str], bool]]:
-        return self.settings.study_level, self.vocab.known
-
     def novel_info(self, exe: str) -> novelwords.NovelView:
-        level, known = self._novel_known()
+        level = self.settings.study_level
         folder = self.store.get_meta(f"game_dir:{exe}") or ""
         busy = self._novel_busy.get(exe, "")
         progress = self._novel_progress.get(exe, "")
@@ -2512,21 +2509,19 @@ class App(QObject):
             return novelwords.NovelView("scanning", folder=folder, busy=busy)
         nv = novelwords.load(exe)
         if nv is not None:
-            key = (id(nv), nv.rev, level, self.vocab.version)
-            hit = self._novel_ready.get(exe)
-            if hit is not None and (hit[0] == key or (busy == "send" and hit[0][0] == id(nv))):
-                ready, summary, leveled = hit[1]  # пока идёт отправка, проценты не пересчитываем на каждый опрос
+            key = (id(nv), nv.rev)
+            hit = self._novel_leveled.get(exe)
+            if hit is not None and hit[0] == key:
+                leveled = hit[1]
             else:
-                ready = novelwords.readiness(nv, level, known)
-                summary = novelwords.summary(nv, level, known, ready)
                 leveled = bool(nv.levels) and not novelwords.to_level(nv)
-                self._novel_ready[exe] = (key, (ready, summary, leveled))
+                self._novel_leveled[exe] = (key, leveled)
             return novelwords.NovelView(
                 "ready",
-                summary=summary,
+                summary=novelwords.summary(nv),
                 folder=nv.folder,
                 note=nv.note,
-                parts=[(p.title, r[0], r[1]) for p, r in zip(nv.parts, ready, strict=True)],
+                parts=[p.title for p in nv.parts],
                 busy=busy,
                 progress=progress,
                 message=message,

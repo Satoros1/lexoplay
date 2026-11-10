@@ -65,17 +65,6 @@ def card_text(view: NovelView | None) -> tuple[str, str]:
     return view.summary or "текст ещё не искали", "muted"
 
 
-def readiness_text(view: NovelView) -> str:
-    """«Акт 1: знаешь 87%, с колодой 95%» по строке на часть."""
-    rows = []
-    for title, have, deck in view.parts:
-        row = f"{title}: знаешь {round(have * 100)}%"
-        if deck - have >= 0.005:
-            row += f", с колодой {round(deck * 100)}%"
-        rows.append(row)
-    return "\n".join(rows)
-
-
 class NovelDialog(QDialog):
     POLL_MS = 700
 
@@ -111,8 +100,6 @@ class NovelDialog(QDialog):
         row.addWidget(self.level_btn)
         row.addStretch(1)
         lay.addLayout(row)
-        self.ready = label("", "version", wrap=True)
-        lay.addWidget(self.ready)
 
         self.words_box = QWidget()
         box = QVBoxLayout(self.words_box)
@@ -215,8 +202,6 @@ class NovelDialog(QDialog):
         else:
             self._timer.stop()
         self.status.setText(self._status(view))
-        self.ready.setText(readiness_text(view) if view.state == "ready" else "")
-        self.ready.setVisible(view.state == "ready" and len(view.parts) > 1)
         show = view.state == "ready" and (view.leveled or bool(self._shown) or not view.busy)
         self.words_box.setVisible(show)
         self.send.setVisible(show and self._mode == "new")
@@ -310,7 +295,7 @@ class NovelDialog(QDialog):
     def _fill_parts(self) -> None:
         """«Акт 1 · 52 слова», «Акт 2, порция 1 из 3 · 60 слов», «Вся новелла · 320 слов».
         Слово в части, где встречается впервые; часть больше PORTION слов делится по порядку появления."""
-        titles = [p[0] for p in self._view.parts] or ["Вся новелла"]
+        titles = list(self._view.parts) or ["Вся новелла"]
         options: list[tuple[str, str, list[Candidate]]] = []
         for i, title in enumerate(titles):
             items = sorted((c for c in self._all if c.part == i), key=lambda c: c.order)

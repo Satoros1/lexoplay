@@ -36,8 +36,6 @@ MAX_LIST = 400  # больше слов за раз не разобрать: п�
 # слов в порции: Lexo вводит по 20 новых карточек в день, порция это примерно 3 дня. Большая часть
 # (акт на 180 слов) делится на порции по порядку появления: сначала слова её начала
 PORTION = 60
-# уровень игрока -> с какого места в частотном списке слова для него незнакомые (пока модель не оценила)
-EDGES = {"a2": rarity.COMMON, "b1": rarity.LEVELS["b1"], "b2": rarity.LEVELS["b2"], "c1": rarity.LEVELS["c1"]}
 # японские обращения в английских переводах (Battler-kun, nii-san): учить их как слова незачем
 HONORIFICS = frozenset(
     "san kun chan sama senpai sempai sensei nii nee onii onee dono tan chin aniki aneki niisan neesan "
@@ -116,12 +114,11 @@ class NovelView:
     """Что показать в окне LexoPlay про слова новеллы."""
 
     state: str = "none"  # none (ещё не искали) | scanning | ready | error
-    summary: str = ""  # «Ren'Py · 462 тыс. слов · 4 акта · знаешь 88%» или что нашлось в папке
+    summary: str = ""  # «Ren'Py · 462 тыс. слов · 4 акта» или что нашлось в папке
     error: str = ""
     folder: str = ""
     note: str = ""
-    # (название части, доля знакомых слов, доля знакомых вместе со словами в колоде)
-    parts: list[tuple[str, float, float]] = field(default_factory=list)
+    parts: list[str] = field(default_factory=list)  # названия частей: «Акт 1», «Часть 2»
     can_read: bool = True  # движок известен как нечитаемый: False, причина в error
     busy: str = ""  # "" | scan | level | send
     progress: str = ""  # «Модель оценивает слова: 600 из 2400»
@@ -256,59 +253,11 @@ def _above(level: str, edge: str) -> bool:
     return level in LEVELS and level_index(level) > level_index(edge)
 
 
-# ------------------------------------------------------------------ знает ли игрок
-def knows(novel: Novel, level: str) -> Callable[[str], bool]:
-    """Знает ли игрок слово сам: по оценке модели (не выше его уровня), имя или не слово, «уже знаю».
-    Пока модель не оценила, по частотному списку."""
-    user = USER_LEVEL.get(level, "B1")
-    edge = EDGES.get(level, EDGES["b1"])
-
-    def k(lem: str) -> bool:
-        if lem in novel.skipped:
-            return True
-        lv = novel.levels.get(lem)
-        if lv is not None:
-            return lv in NOT_WORD or not _above(lv, user)
-        r = rarity.rank(lem)
-        return r is not None and r < edge
-
-    return k
-
-
-def readiness(novel: Novel, level: str, known: Callable[[str], bool]) -> list[tuple[float, float]]:
-    """По частям: (доля слов, которые игрок знает, доля вместе со словами в колоде)."""
-    k = knows(novel, level)
-    memo: dict[str, int] = {}  # слово повторяется в каждой части: 2 знает сам, 1 в колоде, 0 нет
-    out = []
-    for p in novel.parts:
-        if not p.tokens:
-            out.append((1.0, 1.0))
-            continue
-        have = deck = p.base
-        for lem, n in p.counts.items():
-            state = memo.get(lem)
-            if state is None:
-                state = memo[lem] = 2 if k(lem) else 1 if lem in novel.taken or known(lem) else 0
-            if state == 2:
-                have += n
-            if state:
-                deck += n
-        out.append((have / p.tokens, deck / p.tokens))
-    return out
-
-
-def summary(
-    novel: Novel, level: str, known: Callable[[str], bool], ready: list[tuple[float, float]] | None = None
-) -> str:
-    """«Ren'Py · 462 тыс. слов · 4 акта · знаешь 88%». ready: уже посчитанная readiness, чтобы не считать дважды."""
-    if ready is None:
-        ready = readiness(novel, level, known)
-    total = novel.words or 1
-    share = sum(r[0] * p.tokens for r, p in zip(ready, novel.parts, strict=True)) / total
+def summary(novel: Novel) -> str:
+    """«Ren'Py · 462 тыс. слов · 4 акта»."""
     bits = [novel.engine_name, f"{thousands(novel.words)} слов"]
     if len(novel.parts) > 1:
         bits.append(parts_word(novel))
-    bits.append(f"знаешь {round(share * 100)}%")
     return " · ".join(bits)
 
 
