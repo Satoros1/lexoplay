@@ -1441,7 +1441,7 @@ def _novel_flow(out_dir: Path) -> Callable[[], tuple[str, object]]:
             info["leveled"] = pump(lambda: (v := app.novel_info(game.exe)).state == "ready" and v.leveled and not v.busy)
             view = app.novel_info(game.exe)
             info["summary"] = view.summary
-            info["parts"] = [p[0] for p in view.parts]
+            info["parts"] = list(view.parts)
             for _ in range(20):
                 app_q.processEvents()
                 time.sleep(0.02)
