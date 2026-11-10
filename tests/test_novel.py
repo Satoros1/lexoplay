@@ -705,3 +705,15 @@ def test_novel_words_make_no_session_in_history(tmp_path: Path) -> None:
     assert store.history_events("ks.exe") == [("ks.exe", 100.0, "word")]  # отправка списка не сессия игры
     assert [w.selection for w in store.words_range("ks.exe", 0, 10_000)] == ["freckle"]
     assert [w.selection for w in store.words_novel("KS.exe")] == ["linger"]
+
+
+def test_startup_failure_is_written_down(tmp_path: Path) -> None:
+    from lexoplay.__main__ import report_startup_failure
+
+    try:
+        raise RuntimeError("database disk image is malformed")
+    except RuntimeError as exc:
+        text = report_startup_failure(exc, tmp_path)
+    saved = (tmp_path / "startup-error.txt").read_text(encoding="utf-8")
+    assert "RuntimeError: database disk image is malformed" in saved and "Traceback" in saved
+    assert "startup-error.txt" in text and "—" not in text

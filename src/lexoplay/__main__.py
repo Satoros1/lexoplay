@@ -54,6 +54,38 @@ def _listen(on_show):  # type: ignore[no-untyped-def]
     return server
 
 
+def report_startup_failure(exc: BaseException, folder) -> str:  # type: ignore[no-untyped-def]
+    """Запуск упал: причину в журнал и в startup-error.txt рядом с ним. Возвращает текст для окна."""
+    import traceback
+
+    text = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    logging.getLogger(__name__).critical("LexoPlay не запустился:\n%s", text)
+    path = folder / "startup-error.txt"
+    try:
+        path.write_text(text, encoding="utf-8")
+    except OSError:
+        pass
+    return (
+        f"{type(exc).__name__}: {exc}\n\nПодробности в файле:\n{path}\n\n"
+        "Пришли этот файл разработчику: по нему видно, что сломалось."
+    )
+
+
+def _startup_failed(exc: BaseException) -> None:
+    """Без этого процесс после ошибки на старте оставался висеть невидимкой: ни окна, ни значка в трее,
+    а каждый новый запуск добавлял ещё один такой же."""
+    try:
+        from lexoplay.config import data_dir
+
+        message = report_startup_failure(exc, data_dir())
+        from PySide6.QtWidgets import QMessageBox
+
+        QMessageBox.critical(None, "LexoPlay не запустился", message)
+    finally:
+        logging.shutdown()
+        os._exit(1)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="LexoPlay")
     parser.add_argument("--debug", action="store_true")
@@ -118,9 +150,35 @@ def main() -> None:
     if _already_running():
         sys.exit(0)
 
+    try:
+        app, server = _start(qapp, args)
+    except BaseException as exc:  # что бы ни сломалось на старте, сказать об этом и выйти
+        _startup_failed(exc)
+        return
+    code = qapp.exec()
+    server.close()
+    try:
+        app.shutdown()
+    finally:
+        logging.shutdown()
+        # winrt и фоновые потоки иногда держат процесс: выходим наверняка, чтобы
+        # следующий запуск не упёрся в «занятые» клавиши старого процесса
+        os._exit(code)
+
+
+def _start(qapp, args):  # type: ignore[no-untyped-def]
+    import faulthandler
+
     from lexoplay.config import Settings, data_dir
     from lexoplay.log import setup_logging
 
+    # запуск завис (а не упал): через 30 с в startup-hang.txt ляжет, где стоит каждый поток
+    hang = None
+    try:
+        hang = open(data_dir() / "startup-hang.txt", "w", encoding="utf-8")  # noqa: SIM115
+        faulthandler.dump_traceback_later(30, file=hang)
+    except (OSError, ValueError, RuntimeError):
+        hang = None
     settings = Settings.load()
     if args.debug:
         settings.debug = True
@@ -149,15 +207,15 @@ def main() -> None:
     app = App(qapp, settings, store, bg, quiet=args.autostart, updated=args.updated)
     server = _listen(lambda: app.show_window())
     app.start()
-    code = qapp.exec()
-    server.close()
-    try:
-        app.shutdown()
-    finally:
-        logging.shutdown()
-        # winrt и фоновые потоки иногда держат процесс: выходим наверняка, чтобы
-        # следующий запуск не упёрся в «занятые» клавиши старого процесса
-        os._exit(code)
+    if hang is not None:  # запустились: сторож не нужен, пустой файл убираем
+        faulthandler.cancel_dump_traceback_later()
+        hang.close()
+        try:
+            if not (data_dir() / "startup-hang.txt").stat().st_size:
+                (data_dir() / "startup-hang.txt").unlink()
+        except OSError:
+            pass
+    return app, server
 
 
 if __name__ == "__main__":
