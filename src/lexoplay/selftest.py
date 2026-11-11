@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import sys
 import time
@@ -1434,6 +1435,18 @@ def _novel_flow(out_dir: Path) -> Callable[[], tuple[str, object]]:
         app.client = LexoClient("https://lexo.test", "tok", transport=httpx.MockTransport(handler))
         app._gloss_translator = lambda: fake_tr  # type: ignore[method-assign,assignment,return-value]
         info: dict[str, object] = {}
+        trouble: list[str] = []
+
+        class Catch(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                text = record.getMessage()
+                if record.exc_info and record.exc_info[1] is not None:
+                    text += f" | {type(record.exc_info[1]).__name__}: {record.exc_info[1]}"
+                trouble.append(text[:300])
+
+        catch = Catch(level=logging.WARNING)
+        logging.getLogger("lexoplay").addHandler(catch)
+        info["log"] = trouble
         try:
             app.start()
             dlg = NovelDialog(app, game)
@@ -1481,6 +1494,7 @@ def _novel_flow(out_dir: Path) -> Callable[[], tuple[str, object]]:
                 lambda: sum(c[0] == "/desktop/cards" for c in calls) == before + 1 and app.outbox.counts() == (0, 0)
             )
         finally:
+            logging.getLogger("lexoplay").removeHandler(catch)
             app.shutdown()
         cards = [c[1] for c in calls if c[0] == "/desktop/cards"]
         info["cards"] = [(c.get("lemma"), c.get("parked"), c.get("sentence")) for c in cards if isinstance(c, dict)]
@@ -2374,5 +2388,6 @@ def run(report: str) -> int:
         except (AttributeError, ValueError):
             pass
         for r in RESULTS:
-            print(f"[{r['status']:>4}] {r['check']}: {str(r['detail'])[:300]}")
+            limit = 300 if r["status"] == "ok" else 4000  # упавшую проверку видно целиком
+            print(f"[{r['status']:>4}] {r['check']}: {str(r['detail'])[:limit]}")
     return 1 if failed else 0

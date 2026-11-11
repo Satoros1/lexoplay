@@ -2759,11 +2759,15 @@ class App(QObject):
                 it = by_word.get(w.lower())
                 if it is None:
                     continue
-                self._store_word(
-                    exe, title, session.id,
-                    selection=w, lemma=it.lemma, translation=it.meaning, ipa=it.ipa or None, pos=it.pos or None,
-                    sentence=it.example, sentence_translation=it.example_tr or None, parked=True,
-                )  # fmt: skip
+                try:
+                    self._store_word(
+                        exe, title, session.id,
+                        selection=w, lemma=it.lemma, translation=it.meaning, ipa=it.ipa or None, pos=it.pos or None,
+                        sentence=it.example, sentence_translation=it.example_tr or None, parked=True,
+                    )  # fmt: skip
+                except Exception:  # одно слово не должно ронять остальные
+                    log.exception("слова новеллы %s: слово %r не сохранилось", exe, w)
+                    continue
                 sent.add(w)
             stored += len(sent)
             fresh = novelwords.load(exe)
