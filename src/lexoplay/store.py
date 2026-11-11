@@ -116,6 +116,20 @@ CREATE TABLE IF NOT EXISTS study_words (
     meaning TEXT NOT NULL DEFAULT '',
     updated_at REAL NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS encounters (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    exe TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    key TEXT NOT NULL,
+    word TEXT NOT NULL,
+    meaning TEXT NOT NULL DEFAULT '',
+    kind TEXT NOT NULL,
+    result TEXT NOT NULL,
+    sentence TEXT NOT NULL DEFAULT '',
+    translation TEXT NOT NULL DEFAULT '',
+    at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS encounters_session ON encounters (session_id, at);
 CREATE TABLE IF NOT EXISTS study_days (
     day TEXT PRIMARY KEY,
     lines INTEGER NOT NULL DEFAULT 0,
@@ -238,6 +252,23 @@ class SavedWord:
     @property
     def word(self) -> str:
         return self.lemma or self.selection
+
+
+@dataclass(frozen=True, slots=True)
+class Met:
+    """Слово или выражение, встреченное в реплике в учёбе: что с ним было. Из этого собирается
+    «Минута после игры» (recap.py)."""
+
+    exe: str
+    session_id: str
+    key: str
+    word: str  # как стояло в реплике
+    meaning: str
+    kind: str  # new | test | saved (study.Hint.kind)
+    result: str  # shown: значение было видно | recalled: вспомнил сам | forgot: открыл «?» | peeked: подглядел перевод
+    sentence: str = ""
+    translation: str = ""
+    at: float = 0.0
 
 
 @dataclass(slots=True)
@@ -999,6 +1030,33 @@ class Store:
         with self._lock:
             rows = self._db.execute("SELECT key, state, seen, passes, meaning, updated_at FROM study_words").fetchall()
         return [StudyWord(r[0], r[1], int(r[2]), int(r[3]), r[4] or "", float(r[5])) for r in rows]
+
+    _MET_COLS = "exe, session_id, key, word, meaning, kind, result, sentence, translation, at"
+
+    def met_add(self, rows: list[Met]) -> None:
+        if not rows:
+            return
+        with self._lock:
+            self._db.executemany(
+                f"INSERT INTO encounters ({self._MET_COLS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                [(r.exe.lower(), r.session_id, r.key, r.word, r.meaning, r.kind, r.result, r.sentence, r.translation,
+                  r.at or time.time()) for r in rows],
+            )  # fmt: skip
+            self._db.commit()
+
+    def met_session(self, session_id: str) -> list[Met]:
+        """Встречи одной сессии игры, по порядку."""
+        with self._lock:
+            rows = self._db.execute(
+                f"SELECT {self._MET_COLS} FROM encounters WHERE session_id = ? ORDER BY at, id", (session_id,)
+            ).fetchall()
+        return [Met(*r) for r in rows]
+
+    def met_prune(self, before: float) -> None:
+        """Старые встречи не нужны: «Минута после игры» бывает только сразу после сессии."""
+        with self._lock:
+            self._db.execute("DELETE FROM encounters WHERE at < ?", (before,))
+            self._db.commit()
 
     def study_put(self, words: list[StudyWord]) -> None:
         if not words:

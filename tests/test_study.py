@@ -90,10 +90,15 @@ def test_item_goes_from_meaning_to_mark_to_known():
     learned = 0
     for i in range(PASSES_TO_KNOWN):
         _c, n, counted, forgotten = book.commit(
-            _shown(f"again {i}", [Hint((0,), "no way to", "no way to", "test", "никак не")]), shown_s=3, now=2.0
+            _shown(f"again {i}", [Hint((0,), "no way to", "no way to", "test", "никак не")]),
+            shown_s=3,
+            now=2.0 + i * study.PASS_GAP_S,
         )
         assert counted and not forgotten
         learned += n
+        if i == 0:  # сразу следом ещё раз: в одной сцене дважды подряд не считается
+            again = _shown("at once", [Hint((0,), "no way to", "no way to", "test", "никак не")])
+            assert book.commit(again, shown_s=3, now=3.0)[1] == 0 and book.get("no way to").state == "test"
     assert book.get("no way to").state == "known" and learned == 1
     assert "no way to" in [e.word for e in book.index().entries]  # знаешь: модель про него больше не спросят
 
@@ -444,3 +449,21 @@ def test_study_strip_starts_at_dialog_left_and_keeps_place_while_busy(qapp=None)
     assert abs(ready.x - 160) < 1  # от левого края окна диалога, а не по центру
     assert abs(busy.w - ready.w) < 1  # перевод пришёл: плашка не прыгает
     ov.close()
+
+
+def test_outcomes_and_quiz():
+    saved = Hint((0,), "eerie", "eerie", "saved", "жуткий")
+    test = Hint((1,), "persuade", "persuade", "test", "убедить")
+    new = Hint((2,), "linger", "linger", "new", "медлить", True)
+    sh = _shown("an eerie place", [saved, test, new])
+    assert study.outcomes(sh, True) == [(saved, "recalled"), (test, "recalled"), (new, "shown")]
+    sh.peeked = True
+    assert [r for _h, r in study.outcomes(sh, True)] == ["peeked", "peeked", "shown"]
+    sh.revealed.add("eerie")
+    assert study.outcomes(sh, False) == [(saved, "forgot")]  # пролистал, но «?» открыл: читал
+
+    book = StudyBook([StudyWord("linger", "new", 3, 0, "медлить"), StudyWord("persuade", "test", 4, 1, "убедить")])
+    assert book.quiz("linger", True, now=5.0).state == "test"  # угадал: на встречу ближе к «?»
+    w = book.quiz("persuade", False, now=6.0)
+    assert (w.state, w.seen, w.passes) == ("new", SEEN_TO_TEST - study.BACK_SEEN, 0)
+    assert book.quiz("nonesuch", True, now=7.0) is None

@@ -13,6 +13,8 @@
   место: значение откроется, слово ещё BACK_SEEN встречи будет со значением и (по желанию) уйдёт в
   карточки, раз оно никак не запоминается;
 - «?» не открывал PASSES_TO_KNOWN раз и перевод реплики не подглядывал: знаешь, подсказки больше нет.
+  Второй раз считается не раньше чем через PASS_GAP_S после первого: дважды подряд в одной сцене
+  ещё не память (повторение с перерывом запоминается заметно лучше, чем подряд).
 
 Сохранённые слова (свои и из Lexo) в реплике стоят жёлтым «?»: в игре их вспоминаешь, учишь в карточках.
 Встреча считается, только если реплика была на экране хотя бы MIN_SHOW_S: пролистанную не читал.
@@ -40,6 +42,7 @@ MAX_LEARNING = 2  # своих, что сейчас учатся (значени
 MAX_SAVED = 2  # сохранённых слов под жёлтым «?»
 SEEN_TO_TEST = 4
 PASSES_TO_KNOWN = 2
+PASS_GAP_S = 600  # между «вспомнил» и «вспомнил ещё раз» должен быть перерыв
 BACK_SEEN = 2
 MIN_SHOW_S = 1.5
 MATCH_RATIO = 0.8  # место от модели и слова OCR: насколько похожи (OCR бывает с ошибками)
@@ -392,7 +395,9 @@ class StudyBook:
                     w.seen += 1
                     if w.seen >= SEEN_TO_TEST:
                         w.state, w.passes = "test", 0
-                elif counted and h.kind == "test" and not shown.peeked:
+                elif counted and h.kind == "test" and not shown.peeked and (
+                    w.passes == 0 or now - w.updated_at >= PASS_GAP_S
+                ):
                     w.passes += 1
                     if w.passes >= PASSES_TO_KNOWN:
                         w.state = "known"
@@ -406,3 +411,41 @@ class StudyBook:
         if counted:
             self._last = norm_text
         return list(changed.values()), learned, counted, forgotten
+
+    def quiz(self, key: str, correct: bool, *, now: float) -> StudyWord | None:
+        """Ответ в «Минуте после игры». Ошибся: слово ещё пару раз покажется со значением, как после
+        открытого «?». Угадал новое: на одну встречу ближе к «?». Возвращает изменённое для базы."""
+        w = self.words.get(key)
+        if w is None or w.state not in ("new", "test"):
+            return None
+        if not correct:
+            w.state, w.seen, w.passes = "new", min(w.seen, SEEN_TO_TEST - BACK_SEEN), 0
+        elif w.state == "new":
+            w.seen += 1
+            if w.seen >= SEEN_TO_TEST:
+                w.state, w.passes = "test", 0
+        else:
+            return None
+        w.updated_at = now
+        self.version += 1
+        return w
+
+
+def outcomes(shown: Shown, counted: bool) -> list[tuple[Hint, str]]:
+    """Что было с каждой подсказкой реплики, когда она ушла с экрана: (подсказка, итог).
+
+    shown: значение было видно (новое место) | recalled: «?» не открывал и перевод не подглядывал |
+    forgot: открыл «?» | peeked: «?» не открывал, но перевод реплики видел (ни туда, ни сюда).
+    Пролистанная реплика (не counted) даёт только forgot: открыл значит читал."""
+    out: list[tuple[Hint, str]] = []
+    for h in shown.hints:
+        if not h.meaning:
+            continue
+        if h.kind in ("test", "saved"):
+            if h.key in shown.revealed:
+                out.append((h, "forgot"))
+            elif counted:
+                out.append((h, "peeked" if shown.peeked else "recalled"))
+        elif counted:
+            out.append((h, "shown"))
+    return out

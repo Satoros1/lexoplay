@@ -24,6 +24,7 @@ import concurrent.futures
 import ctypes
 import logging
 import os
+import random
 import socket
 import time
 import uuid
@@ -38,7 +39,7 @@ from PySide6.QtCore import QObject, QPointF, QTimer, QUrl, Signal
 from PySide6.QtGui import QAction, QDesktopServices, QFont, QGuiApplication, QImage
 from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon, QWidget
 
-from lexoplay import __version__, autostart, novel, novelwords, prelearn, updater
+from lexoplay import __version__, autostart, novel, novelwords, prelearn, rarity, recap, updater
 from lexoplay.bg import BackgroundLoop
 from lexoplay.config import (
     MOUSE_PEEK,
@@ -76,7 +77,7 @@ from lexoplay.preprocess import MODE_NAMES, is_black, thumbnail
 from lexoplay.rarity import LEVEL_NAMES, LEVELS
 from lexoplay.recall import RecallChip, Recaller, RecallIndex
 from lexoplay.session import GameSession, Sessions
-from lexoplay.store import Game, GameNotes, SavedWord, Store, StoredLine, Task
+from lexoplay.store import Game, GameNotes, Met, SavedWord, Store, StoredLine, Task
 from lexoplay.study import LEVEL_NAMES as STUDY_LEVEL_NAMES
 from lexoplay.study import (
     PASSES_TO_KNOWN,
@@ -87,6 +88,7 @@ from lexoplay.study import (
     StudyPlan,
     merge,
     model_hints,
+    outcomes,
     underline_rects,
 )
 from lexoplay.study import plan as study_plan
@@ -155,6 +157,7 @@ STUDY_MOVED_PX = 12  # курсор сдвинулся с места, где б�
 STUDY_CLOSE_S = 0.25  # учёба: курсор ушёл с плашки, перевод прячется через столько (без мигания на краю)
 STUDY_PEEK_S = 0.4  # перевод был виден дольше: подглядывал (случайно пронёс курсор не считается)
 STUDY_CARDS_PER_DAY = 10  # забытых мест в карточки за день, не больше
+RECAP_AFTER_CLOSE_MS = 1500  # игра закрылась: чуть подождать (вдруг это перезапуск) и показать «Минуту после игры»
 PREWARM_MS = 3000  # через столько после запуска окно LexoPlay собирается заранее (если игра не идёт)
 NOTES_RETRY_S = 600.0  # справка по игре не собралась (сеть, лимит): снова не раньше чем через 10 минут
 NOTES_RECHECK_S = 1800.0  # раз в полчаса смотрим, не появились ли герои, которых в справке нет
@@ -461,6 +464,10 @@ class App(QObject):
         # игры, которые от потери фокуса свернулись: фокус у них больше не берём (помним и после перезапуска)
         self._focus_bad: set[str] = set(settings.no_focus_games)
         self._history_sessions: dict[str, str] = {}  # exe -> сессия для разбора и слов из истории (без игры)
+        self._met_sent: dict[tuple[str, str], float] = {}  # (слово, итог) -> когда ушло в Lexo: не частить
+        self._novel_keys: set[str] | None = None  # слова из списков новелл (в Lexo ждут на паузе)
+        self._recap: QWidget | None = None  # окно «Минута после игры»
+        self._recap_done: set[str] = set()  # сессии, для которых она уже была (или не понадобилась)
         self.hotkeys = HotkeyManager()
         self.hotkeys.triggered.connect(self._on_hotkey)
         self.hotkeys.mouse_changed.connect(self._sync_input)
@@ -493,6 +500,10 @@ class App(QObject):
     def start(self) -> None:
         log.info("LexoPlay %s, игр в списке: %s, Lexo: %s", __version__, len(self.store.list_games()), self.client.linked)
         self._clean_examples()
+        try:
+            self.store.met_prune(time.time() - 14 * 86400)
+        except Exception:
+            log.debug("старые встречи слов не убрались", exc_info=True)
         QTimer.singleShot(PREWARM_MS, self._prewarm_window)
         self.hotkeys.set_group("global", True)
         self._on_foreground(winapi.foreground_window())
@@ -1362,6 +1373,8 @@ class App(QObject):
             payload = dict(task.payload)
             session_id = payload.pop("session_id")
             return await self.client.end_session(session_id, payload)
+        if task.kind == "seen":
+            return await self.client.encounters(task.payload)
         log.warning("outbox: неизвестная задача %s, выбрасываю", task.kind)
         return None
 
@@ -1372,6 +1385,10 @@ class App(QObject):
 
     def _session_ended(self, s: GameSession, duration: int, ended_at: float) -> None:
         log.info("сессия %s (%s): %s с, %s реплик, %s слов", s.id, s.exe, duration, s.lines, s.words)
+        try:
+            self._recap_maybe(s)
+        except Exception:
+            log.exception("минута после игры: не собралась")
         if not self.client.linked or (s.lines == 0 and s.words == 0):
             return
         self.outbox.enqueue(
@@ -1571,7 +1588,11 @@ class App(QObject):
         self._close_words("closed")
         self._hide_strip()
         if self.active:
-            self.sessions.game_closed(self.active.exe)
+            exe = self.active.exe
+            self._study_commit()  # последняя реплика тоже в счёт
+            self.sessions.game_closed(exe)
+            # «Минута после игры» сразу, как игру закрыли, а не через пять минут, когда кончится сессия
+            QTimer.singleShot(RECAP_AFTER_CLOSE_MS, lambda: self._recap_closed(exe))
         self.current = None
         self.events.unwatch_game()
         self.hotkeys.set_group("game", False)
@@ -2789,6 +2810,8 @@ class App(QObject):
                 return
             where = "в колоде игры в Lexo, вкладка «Ждут»" if linked else "во вкладке «Слова»"
             msg = f"Готово: {novelwords.plural(stored, ('слово', 'слова', 'слов'))} {where}."
+            if linked:
+                msg += " Каждое начнёт учиться само, когда встретится в игре."
             if isinstance(res, int) and res:
                 msg += f" Ещё {res} не пришли: нажми «Отправить» ещё раз."
             self._novel_messages[exe] = msg
@@ -2867,6 +2890,10 @@ class App(QObject):
         try:
             changed, learned, counted, forgotten = self.study.commit(sh, shown_s=shown_s, now=time.time())
             self.store.study_put(changed)
+            try:
+                self._met(sh, outcomes(sh, counted))
+            except Exception:
+                log.exception("учёба: встречи слов не записались")
             cards = self._study_cards(sh, forgotten) if forgotten else 0
             if learned and not cards:
                 got = [w.key for w in changed if w.state == "known"]
@@ -2882,6 +2909,160 @@ class App(QObject):
                 )
         except Exception:
             log.exception("учёба: не записалось")
+
+    # ------------------------------------------------------------------ встречи слов: игра как повторение
+    MET_GAP_S = 600.0  # одно и то же про слово чаще не шлём: сервер всё равно засчитает один раз
+
+    def _novel_words(self) -> set[str]:
+        """Слова из списков новелл, отправленные с этого ПК: в Lexo они ждут на паузе до встречи в игре."""
+        if self._novel_keys is None:
+            keys: set[str] = set()
+            for w in self.store.words_list(limit=100_000):
+                if w.novel:
+                    keys.update(x.strip().lower() for x in (w.selection, w.lemma) if x and x.strip())
+            self._novel_keys = keys
+        return self._novel_keys
+
+    def _met(self, sh: Shown, results: list[tuple[Hint, str]]) -> None:
+        """Реплика ушла с экрана: что было с её подсказками. В базу (для «Минуты после игры») и в Lexo:
+        сохранённое слово, которое вспомнил сам, засчитывается как повторение, открытое «?» как «забыл»."""
+        if not results:
+            return
+        now = time.time()
+        self.store.met_add(
+            [
+                Met(sh.exe, sh.session_id, h.key, h.text, h.meaning, h.kind, result, sh.text, sh.translation, now)
+                for h, result in results
+            ]
+        )
+        novel_words = self._novel_words()
+        items = []
+        for h, result in results:
+            if h.kind != "saved":
+                continue
+            if result == "peeked":  # ни вспомнил, ни забыл; но слово из «Ждут» встретилось: пусть начнёт учиться
+                if h.key not in novel_words:
+                    continue
+                result = "seen"
+            items.append(([h.key, h.text], result))
+        self._met_send(sh.exe, sh.title or sh.exe, sh.session_id, items, sh.text, sh.translation)
+
+    def _met_plain(self, game: Game, chips: list[RecallChip], sentence: str, translation: str | None) -> None:
+        """Без учёбы перевод виден всегда, вспоминать нечего. Но слово из «Ждут» встретилось в игре:
+        в Lexo оно начинает учиться, а реплика становится его примером."""
+        if not chips or not self.client.linked:
+            return
+        novel_words = self._novel_words()
+        items = [([c.word.strip().lower()], "seen") for c in chips if c.word.strip().lower() in novel_words]
+        if not items:
+            return
+        session = self.sessions.get(game.exe)
+        if session is not None:
+            self._met_send(game.exe, game.title, session.id, items, sentence, translation or "")
+
+    def _met_send(
+        self,
+        exe: str,
+        title: str,
+        session_id: str,
+        items: list[tuple[list[str], str]],
+        sentence: str,
+        translation: str,
+        *,
+        force: bool = False,  # ответ в «Минуте после игры»: человек ответил сам, шлём как есть
+    ) -> None:
+        if not items or not session_id or not self.client.linked or "encounters" not in self.client.server_features:
+            return  # сервер Lexo старый: встречи он не понимает
+        now = time.time()
+        out = []
+        for words, result in items:
+            sent_key = (words[0], result)
+            last = self._met_sent.get(sent_key)
+            if not force and last is not None and (result == "seen" or now - last < self.MET_GAP_S):
+                continue
+            self._met_sent[sent_key] = now
+            out.append(
+                {
+                    "words": list(dict.fromkeys(w[:200] for w in words if w)),
+                    "result": result,
+                    "sentence": sentence[:2000] or None,
+                    "sentence_translation": (translation or None) and translation[:2000],
+                    "at": datetime.fromtimestamp(now, UTC).isoformat(),
+                }
+            )
+        if out:
+            self.outbox.enqueue(
+                "seen",
+                {
+                    "idempotency_key": str(uuid.uuid4()),
+                    "session_id": session_id,
+                    "game": GameRef(title, exe).to_json(),
+                    "items": out,
+                },
+            )
+
+    # ------------------------------------------------------------------ минута после игры
+    def _recap_closed(self, exe: str) -> None:
+        s = self.sessions.get(exe)
+        if s is None or s.closing_since is None:
+            return  # игру уже открыли снова
+        try:
+            self._recap_maybe(s)
+        except Exception:
+            log.exception("минута после игры: не собралась")
+
+    def _recap_maybe(self, s: GameSession) -> None:
+        """Игра закрыта: если в сессии были новые или забытые слова, показать несколько её реплик с пропуском."""
+        if self._closing or not self.settings.study_recap or self.active is not None:
+            return  # выходим, выключено или на экране уже другая игра: поверх неё окно не нужно
+        if s.id in self._recap_done or (self._recap is not None and self._recap.isVisible()):
+            return
+        rows = self.store.met_session(s.id)
+        if not rows:
+            return
+        self._recap_done.add(s.id)
+        spare = [k for k, w in self.study.words.items() if w.meaning and w.state in ("new", "test", "known")]
+        questions = recap.build(rows, extra=random.sample(spare, min(len(spare), 30)))
+        if not questions:
+            return
+        rare: list[recap.Rare] = []
+        nv = novelwords.load(s.exe)
+        if nv is not None:
+            rare = recap.rare_words(rows, total_in_novel=nv.total, rank=rarity.rank, known=self.vocab.known)
+        from lexoplay.ui.recap_dialog import RecapDialog
+
+        self._recap = RecapDialog(self, s.exe, s.title or s.exe, questions, rare)
+        self._recap.show()
+        log.info("минута после игры (%s): вопросов %d, редких слов %d", s.exe, len(questions), len(rare))
+
+    def recap_answer(self, exe: str, title: str, q: recap.Question, correct: bool) -> None:
+        """Ответ в «Минуте после игры». Сохранённое слово: в Lexo как повторение. Слово учёбы: ошибся,
+        и оно ещё пару раз покажется со значением."""
+        if q.kind == "saved":
+            self._met_send(
+                exe, title, self._history_session(exe), [([q.key], "recalled" if correct else "forgot")],
+                q.sentence, q.translation, force=True,
+            )  # fmt: skip
+            return
+        changed = self.study.quiz(q.key, correct, now=time.time())
+        if changed is not None:
+            self.store.study_put([changed])
+
+    def recap_save(self, exe: str, title: str, words: list[recap.Rare]) -> None:
+        """Полезные слова, которые игра больше не покажет: в карточки с репликой из игры."""
+        session_id = self._history_session(exe)
+        for r in words:
+            if self.vocab.known(r.key):
+                continue
+            try:
+                self._store_word(
+                    exe, title, session_id,
+                    selection=r.word or r.key, lemma=r.key, translation=r.meaning, ipa=None, pos=None,
+                    sentence=r.sentence, sentence_translation=r.translation or None,
+                )  # fmt: skip
+            except Exception:
+                log.exception("минута после игры: слово не сохранилось")
+        self._refresh_window()
 
     def _study_cards(self, sh: Shown, forgotten: list[Hint]) -> int:
         """Забытое (открывал «?» после нескольких встреч) в карточки: в игре само не запоминается,
@@ -2997,6 +3178,7 @@ class App(QObject):
                 self.current = CurrentLine(game.exe, out.ocr, out.utterance, out.record, time.time(), out.thumb)
             source = out.utterance.text if out.utterance else out.record.source
             recall = self._recall_for(out.record.source or source, commit=True)
+            self._met_plain(game, recall, out.record.source or source, out.record.translation)
             # старые переводы из кеша бывали с именем говорящего впереди («Байякуя Тогами Судить...»)
             speaker = out.utterance.speaker if out.utterance else None
             shown = tidy_saved(out.record.translation, speaker, out.record.speaker, target_lang=self.settings.target_lang)
@@ -4034,6 +4216,8 @@ class App(QObject):
                 },
             )
         word = lemma or selection
+        if parked:
+            self._novel_keys = None
         # слово из списка новеллы: его перевод сразу виден под репликой, когда встретится в игре
         self.vocab.add(word, translations={word.strip().lower(): translation} if parked and translation else None)
         if not parked:

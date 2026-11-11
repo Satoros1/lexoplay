@@ -1506,6 +1506,123 @@ def _novel_flow(out_dir: Path) -> Callable[[], tuple[str, object]]:
     return run
 
 
+def _recap_flow(out_dir: Path) -> Callable[[], tuple[str, object]]:
+    """Игра как повторение: встречи слов уходят в Lexo, а после сессии появляется «Минута после игры»."""
+
+    def run() -> tuple[str, object]:
+        import tempfile
+
+        import httpx
+        from PySide6.QtWidgets import QApplication
+
+        app_q = QApplication.instance() or QApplication(sys.argv[:1])
+        tmp = tempfile.mkdtemp(prefix="lexoplay-selftest-recap-")
+        os.environ["LEXOPLAY_HOME"] = tmp
+        from lexoplay.app import App
+        from lexoplay.bg import BackgroundLoop
+        from lexoplay.config import Settings
+        from lexoplay.lexo import LexoClient
+        from lexoplay.store import Game, Store
+        from lexoplay.study import Hint, Shown
+
+        calls: list[tuple[str, object]] = []
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            body = json.loads(req.content) if req.content else None
+            calls.append((req.url.path, body))
+            if req.url.path == "/desktop/me":
+                user = {"username": "selftest", "native_lang": "ru", "learning_lang": "en", "premium": False}
+                feats = ["parked_cards", "encounters"]
+                return httpx.Response(200, json={"user": user, "usage": {"used": 0, "limit": 50}, "device_name": "CI", "features": feats})
+            if req.url.path == "/desktop/encounters":
+                items = [{"word": i["words"][0], "status": "reviewed", "started": False, "rating": 3} for i in body["items"]]
+                return httpx.Response(200, json={"items": items})
+            if req.url.path == "/desktop/cards":
+                return httpx.Response(200, json={"card_id": len(calls), "text": body["lemma"], "translation": "y", "status": "created", "deck": "VN"})
+            if req.url.path == "/desktop/vocab":
+                return httpx.Response(200, json={"items": [], "server_time": "2026-11-04T00:00:00Z"})
+            if req.url.path.endswith("/end"):
+                return httpx.Response(200, json={"words_added": 0})
+            return httpx.Response(404, json={"detail": "not found"})
+
+        def pump(cond: Callable[[], bool], seconds: float = 15.0) -> bool:
+            end = time.time() + seconds
+            while time.time() < end:
+                app_q.processEvents()
+                if cond():
+                    return True
+                time.sleep(0.02)
+            return cond()
+
+        store = Store(Path(tmp) / "local.db")
+        store.save_game(Game("vn.exe", "Selftest VN"))
+        bg = BackgroundLoop("selftest-recap")
+        app = App(app_q, Settings(), store, bg)
+        app.client = LexoClient("https://lexo.test", "tok", transport=httpx.MockTransport(handler))
+        info: dict[str, object] = {}
+        try:
+            app.start()
+            if not pump(lambda: "encounters" in app.client.server_features, 3):
+                app.client.server_features = {"parked_cards", "encounters"}  # как после /desktop/me
+            app.vocab.add("gaze", translations={"gaze": "взгляд"})
+            session = app.sessions.touch("vn.exe", "Selftest VN")
+
+            def line(text: str, tr: str, hints: list[Hint], revealed: tuple[str, ...] = ()) -> None:
+                sh = Shown(
+                    "vn.exe", text, tuple(text.split()), (), time.monotonic() - 5, hints=hints,
+                    title="Selftest VN", session_id=session.id, translation=tr,
+                )  # fmt: skip
+                sh.revealed.update(revealed)
+                app._study_save(sh, shown_s=5.0)
+
+            line("Her gaze was calm.", "Её взгляд был спокоен.", [Hint((1,), "gaze", "gaze", "saved", "взгляд")])
+            line("She lingered at the door.", "Она задержалась у двери.", [Hint((1,), "lingered", "linger", "new", "задерживаться", True)])
+            line("The kids fidgeted all day.", "Дети ёрзали весь день.", [Hint((2,), "fidgeted", "fidget", "new", "ёрзать", True)])
+            line("A solemn promise.", "Торжественное обещание.", [Hint((1,), "solemn", "solemn", "new", "торжественный", True)])
+            line("That gaze again.", "Опять этот взгляд.", [Hint((1,), "gaze", "gaze", "saved", "взгляд")], ("gaze",))
+            info["sent"] = pump(lambda: sum(c[0] == "/desktop/encounters" for c in calls) >= 2 and app.outbox.counts() == (0, 0))
+            seen = [c[1] for c in calls if c[0] == "/desktop/encounters"]
+            info["results"] = [(i["words"][0], i["result"]) for b in seen if isinstance(b, dict) for i in b["items"]]
+            info["met"] = [(r.key, r.result) for r in store.met_session(session.id)]
+
+            app.sessions.end_all()  # игра закрыта: сессия кончилась, окно появляется само
+            dlg = app._recap
+            info["dialog"] = dlg is not None and dlg.isVisible()
+            if dlg is not None:
+                for _ in range(10):
+                    app_q.processEvents()
+                    time.sleep(0.02)
+                dlg.grab().save(str(out_dir / "recap-question.png"))
+                info["questions"] = [q.key for q in dlg.questions]
+                q = dlg.questions[0]
+                dlg._pick(q.options.index(q.answer))
+                dlg.grab().save(str(out_dir / "recap-answer.png"))
+                dlg._next()
+                q = dlg.questions[1]
+                dlg._pick(next(i for i, o in enumerate(q.options) if o != q.answer))  # ошибся
+                info["missed"] = q.key
+                st = app.study.get(q.key)
+                info["missed_state"] = (st.state, st.seen) if st is not None else None
+                dlg.close()
+            info["quiz_sent"] = pump(lambda: sum(c[0] == "/desktop/encounters" for c in calls) >= 3 and app.outbox.counts() == (0, 0))
+            seen = [c[1] for c in calls if c[0] == "/desktop/encounters"]
+            info["after_quiz"] = [(i["words"][0], i["result"]) for b in seen[2:] if isinstance(b, dict) for i in b["items"]]
+        finally:
+            app.shutdown()
+        ok = (
+            info["sent"]
+            and info["results"] == [("gaze", "recalled"), ("gaze", "forgot")]
+            and ("linger", "shown") in info["met"]
+            and info["dialog"]
+            and info.get("questions", [None])[0] == "gaze"  # забытое первым
+            and info["after_quiz"] == [("gaze", "recalled")]
+            and (info.get("missed_state") or ("", 9))[0] == "new"
+        )
+        return ("ok" if ok else "fail"), info
+
+    return run
+
+
 def _qt_checks(out_dir: Path) -> None:
     from PySide6.QtCore import Qt
     from PySide6.QtGui import QColor, QPalette
@@ -2150,6 +2267,7 @@ def _qt_checks(out_dir: Path) -> None:
     _check("app_page_flow", _page_flow(out_dir))
     _check("app_study_flow", _study_flow(out_dir))
     _check("app_novel_flow", _novel_flow(out_dir))
+    _check("app_recap_flow", _recap_flow(out_dir))
 
 
 def run(report: str) -> int:

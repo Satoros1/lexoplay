@@ -113,6 +113,7 @@ class Settings:
     study_mode: bool = False
     study_level: str = "b1"  # a2 | b1 | b2: уровень игрока, под него модель выбирает, что подсказать
     study_cards: bool = True  # учёба: забытое (открывал «?» после нескольких встреч) само уходит в карточки
+    study_recap: bool = True  # учёба: «Минута после игры», несколько реплик сессии с пропуском на месте слова
     peek_key: str = "alt"  # держать: в учёбе виден перевод, в тексте на весь экран оригинал (PEEK_KEYS)
     no_focus_games: list[str] = field(default_factory=list)  # свернулись, когда режим слов брал фокус: больше не берём
     hotkeys: Hotkeys = field(default_factory=Hotkeys)

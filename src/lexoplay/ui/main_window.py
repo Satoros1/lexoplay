@@ -1146,6 +1146,16 @@ class ViewPage(QWidget):
                 "Открыл «?» у слова или выражения, которое уже встречал: в игре оно не запоминается, и оно само уходит "
                 "в карточки (Lexo или вкладка «Слова») с репликой как примером. Не больше 10 в день.",
                 self.study_cards,
+            )
+        )
+        self.study_recap = Toggle(s.study_recap)
+        self.study_recap.toggled.connect(self._study_recap)
+        stl.addWidget(
+            setting_row(
+                "Минута после игры",
+                "Когда закрываешь игру, появляется окно с несколькими репликами из неё: на месте нового слова "
+                "пропуск, выбираешь слово из трёх. Сцену ты только что читал, и слово цепляется за неё.",
+                self.study_recap,
                 last=True,
             )
         )
@@ -1246,6 +1256,11 @@ class ViewPage(QWidget):
     def _study(self, on: bool) -> None:
         if self.ctl.settings.study_mode != on:
             self.ctl.settings.study_mode = on
+            self.ctl.settings_changed()
+
+    def _study_recap(self, on: bool) -> None:
+        if self.ctl.settings.study_recap != on:
+            self.ctl.settings.study_recap = on
             self.ctl.settings_changed()
 
     def _study_cards(self, on: bool) -> None:

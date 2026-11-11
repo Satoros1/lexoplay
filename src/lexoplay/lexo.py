@@ -366,5 +366,9 @@ class LexoClient:
     async def add_card(self, payload: dict[str, Any]) -> dict[str, Any]:
         return await self._request("POST", "/desktop/cards", json=payload, timeout=20)
 
+    async def encounters(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Сохранённые слова, встреченные в репликах: вспомнил сам, открыл значение или просто увидел."""
+        return await self._request("POST", "/desktop/encounters", json=payload, timeout=20)
+
     async def end_session(self, session_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         return await self._request("POST", f"/desktop/sessions/{session_id}/end", json=payload)
