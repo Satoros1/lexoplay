@@ -2800,14 +2800,21 @@ class App(QObject):
                     items, usage = res
                     self.bridge.call.emit(lambda it=items, p=part, u=usage: park(it, p, u))
                 tick(min(total, i + len(group)))
+            # итог тем же путём, что и сами слова: он встанет в очередь строго после них. Через done он
+            # изредка приходил раньше последней пачки, и окно писало «не сохранились» про сохранённые слова
+            self.bridge.call.emit(lambda n=failed: finish(n))
             return failed
 
-        def done(res: object, err: BaseException | None) -> None:
+        def done(_res: object, err: BaseException | None) -> None:
+            if err is None:
+                return  # итог подвёл finish
             self._novel_busy.pop(exe, None)
             self._novel_progress.pop(exe, None)
-            if err is not None:
-                self._novel_messages[exe] = str(err) if isinstance(err, TranslationError) else f"Не вышло: {err}"
-                return
+            self._novel_messages[exe] = str(err) if isinstance(err, TranslationError) else f"Не вышло: {err}"
+
+        def finish(res: int) -> None:
+            self._novel_busy.pop(exe, None)
+            self._novel_progress.pop(exe, None)
             if not stored:
                 self._novel_messages[exe] = "Слова не сохранились. Нажми «Отправить» ещё раз, а если повторится, собери отчёт об ошибке."
                 log.warning("слова новеллы %s: из %d не сохранилось ни одного", exe, total)
@@ -2816,7 +2823,7 @@ class App(QObject):
             msg = f"Готово: {novelwords.plural(stored, ('слово', 'слова', 'слов'))} {where}."
             if linked:
                 msg += " Каждое начнёт учиться само, когда встретится в игре."
-            if isinstance(res, int) and res:
+            if res:
                 msg += f" Ещё {res} не пришли: нажми «Отправить» ещё раз."
             self._novel_messages[exe] = msg
             if self.window is not None:
