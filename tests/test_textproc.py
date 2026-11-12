@@ -223,3 +223,32 @@ def test_full_screen_text_splits_into_paragraphs():
     assert abs(paras[0].line_h - 0.03) < 1e-9 and len(paras[0].lines) == 2
     assert page_text(paras).count("\n") == 3
     assert paragraphs(OcrResult()) == []
+
+
+def test_name_inline_with_text_keeps_the_first_line():
+    """VA-11 Hall-A: «Anna: Come on Jo...» в одной строке с репликой, рамка имени стоит на «Anna:».
+    Раньше первая строка пропадала целиком (из отчёта 12.11)."""
+    u = to_utterance(
+        ocr("Anna: Come on Jo, look sharp! The game's", "starting and the player needs a good first", "impression of its main character."),
+        "Anna:",
+    )
+    assert u.speaker.rstrip(":") == "Anna"
+    assert u.text == "Come on Jo, look sharp! The game's starting and the player needs a good first impression of its main character."
+    u = to_utterance(ocr("Anna: But remember,", "life is how you take", "it! Stay focused and look at the brighter", "side of things."), "Anna")
+    assert u.text.startswith("But remember, life is how you take it!")
+    # двоеточие OCR отделил или прочитал точкой с запятой
+    assert to_utterance(ocr("Anna : I know you served a bunch of", "tuxedo-clad Corgis."), "Anna").text.startswith("I know you served")
+    # имя OCR вынес отдельной строкой ниже первой
+    u = to_utterance(ocr(". and I'll admit my little prank on", "Anna :", "you might've gone a bit overboard."), "Anna")
+    assert u.text == ". and I'll admit my little prank on you might've gone a bit overboard."
+    # старое поведение Danganronpa на месте: строка из имени и надписи уходит целиком
+    assert to_utterance(ocr("Celeste SPEAKING", "To captivate even you."), "Celeste").text == "To captivate even you."
+    assert to_utterance(ocr("Celeste", "To captivate even you."), "Celeste SPEAKING").text == "To captivate even you."
+
+
+def test_thought_in_brackets_and_next_label():
+    u = to_utterance(ocr("Jill (Hm? There's something near the door.)"))
+    assert (u.speaker, u.text) == ("Jill", "(Hm? There's something near the door.)")
+    assert to_utterance(ocr("Jill went out (for a while) and came back.")).speaker is None
+    u = to_utterance(ocr("Anna: I know.", "The bar will eventually close.", "nexT"), "Anna")
+    assert u.text == "I know. The bar will eventually close."

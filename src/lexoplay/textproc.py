@@ -25,6 +25,7 @@ _SENTENCE = re.compile(r"\S.*?(?:[.!?…]+[\"'»”’)\]]*(?=\s|$)|$)")
 
 _TERMINAL = tuple(".,!?…:;\"'”’»)")
 _NAME_COLON = re.compile(r"^\s*([A-Z][\w'.\- ]{0,24}?)\s*[:：]\s+(\S.*)$")
+_NAME_THOUGHT = re.compile(r"^\s*([A-Z][a-z]+(?: [A-Z][a-z]+)?)\s+(\(.+)$")  # имя и мысль в скобках
 _NAME_BRACKETS = re.compile(r"^\s*[\[【「(]\s*([^\]】」)]{1,24}?)\s*[\]】」)]\s*(.*)$")
 
 
@@ -219,19 +220,29 @@ def _without_name(lines: list[str], speaker: str) -> list[str]:
     head = _letters(first)
     if SequenceMatcher(None, head, name).ratio() >= 0.75:
         return lines[1:]
-    if len(head) >= 4 and (name.startswith(head) or head.startswith(name)) and len(lines) > 1:
-        return lines[1:]  # «Celeste» при имени из рамки «Celeste SPEAKING» (или наоборот)
+    words = first.split()
+    n_name = len(speaker.split())
+    # «Celeste» при имени из рамки «Celeste SPEAKING», или строка «Celeste SPEAKING» при имени «Celeste».
+    # Строка, где после имени идёт сама реплика («Anna: Come on Jo, look sharp!»), сюда не подходит:
+    # раньше она пропадала целиком, и первая строка реплики не переводилась
+    label_after = head.startswith(name) and _caps_only([w.strip(".,:;|!") for w in words[n_name:]])
+    if len(head) >= 4 and (name.startswith(head) or label_after) and len(lines) > 1:
+        return lines[1:]
     m = _NAME_COLON.match(first)  # «Sakura Ogami: Indeed...»
     if m and SequenceMatcher(None, _letters(m.group(1)), name).ratio() >= 0.75:
         return [m.group(2), *lines[1:]]
-    words = first.split()
-    for n in (len(speaker.split()), len(speaker.split()) + 1):  # имя и текст OCR склеил в одну строку
+    for n in (n_name, n_name + 1):  # имя и текст OCR склеил в одну строку
         if 0 < n < len(words) and SequenceMatcher(None, _letters(" ".join(words[:n])), name).ratio() >= 0.8:
-            return [" ".join(words[n:]), *lines[1:]]
+            return [" ".join(words[n:]).lstrip(" :：;"), *lines[1:]]
+    # имя в одной строке с текстом, а OCR вынес его отдельной строкой ниже («...and I'll admit» / «Anna :»)
+    for i in (1, 2):
+        if i < len(lines) and len(lines[i].split()) <= n_name + 1:
+            if SequenceMatcher(None, _letters(lines[i]), name).ratio() >= 0.75:
+                return [*lines[:i], *lines[i + 1 :]]
     return lines
 
 
-_TAIL = re.compile(r"(?<=[.!?…\"'”’»)])\s+([a-z|!][a-z|!1]{0,3})\s*$")
+_TAIL = re.compile(r"(?<=[.!?…\"'”’»)])\s+([a-z|!][a-zA-Z|!1]{0,3})\s*$")
 _STROKES = re.compile(r"^[lij|!1]+$")  # стрелка «дальше» в углу окна диалога читается как l, li, lij, |
 
 
@@ -244,6 +255,8 @@ def drop_tail_noise(text: str) -> str:
     if m is None:
         return text
     token = m.group(1)
+    if any(ch.isupper() for ch in token):
+        return text[: m.start()].rstrip()  # «nexT»: заглавная посреди короткого слова, так слова не пишут
     if not _STROKES.match(token):
         from lexoplay.rarity import INTERJECTIONS
         from lexoplay.wordlist_en import WORDS
@@ -275,6 +288,9 @@ def to_utterance(result: OcrResult, name_text: str | None = None, *, guess_speak
             return Utterance(m.group(1).strip(), drop_tail_noise(drop_repeats(rest)))
         if len(lines) >= 2 and _looks_like_name(first, lines[1:]):
             return Utterance(first.strip(), drop_tail_noise(drop_repeats(lines[1:])))
+        m = _NAME_THOUGHT.match(first)  # «Jill (Hm? There's something near the door.)»: двоеточие OCR потерял
+        if m and lines[-1].rstrip().endswith(")"):
+            return Utterance(m.group(1), drop_tail_noise(drop_repeats([m.group(2), *lines[1:]])))
     return Utterance(None, drop_tail_noise(drop_repeats(lines)))
 
 
