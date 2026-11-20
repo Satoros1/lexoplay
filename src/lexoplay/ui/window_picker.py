@@ -46,7 +46,7 @@ class WindowPicker(QDialog):
         self.chosen: WindowInfo | None = None
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(24, 22, 24, 20)
+        root.setContentsMargins(24, 24, 24, 20)
         root.setSpacing(12)
         h = QLabel("Какое окно игры?")
         h.setObjectName("h2")

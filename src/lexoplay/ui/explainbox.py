@@ -19,8 +19,8 @@ def row_tool(icon_name: str, tip: str, on_click: Callable[[], None], color: str 
     color = color or theme.MUTED
     b = QToolButton()
     b.setObjectName("rowTool")
-    b.setIcon(icon(icon_name, color, 15, fill=fill))
-    b.setIconSize(QSize(15, 15))
+    b.setIcon(icon(icon_name, color, 16, fill=fill))
+    b.setIconSize(QSize(16, 16))
     b.setToolTip(tip)
     b.setCursor(Qt.CursorShape.PointingHandCursor)
     b.clicked.connect(on_click)
@@ -37,7 +37,7 @@ def explain_box(
     box = QFrame()
     box.setObjectName("explainBox")
     lay = QVBoxLayout(box)
-    lay.setContentsMargins(12, 10, 12, 10)
+    lay.setContentsMargins(12, 12, 12, 12)
     lay.setSpacing(6)
     if got is None:
         lay.addWidget(label("Разбираю реплику…", "muted"))
@@ -59,7 +59,7 @@ def explain_box(
         head = label("", None, wrap=True)
         head.setTextFormat(Qt.TextFormat.RichText)
         base = f' <span style="color:{theme.MUTED}">· {html.escape(item.base)}</span>' if item.base else ""
-        head.setText(f"<b>{html.escape(item.phrase)}</b>{base}: {html.escape(item.meaning)}")
+        head.setText(f'<span style="font-weight:600">{html.escape(item.phrase)}</span>{base}: {html.escape(item.meaning)}')
         col.addWidget(head)
         if item.note:
             col.addWidget(label(item.note, "version", wrap=True))

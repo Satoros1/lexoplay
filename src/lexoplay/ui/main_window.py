@@ -251,7 +251,7 @@ class GamesPage(QWidget):
         hk = self.ctl.settings.hotkeys
         grid = QGridLayout()
         grid.setHorizontalSpacing(12)
-        grid.setVerticalSpacing(10)
+        grid.setVerticalSpacing(12)
         rows = [
             (hk.translate, "перевести реплику, ещё раз спрятать"),
             (hk.words, "подчеркнуть слова: клик по слову, потом «+» или Enter сохраняет его. Shift+клик выбирает фразу. "
@@ -753,7 +753,7 @@ class LexoPage(QWidget):
     def _pad(self, w: QWidget) -> QWidget:
         box = QWidget()
         lay = QVBoxLayout(box)
-        lay.setContentsMargins(18, 12, 18, 12)
+        lay.setContentsMargins(20, 12, 20, 12)
         lay.addWidget(w)
         return box
 
@@ -761,12 +761,12 @@ class LexoPage(QWidget):
         row = QFrame()
         row.setObjectName("rowLast" if last else "row")
         lay = QHBoxLayout(row)
-        lay.setContentsMargins(18, 9, 18, 9)
+        lay.setContentsMargins(20, 8, 20, 8)
         name = "section" if header else None
         t = label(title, name)
         t.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         lay.addWidget(t, 1)
-        for text, color in ((new, theme.INFO), (due, theme.GREEN), (total, theme.MUTED)):
+        for text, color in ((new, theme.INK), (due, theme.GREEN), (total, theme.MUTED)):  # акцент только у «повторить»
             cell = label(text, name)
             cell.setFixedWidth(84)
             cell.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
@@ -819,7 +819,7 @@ class KeysPage(QWidget):
             row = QFrame()
             row.setObjectName("row")
             rl = QHBoxLayout(row)
-            rl.setContentsMargins(18, 12, 18, 12)
+            rl.setContentsMargins(20, 12, 20, 12)
             col = QVBoxLayout()
             col.setSpacing(2)
             title, desc = HOTKEY_LABELS[name]
@@ -841,7 +841,7 @@ class KeysPage(QWidget):
         row = QFrame()
         row.setObjectName("rowLast")
         rl = QHBoxLayout(row)
-        rl.setContentsMargins(18, 12, 18, 12)
+        rl.setContentsMargins(20, 12, 20, 12)
         col = QVBoxLayout()
         col.setSpacing(2)
         col.addWidget(label("Показать, пока держишь", "rowTitle"))
@@ -931,11 +931,11 @@ class StripPreview(QWidget):
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         r = QRectF(self.rect())
         p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QColor("#1E2433"))
+        p.setBrush(QColor("#34302B"))  # сцена игры в тёплых сумерках, в тон окну
         p.drawRoundedRect(r, 12, 12)
-        p.setBrush(QColor("#2A3146"))
+        p.setBrush(QColor("#433C35"))
         p.drawRoundedRect(QRectF(r.x(), r.bottom() - r.height() * 0.45, r.width(), r.height() * 0.45), 12, 12)
-        p.setBrush(QColor("#59506F"))
+        p.setBrush(QColor("#5C534A"))
         p.drawRoundedRect(QRectF(r.width() * 0.44, r.height() * 0.08, r.width() * 0.12, r.height() * 0.62), 40, 40)
         # окно диалога
         dlg = QRectF(r.x() + 18, r.bottom() - 58, r.width() - 36, 44)
@@ -1013,7 +1013,7 @@ class ViewPage(QWidget):
         font_ctl = QWidget()
         fl = QHBoxLayout(font_ctl)
         fl.setContentsMargins(0, 0, 0, 0)
-        fl.setSpacing(10)
+        fl.setSpacing(8)
         self.font = QComboBox()
         self.font.addItem("Как в окне LexoPlay", "")
         families = set(QFontDatabase.families())
@@ -1190,7 +1190,7 @@ class ViewPage(QWidget):
 
         lay.addWidget(label("Растянута ли игра", "section"))
         modes = QHBoxLayout()
-        modes.setSpacing(10)
+        modes.setSpacing(12)
         self.group = QButtonGroup(self)
         for code, title, desc in (
             ("auto", "Определять самому", "LexoPlay сам видит, что игра растянута через Magpie"),
@@ -1200,7 +1200,7 @@ class ViewPage(QWidget):
             frame = QFrame()
             frame.setObjectName("cardActive" if s.magpie_mode == code else "card")
             fl = QVBoxLayout(frame)
-            fl.setContentsMargins(14, 12, 14, 12)
+            fl.setContentsMargins(16, 12, 16, 12)
             rb = QRadioButton(title)
             rb.setChecked(s.magpie_mode == code)
             self.group.addButton(rb)
@@ -1411,10 +1411,10 @@ class MorePage(QWidget):
         upd_row = QFrame()
         upd_row.setObjectName("rowLast")
         ul = QVBoxLayout(upd_row)
-        ul.setContentsMargins(18, 14, 18, 14)
+        ul.setContentsMargins(20, 16, 20, 16)
         ul.setSpacing(8)
         upd = QHBoxLayout()
-        upd.setSpacing(10)
+        upd.setSpacing(8)
         vcol = QVBoxLayout()
         vcol.setSpacing(2)
         self.version = label("", "title")
@@ -1462,7 +1462,7 @@ class MorePage(QWidget):
         help_row = QFrame()
         help_row.setObjectName("rowLast")
         hl = QVBoxLayout(help_row)
-        hl.setContentsMargins(18, 14, 18, 14)
+        hl.setContentsMargins(20, 16, 20, 16)
         btns = QHBoxLayout()
         report = button(" Собрать отчёт об ошибке", None, "send")
         report.clicked.connect(self._report)
@@ -1661,7 +1661,7 @@ class MainWindow(QWidget):
         sl.setContentsMargins(12, 16, 12, 16)
         sl.setSpacing(2)
         brand = QHBoxLayout()
-        brand.setSpacing(10)
+        brand.setSpacing(8)
         logo = QLabel()
         logo.setPixmap(draw_logo(28))
         brand.addWidget(logo)

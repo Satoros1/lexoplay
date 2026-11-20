@@ -1484,7 +1484,10 @@ def _novel_flow(out_dir: Path) -> Callable[[], tuple[str, object]]:
                 app_q.processEvents()
                 time.sleep(0.02)
             dlg._load()  # noqa: SLF001
+            for _ in range(5):  # кнопка «Отправить N слов» шире прежней: раскладка обновится в цикле событий
+                app_q.processEvents()
             info["listed"] = [dlg.list.item(i).text() for i in range(dlg.list.count())]
+            info["send_fits"] = dlg.send.width() >= dlg.send.sizeHint().width()
             dlg.grab().save(str(out_dir / "novel-dialog.png"))
             words = app.novel_words(game.exe, "B2", 4)
             info["words"] = [(w.text, w.level, w.total) for w in words]
@@ -1841,8 +1844,9 @@ def _qt_checks(out_dir: Path) -> None:
         saved = []
         for key in ("games", "history", "words", "progress", "lexo", "keys", "view", "more"):
             w.show_page(key)
-            for _ in range(5):
+            for _ in range(15):  # выделение в меню доезжает за 220 мс: снимаем после, а не посреди
                 app.processEvents()
+                time.sleep(0.02)
             name = f"window-{key}.png"
             w.grab().save(str(out_dir / name))
             saved.append(name)
@@ -1855,8 +1859,9 @@ def _qt_checks(out_dir: Path) -> None:
             wd.show()
             for key in ("games", "words", "progress", "view", "more"):
                 wd.show_page(key)
-                for _ in range(5):
+                for _ in range(15):
                     app.processEvents()
+                    time.sleep(0.02)
                 name = f"window-dark-{key}.png"
                 wd.grab().save(str(out_dir / name))
                 saved.append(name)

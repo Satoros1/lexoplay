@@ -74,7 +74,7 @@ class Segments(QFrame):
         super().__init__()
         self.setObjectName("segments")
         lay = QHBoxLayout(self)
-        lay.setContentsMargins(3, 3, 3, 3)
+        lay.setContentsMargins(4, 4, 4, 4)
         lay.setSpacing(2)
         self._group = QButtonGroup(self)
         self._group.setExclusive(True)
@@ -404,7 +404,7 @@ class Dot(QWidget):
 # ------------------------------------------------------------------ страница
 def stat_tile(caption: str) -> tuple[QFrame, QLabel, QLabel]:
     frame, lay = card()
-    lay.setContentsMargins(16, 14, 16, 14)
+    lay.setContentsMargins(16, 16, 16, 16)
     lay.setSpacing(2)
     value = label("0", "statValue")
     lay.addWidget(value)
@@ -425,7 +425,7 @@ class ProgressPage(QWidget):
         outer.addWidget(scroll)
 
         tiles = QHBoxLayout()
-        tiles.setSpacing(10)
+        tiles.setSpacing(12)
         t1, self.lines_today, self.lines_note = stat_tile("Реплик сегодня")
         t2, self.words_today, self.words_note = stat_tile("Новых слов сегодня")
         t3, self.time_today, self.time_note = stat_tile("В игре сегодня")
@@ -562,7 +562,7 @@ class ProgressPage(QWidget):
         pages = pr.pages_read
         book = f", это примерно {count(pages, 'страница', 'страницы', 'страниц')} книги" if pages else ""
         num = f"{pr.words_read:,}".replace(",", "\u00a0")
-        self.read_text.setText(f"Прочитано по-английски: <b>{num}</b> {plural_words(pr.words_read)}{book}.")
+        self.read_text.setText(f"Прочитано по-английски: <span style='font-weight:600'>{num}</span> {plural_words(pr.words_read)}{book}")
         self._show_study(pr)
         self._show_activity()
         self.hours.set_hours(pr.hours)
@@ -580,16 +580,16 @@ class ProgressPage(QWidget):
         parts: list[str] = []
         if lines:
             share = round(100 * (lines - peeks) / lines)
-            parts.append(f"Учёба сегодня: сам по-английски <b>{count(lines, 'реплика', 'реплики', 'реплик')}</b>, без перевода {share}%.")
+            parts.append(f"Учёба сегодня: сам по-английски <span style='font-weight:600'>{count(lines, 'реплика', 'реплики', 'реплик')}</span>, без перевода {share}%.")
         if week_lines and pr.study_share is not None:
             prev = pr.study_prev_share
             trend = f" (неделей раньше {prev}%)" if prev is not None else ""
-            parts.append(f"За неделю без перевода <b>{pr.study_share}%</b>{trend}.")
+            parts.append(f"За неделю без перевода <span style='font-weight:600'>{pr.study_share}%</span>{trend}.")
         if not parts:
             hk = getattr(getattr(self.ctl.settings, "hotkeys", None), "study", "") or "F8"
             parts.append(f"Учёба: в игре нажми {hk}, и реплики читаешь сам, а трудные места подсказаны над окном диалога.")
         if learned or pr.study_known:
-            parts.append(f"Запомнилось слов и выражений: <b>{learned}</b> сегодня, {pr.study_known} всего.")
+            parts.append(f"Запомнилось слов и выражений: <span style='font-weight:600'>{learned}</span> сегодня, {pr.study_known} всего.")
         if cards:
             parts.append(f"Забытые ушли в карточки: {cards}.")
         self.study_text.setText(" ".join(parts))
@@ -633,7 +633,7 @@ class ProgressPage(QWidget):
             row = QFrame()
             row.setObjectName("rowLast" if i == len(rows) - 1 else "row")
             rl = QHBoxLayout(row)
-            rl.setContentsMargins(18, 10, 18, 10)
+            rl.setContentsMargins(20, 12, 20, 12)
             rl.addWidget(label(title, "muted"), 1)
             col = QVBoxLayout()
             col.setSpacing(0)
@@ -661,7 +661,7 @@ class ProgressPage(QWidget):
             row = QFrame()
             row.setObjectName("rowLast" if i == len(items) - 1 else "row")
             rl = QHBoxLayout(row)
-            rl.setContentsMargins(16, 10, 18, 10)
+            rl.setContentsMargins(16, 12, 20, 12)
             rl.setSpacing(12)
             rl.addWidget(Tile(title, g.exe, 34), 0, Qt.AlignmentFlag.AlignVCenter)
             col = QVBoxLayout()
@@ -716,7 +716,7 @@ def plural_words(n: int) -> str:
 def empty_row(text: str) -> QWidget:
     w = QWidget()
     lay = QVBoxLayout(w)
-    lay.setContentsMargins(18, 14, 18, 14)
+    lay.setContentsMargins(20, 16, 20, 16)
     lay.addWidget(label(text, "muted", wrap=True))
     return w
 

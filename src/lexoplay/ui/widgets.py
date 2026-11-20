@@ -34,6 +34,13 @@ from lexoplay.ui import theme
 from lexoplay.ui.theme import icon
 
 
+def one_line(text: str) -> str:
+    """Подпись из одной фразы пишется без точки в конце, как заголовок. Абзац из нескольких фраз точку сохраняет."""
+    if text.endswith(".") and not text.endswith("..") and not any(f"{c} " in text for c in ".?!"):
+        return text[:-1]
+    return text
+
+
 def label(text: str, name: str | None = None, *, wrap: bool = False) -> QLabel:
     lbl = QLabel(text)
     if name:
@@ -46,8 +53,8 @@ def card(name: str = "card") -> tuple[QFrame, QVBoxLayout]:
     frame = QFrame()
     frame.setObjectName(name)
     lay = QVBoxLayout(frame)
-    lay.setContentsMargins(18, 16, 18, 16)
-    lay.setSpacing(10)
+    lay.setContentsMargins(20, 16, 20, 16)
+    lay.setSpacing(12)
     return frame, lay
 
 
@@ -380,8 +387,7 @@ def page_shell(title: str, subtitle: str) -> tuple[QScrollArea, QVBoxLayout, QHB
     col = QVBoxLayout()
     col.setSpacing(2)
     col.addWidget(label(title, "h1"))
-    if subtitle.endswith(".") and ". " not in subtitle and not subtitle.endswith(".."):
-        subtitle = subtitle[:-1]  # подпись из одной фразы без точки, как заголовок
+    subtitle = one_line(subtitle)
     col.addWidget(label(subtitle, "muted", wrap=True))
     head.addLayout(col, 1)
     actions = QHBoxLayout()
@@ -458,13 +464,13 @@ def setting_row(title: str, desc: str, control: QWidget, *, last: bool = False) 
     row = QFrame()
     row.setObjectName("rowLast" if last else "row")
     lay = QHBoxLayout(row)
-    lay.setContentsMargins(18, 14, 18, 14)
+    lay.setContentsMargins(20, 16, 20, 16)
     lay.setSpacing(16)
     col = QVBoxLayout()
     col.setSpacing(2)
     col.addWidget(label(title, "rowTitle"))
     if desc:
-        col.addWidget(label(desc, "muted", wrap=True))
+        col.addWidget(label(one_line(desc), "muted", wrap=True))
     lay.addLayout(col, 1)
     lay.addWidget(control, 0, Qt.AlignmentFlag.AlignVCenter)
     if isinstance(control, QAbstractButton):

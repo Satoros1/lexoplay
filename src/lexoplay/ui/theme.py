@@ -305,7 +305,7 @@ QFrame#inset {{ background: {RAISED}; border: 1px solid {HAIR}; border-radius: 8
 QFrame#banner {{ background: {WARN_SOFT}; border: 1px solid {WARN_LINE}; border-radius: 12px; }}
 QFrame#row {{ background: transparent; border: none; border-bottom: 1px solid {HAIR}; }}
 QFrame#rowLast {{ background: transparent; border: none; }}
-QPushButton {{ font-size: 10pt; border-radius: 8px; padding: 6px 14px; min-height: 22px;
+QPushButton {{ font-size: 10pt; border-radius: 8px; padding: 6px 16px; min-height: 22px;
               background: transparent; border: 1px solid {BORDER_STRONG}; }}
 QPushButton:hover {{ background: {HOVER}; }}
 QPushButton:pressed {{ background: {PRESSED}; }}
@@ -330,7 +330,7 @@ QPushButton#segment {{ border: none; border-radius: 6px; padding: 4px 12px; min-
                       background: transparent; color: {MUTED}; }}
 QPushButton#segment:hover {{ background: {HOVER}; }}
 QPushButton#segment:checked {{ background: {CARD}; color: {INK}; border: 1px solid {BORDER}; }}
-QFrame#segments {{ background: {SUNKEN}; border: none; border-radius: 8px; }}
+QFrame#segments {{ background: {SUNKEN}; border: none; border-radius: 10px; }}
 QFrame#sessionHead {{ background: transparent; border: none; }}
 QFrame#sessionHead:hover {{ background: {RAISED}; border-radius: 12px; }}
 QFrame#sessionBody {{ background: transparent; border: none; border-top: 1px solid {HAIR}; }}
@@ -343,7 +343,7 @@ QLabel#updateText {{ color: {GREEN_INK}; font-size: 10pt; }}
 QLabel#preview {{ background: #12110F; border: 1px solid {BORDER}; border-radius: 6px; padding: 2px; }}
 QPushButton#link {{ border: none; color: {GREEN}; padding: 2px 0; font-weight: 600; text-align: left; }}
 QPushButton#link:hover {{ background: transparent; text-decoration: underline; }}
-QPushButton#nav {{ text-align: left; border: none; border-radius: 8px; padding: 7px 12px; font-size: 10.5pt;
+QPushButton#nav {{ text-align: left; border: none; border-radius: 8px; padding: 8px 12px; font-size: 10.5pt;
                   color: {MUTED}; }}
 QPushButton#nav:hover {{ background: {HOVER}; color: {INK}; }}
 QPushButton#nav:checked {{ background: transparent; color: {GREEN_INK}; font-weight: 600; }}
@@ -389,7 +389,7 @@ QSlider::handle:horizontal:hover {{ border: 2px solid {GREEN}; width: 14px; heig
 QLabel#statValue {{ font-family: "{d}", "Segoe UI"; font-size: 20pt; font-weight: 600; }}
 QSpinBox {{ background: {CARD}; border: 1px solid {BORDER_STRONG}; border-radius: 8px; padding: 6px 8px; font-size: 10.5pt; }}
 QSpinBox:focus {{ border: 2px solid {GREEN}; padding: 5px 7px; }}
-QLabel#valueChip {{ background: {RAISED}; border: 1px solid {BORDER}; border-radius: 6px; padding: 3px 0;
+QLabel#valueChip {{ background: {RAISED}; border: 1px solid {BORDER}; border-radius: 6px; padding: 4px 0;
                    font-size: 9.5pt; font-weight: 600; color: {INK}; }}
 QProgressBar {{ background: {SUNKEN}; border: none; border-radius: 4px; height: 8px; max-height: 8px; }}
 QProgressBar::chunk {{ background: {GREEN}; border-radius: 4px; }}
@@ -398,7 +398,7 @@ QListWidget::item {{ border-radius: 8px; padding: 8px; margin: 1px 0; }}
 QListWidget::item:selected {{ background: {GREEN_SOFT}; color: {INK}; }}
 QListWidget::item:hover {{ background: {HOVER}; }}
 QMenu {{ background: {CARD}; border: 1px solid {BORDER}; border-radius: 8px; padding: 4px; }}
-QMenu::item {{ padding: 7px 18px; border-radius: 6px; font-size: 10pt; }}
+QMenu::item {{ padding: 8px 16px; border-radius: 4px; font-size: 10pt; }}
 QMenu::item:selected {{ background: {GREEN_SOFT}; color: {INK}; }}
 QMenu::item:disabled {{ color: {DISABLED}; }}
 QMenu::separator {{ height: 1px; background: {BORDER}; margin: 4px 6px; }}
@@ -463,7 +463,7 @@ _ICONS = {
 }
 
 
-def icon_svg(name: str, color: str | None = None, size: int = 24, stroke: float = 2.0, fill: str = "none") -> str:
+def icon_svg(name: str, color: str | None = None, size: int = 24, stroke: float = 1.5, fill: str = "none") -> str:
     body = _ICONS[name]
     color = color or INK
     return (

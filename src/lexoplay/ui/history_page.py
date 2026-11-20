@@ -119,7 +119,7 @@ class SessionCard(QFrame):
 
         self.head = _Head(self.toggle)
         hl = QHBoxLayout(self.head)
-        hl.setContentsMargins(16, 12, 14, 12)
+        hl.setContentsMargins(16, 12, 16, 12)
         hl.setSpacing(12)
         hl.addWidget(Tile(title, s.exe, 38), 0, Qt.AlignmentFlag.AlignTop)
         col = QVBoxLayout()
@@ -142,7 +142,7 @@ class SessionCard(QFrame):
         self.body = QFrame()
         self.body.setObjectName("sessionBody")
         self.body_lay = QVBoxLayout(self.body)
-        self.body_lay.setContentsMargins(0, 2, 0, 10)
+        self.body_lay.setContentsMargins(0, 2, 0, 12)
         self.body_lay.setSpacing(0)
         lay.addWidget(self.body)
         # реплики раскрытой сессии строим по нескольку за раз: окно не замирает на полсекунды
@@ -233,19 +233,19 @@ class SessionCard(QFrame):
         if not only_found:
             words = page.store.words_range(self.s.exe, self.s.start, self.s.end)
             if words:
-                names = " · ".join(f"<b>{html.escape(w.word)}</b>" for w in words[:30])
+                names = " · ".join(f"<span style='font-weight:600'>{html.escape(w.word)}</span>" for w in words[:30])
                 more = f" и ещё {len(words) - 30}" if len(words) > 30 else ""
                 saved = label("", "muted", wrap=True)
                 saved.setTextFormat(Qt.TextFormat.RichText)
                 saved.setText(f"Сохранено в этой сессии: {names}{more}")
-                saved.setContentsMargins(18, 10, 18, 4)
+                saved.setContentsMargins(20, 12, 20, 4)
                 self.body_lay.addWidget(saved)
         if total > len(lines):
             earlier = button(f"Показать раньше ({total - len(lines)})")
             earlier.setObjectName("link")
             earlier.clicked.connect(self._earlier)
             box = QHBoxLayout()
-            box.setContentsMargins(18, 8, 18, 2)
+            box.setContentsMargins(20, 8, 20, 2)
             box.addWidget(earlier)
             box.addStretch(1)
             self.body_lay.addLayout(box)
@@ -253,7 +253,7 @@ class SessionCard(QFrame):
         self._rows_at = self.body_lay.count()
         self._pending = [(line, query, i == len(lines) - 1, line.norm in explained) for i, line in enumerate(lines)]
         foot = QHBoxLayout()
-        foot.setContentsMargins(18, 8, 18, 0)
+        foot.setContentsMargins(20, 8, 20, 0)
         foot.setSpacing(8)
         copy = button(" Скопировать сессию", None, "copy")
         copy.setToolTip("Все реплики сессии с переводом, как сценарий: удобно вставить в заметки")
@@ -286,8 +286,8 @@ class SessionCard(QFrame):
         row = QFrame()
         row.setObjectName("rowLast" if last else "row")
         lay = QVBoxLayout(row)
-        lay.setContentsMargins(18, 8, 12, 9)
-        lay.setSpacing(3)
+        lay.setContentsMargins(20, 8, 12, 8)
+        lay.setSpacing(4)
         meta = QHBoxLayout()
         meta.setSpacing(2)
         bits = [line.speaker] if line.speaker else []
@@ -436,7 +436,7 @@ class HistoryPage(QWidget):
         self.summary = label("", "muted")
         lay.addWidget(self.summary)
         self.list_lay = QVBoxLayout()
-        self.list_lay.setSpacing(10)
+        self.list_lay.setSpacing(12)
         lay.addLayout(self.list_lay)
         self.more = button("Показать ещё сессии")
         self.more.clicked.connect(self._more)
@@ -622,5 +622,5 @@ def card_box() -> tuple[QFrame, QVBoxLayout]:
     frame = QFrame()
     frame.setObjectName("card")
     lay = QVBoxLayout(frame)
-    lay.setContentsMargins(18, 14, 18, 14)
+    lay.setContentsMargins(20, 16, 20, 16)
     return frame, lay

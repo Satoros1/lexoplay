@@ -152,7 +152,7 @@ def marked_html(text: str, bold: list[tuple[int, int]], query: str = "") -> str:
         if m & 2:
             chunk = f'<span style="background-color:{theme.MARK}">{chunk}</span>'
         if m & 1:
-            chunk = f'<b style="color:{theme.GREEN_INK}">{chunk}</b>'
+            chunk = f'<span style="color:{theme.GREEN_INK}; font-weight:600">{chunk}</span>'
         out.append(chunk)
         i = j
     return "".join(out).replace("\n", "<br>")
@@ -340,7 +340,7 @@ class WordsPage(QWidget):
         if not words:
             empty = QWidget()
             el = QVBoxLayout(empty)
-            el.setContentsMargins(18, 14, 18, 14)
+            el.setContentsMargins(20, 16, 20, 16)
             if total:
                 text = "Попробуй другое слово или перевод."
             elif self.source.currentIndex() == 2:
@@ -397,8 +397,8 @@ class WordsPage(QWidget):
         row = QFrame()
         row.setObjectName("rowLast" if last else "row")
         col = QVBoxLayout(row)
-        col.setContentsMargins(18, 10, 12, 10)
-        col.setSpacing(3)
+        col.setContentsMargins(20, 12, 12, 12)
+        col.setSpacing(4)
         top = QHBoxLayout()
         top.setSpacing(8)
         extra = " · ".join(p for p in (f"/{w.ipa}/" if w.ipa else "", w.pos or "") if p)
@@ -539,7 +539,7 @@ class GameNotesDialog(QDialog):
         self.setMinimumSize(620, 560)
         self.setStyleSheet(theme.stylesheet())
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(22, 20, 22, 20)
+        lay.setContentsMargins(24, 20, 24, 20)
         lay.setSpacing(12)
         lay.addWidget(label("Справка об игре", "h2"))
         lay.addWidget(
@@ -639,7 +639,7 @@ class GlossaryDialog(QDialog):
         self.setMinimumWidth(560)
         self.setStyleSheet(theme.stylesheet())
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(22, 20, 22, 20)
+        lay.setContentsMargins(24, 20, 24, 20)
         lay.setSpacing(12)
         lay.addWidget(label("Имена и термины", "h2"))
         lay.addWidget(
@@ -685,7 +685,7 @@ class GlossaryDialog(QDialog):
         if not items:
             empty = QWidget()
             el = QVBoxLayout(empty)
-            el.setContentsMargins(16, 10, 16, 10)
+            el.setContentsMargins(16, 12, 16, 12)
             el.addWidget(label("Пока пусто.", "muted"))
             self.box_lay.addWidget(empty)
         for i, (term, tr) in enumerate(items.items()):

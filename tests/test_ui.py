@@ -1012,7 +1012,7 @@ def test_words_page_search_sort_bold_and_explain(window, qapp):
 
     assert page.summary.text() == "Слов: 3"
     lured = next(t for t in texts() if "target" in t)
-    assert "<b" in lured and ">lured</b>" in lured  # слово в примере жирное
+    assert "font-weight:600" in lured and ">lured</span>" in lured  # слово в примере выделено (600, без 700)
     assert any("Но жертву" in t for t in texts())  # перевод примера под ним
     # поиск по-русски (ё = е, без регистра) и по-английски
     page.search.setText("ЗАМАНИВ")
@@ -1407,3 +1407,27 @@ def test_game_card_one_column_and_no_caps(window, qapp):
             if lbl.objectName() == "section" and len(lbl.text()) > 3:
                 assert lbl.text() != lbl.text().upper(), lbl.text()
     assert tile_color("a") == tile_color("b") and tile_color("a").name().lower() == theme.TILE.lower()
+
+
+def test_one_line_captions_and_grid():
+    """Подпись из одной фразы без точки, абзац с точкой; отступы окна на сетке 4 px."""
+    import re
+    from pathlib import Path
+
+    from lexoplay.ui import theme
+    from lexoplay.ui.widgets import one_line
+
+    assert one_line("Сколько ты читаешь в играх: сегодня и всего.") == "Сколько ты читаешь в играх: сегодня и всего"
+    assert one_line("Первая фраза. Вторая фраза.") == "Первая фраза. Вторая фраза."
+    assert one_line("Загружаю…") == "Загружаю…" and one_line("Подожди...") == "Подожди..."
+    ui = Path(theme.__file__).parent
+    bad = []
+    for f in ("main_window.py", "pages.py", "history_page.py", "progress_page.py", "novel_dialog.py", "recap_dialog.py",
+              "explainbox.py", "widgets.py", "window_picker.py"):  # fmt: skip
+        for n, line in enumerate((ui / f).read_text(encoding="utf-8").splitlines(), 1):
+            m = re.search(r"(setContentsMargins|setSpacing|addSpacing|setHorizontalSpacing|setVerticalSpacing)\(([-\d, ]+)\)", line)
+            if m and any(int(v) % 4 and int(v) not in (1, 2, 6) for v in m.group(2).split(",")):
+                bad.append(f"{f}:{n}: {line.strip()}")
+    assert not bad, bad
+    css = theme.stylesheet()
+    assert "<b>" not in css and "stroke-width=\"1.5\"" in theme.icon_svg("check")
