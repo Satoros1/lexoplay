@@ -13,10 +13,10 @@ from lexoplay.ui import theme
 from lexoplay.ui.theme import icon
 from lexoplay.ui.widgets import label
 
-HIGHLIGHT = "#FBE3A0"  # найденное поиском
 
 
-def row_tool(icon_name: str, tip: str, on_click: Callable[[], None], color: str = theme.MUTED, fill: str = "none") -> QToolButton:
+def row_tool(icon_name: str, tip: str, on_click: Callable[[], None], color: str | None = None, fill: str = "none") -> QToolButton:
+    color = color or theme.MUTED
     b = QToolButton()
     b.setObjectName("rowTool")
     b.setIcon(icon(icon_name, color, 15, fill=fill))

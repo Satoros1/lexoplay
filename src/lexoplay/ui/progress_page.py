@@ -36,15 +36,13 @@ from lexoplay.ui.widgets import Tile, card, card_list, clear, label, page_shell,
 
 MONTHS = ["янв", "фев", "мар", "апр", "май", "июн", "июл", "авг", "сен", "окт", "ноя", "дек"]
 WEEKDAYS_FULL = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
-EMPTY = "#ECEAE4"
-LEVELS = ["#CFE8DE", "#9DD1BD", "#4FA788", theme.GREEN]  # календарь: от «чуть-чуть» до «много»
 POS_COLORS = {
     "noun": "#0F6E56",
     "verb": "#3D5A80",
     "adj": "#C07A2C",
     "adv": "#7A4E7E",
     "phrase": "#2F9C83",
-    "other": "#A9A69D",
+    "other": "#9A968C",
 }
 METRICS = [("lines", "Реплики"), ("words", "Слова"), ("seconds", "Время")]
 PERIODS = [("week", "Неделя"), ("month", "Месяц"), ("all", "Всё время")]
@@ -156,7 +154,7 @@ class WeekChart(QWidget):
                 path.quadTo(r.right(), r.top(), r.right(), r.top() + rad)
                 path.lineTo(r.right(), r.bottom())
                 path.closeSubpath()
-                p.fillPath(path, QColor(theme.GREEN if today else "#4FA788"))
+                p.fillPath(path, QColor(theme.GREEN if today else theme.BAR))  # зелёный только у сегодняшнего дня
             self._cols.append((QRectF(slot * i, top - 18, slot, base - top + 44), d))
             p.setFont(fb if today else f)
             p.setPen(QColor(theme.INK if today else theme.MUTED))
@@ -210,9 +208,9 @@ class ActivityMap(QWidget):
 
     def level_color(self, v: int, th: list[int]) -> str:
         if v <= 0:
-            return EMPTY
+            return theme.SUNKEN
         lvl = sum(1 for t in th if v > t)
-        return LEVELS[min(lvl, 3)]
+        return theme.HEAT[min(lvl, 3)]
 
     def paintEvent(self, _e: QPaintEvent) -> None:  # noqa: N802
         p = QPainter(self)
@@ -264,7 +262,7 @@ class ActivityMap(QWidget):
         more_w = p.fontMetrics().horizontalAdvance("больше")
         p.drawText(QRectF(right - more_w, y, more_w + 2, 16), int(Qt.AlignmentFlag.AlignVCenter), "больше")
         x = right - more_w - 6 - 5 * 14 + 3
-        for i, c in enumerate([EMPTY, *LEVELS]):
+        for i, c in enumerate([theme.SUNKEN, *theme.HEAT]):
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(QColor(c))
             p.drawRoundedRect(QRectF(x + i * 14, y + 2.5, 11, 11), 2.5, 2.5)
@@ -323,7 +321,7 @@ class HoursChart(QWidget):
             if v:
                 hgt = max(3.0, (base - top) * v / peak)
                 p.setPen(Qt.PenStyle.NoPen)
-                p.setBrush(QColor(theme.GREEN if hr in hot else "#B7DCCD"))
+                p.setBrush(QColor(theme.GREEN if hr in hot else theme.BAR))
                 p.drawRoundedRect(QRectF(cx - bar_w / 2, base - hgt, bar_w, hgt), 2, 2)
             self._cols.append((QRectF(slot * hr, top, slot, base - top + 20), hr))
             if hr % 6 == 0:
@@ -379,7 +377,7 @@ class PosBar(QWidget):
         clip = QPainterPath()
         clip.addRoundedRect(QRectF(0, 0, w, h), h / 2, h / 2)
         p.setClipPath(clip)
-        p.fillRect(QRectF(0, 0, w, h), QColor(EMPTY))
+        p.fillRect(QRectF(0, 0, w, h), QColor(theme.SUNKEN))
         x = 0.0
         for i, (key, _name, n) in enumerate(self.parts):
             seg = w * n / total if total else 0.0
@@ -467,7 +465,7 @@ class ProgressPage(QWidget):
         sl.addLayout(srow)
         lay.addWidget(self.study_box)
 
-        lay.addWidget(label("ЦЕЛЬ НА ДЕНЬ", "section"))
+        lay.addWidget(label("Цель на день", "section"))
         goal_box, gl = card_list()
         self.goal = QComboBox()
         current = int(getattr(ctl.settings, "daily_goal", 10))
@@ -487,7 +485,7 @@ class ProgressPage(QWidget):
         lay.addWidget(goal_box)
 
         self.metric_seg = Segments(METRICS, lambda _k: self._show_activity())
-        lay.addLayout(section("АКТИВНОСТЬ", self.metric_seg))
+        lay.addLayout(section("Активность", self.metric_seg))
         act_box, al = card()
         al.addWidget(label("Последние 7 дней", "title"))
         self.chart = WeekChart()
@@ -503,7 +501,7 @@ class ProgressPage(QWidget):
         al.addWidget(self.calendar)
         lay.addWidget(act_box)
 
-        lay.addLayout(section("КОГДА ТЫ ИГРАЕШЬ"))
+        lay.addLayout(section("Когда ты играешь"))
         hours_box, hl = card()
         self.hours = HoursChart()
         hl.addWidget(self.hours)
@@ -511,16 +509,16 @@ class ProgressPage(QWidget):
         hl.addWidget(self.hours_note)
         lay.addWidget(hours_box)
 
-        lay.addLayout(section("РЕКОРДЫ"))
+        lay.addLayout(section("Рекорды"))
         self.records_box, self.records_lay = card_list()
         lay.addWidget(self.records_box)
 
         self.period_seg = Segments(PERIODS, lambda _k: self._show_games())
-        lay.addLayout(section("ИГРЫ", self.period_seg))
+        lay.addLayout(section("Игры", self.period_seg))
         self.games_box, self.games_lay = card_list()
         lay.addWidget(self.games_box)
 
-        self.pos_title = section("ЧТО ТЫ СОХРАНЯЕШЬ")
+        self.pos_title = section("Что ты сохраняешь")
         self.pos_title.setContentsMargins(0, 0, 0, 0)
         self.pos_head = QWidget()
         self.pos_head.setLayout(self.pos_title)

@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (
 from lexoplay.recall import word_spans
 from lexoplay.store import Game, GameNotes, SavedWord, Store, StoredLine, fold
 from lexoplay.ui import theme
-from lexoplay.ui.explainbox import HIGHLIGHT, explain_box, row_tool
+from lexoplay.ui.explainbox import explain_box, row_tool
 from lexoplay.ui.theme import icon
 from lexoplay.ui.widgets import button, card, clear, fade_in, label, page_shell
 
@@ -150,7 +150,7 @@ def marked_html(text: str, bold: list[tuple[int, int]], query: str = "") -> str:
             j += 1
         chunk = html.escape(text[i:j])
         if m & 2:
-            chunk = f'<span style="background-color:{HIGHLIGHT}">{chunk}</span>'
+            chunk = f'<span style="background-color:{theme.MARK}">{chunk}</span>'
         if m & 1:
             chunk = f'<b style="color:{theme.GREEN_INK}">{chunk}</b>'
         out.append(chunk)

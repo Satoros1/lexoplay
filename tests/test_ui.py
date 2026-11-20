@@ -1316,3 +1316,94 @@ def test_page_overlay_covers_each_paragraph_and_peeks(qapp):
     assert not ov.page_visible
     ov.hide_strip()
     ov.close()
+
+
+def _contrast(a: str, b: str) -> float:
+    def lum(h: str) -> float:
+        r, g, bl = (int(h.lstrip("#")[i : i + 2], 16) / 255 for i in (0, 2, 4))
+        f = lambda c: c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4  # noqa: E731
+        return 0.2126 * f(r) + 0.7152 * f(g) + 0.0722 * f(bl)
+
+    hi, lo = sorted((lum(a), lum(b)), reverse=True)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def test_theme_palettes_readable():
+    """Светлая и тёмная палитры из одних ролей, текст на своих поверхностях читается (не ниже 4.5:1)."""
+    from lexoplay.ui import theme
+
+    assert set(theme.LIGHT) == set(theme.DARK)
+    pairs = [("INK", "CARD"), ("MUTED", "CARD"), ("MUTED", "BG"), ("MUTED", "SIDEBAR"), ("FAINT", "CARD"), ("FAINT", "SIDEBAR"),
+             ("ON_GREEN", "GREEN"), ("GREEN_INK", "GREEN_SOFT"), ("GREEN", "CARD"), ("DANGER", "CARD"), ("INFO", "CARD"),
+             ("TILE_INK", "TILE"), ("TIP_INK", "TIP_BG")]  # fmt: skip
+    for name, pal in theme.MODES.items():
+        for fg, bg in pairs:
+            assert _contrast(pal[fg], pal[bg]) >= 4.5, (name, fg, bg, round(_contrast(pal[fg], pal[bg]), 2))
+    # тёмная тема окна и плашки поверх игры одного зелёного
+    assert theme.DARK["GREEN"].lower() == theme.ACCENT.name().lower()
+
+
+def test_dark_window_and_theme_switch(qapp, tmp_path, monkeypatch):
+    """Окно собирается в тёмной теме целиком из её цветов; переключатель в «Вид» просит контроллер сменить тему."""
+    monkeypatch.setenv("LEXOPLAY_HOME", str(tmp_path))
+    from lexoplay.config import Settings
+    from lexoplay.store import Game, Store
+    from lexoplay.ui import theme
+    from lexoplay.ui.main_window import MainWindow
+
+    assert Settings().ui_theme == "light"
+    store = Store(tmp_path / "local.db")
+    store.save_game(Game("dr1_us.exe", "Danganronpa", region=Rect(0.05, 0.7, 0.9, 0.25)))
+    ctl = FakeCtl(store, Settings())
+    asked: list[str] = []
+    ctl.set_theme = asked.append
+    try:
+        assert theme.set_mode("dark") == "dark" and theme.is_dark()
+        css = theme.stylesheet()
+        assert theme.DARK["CARD"] in css and theme.LIGHT["BG"] not in css and theme.LIGHT["GREEN"] not in css
+        assert "letter-spacing: 1px" not in css and "font-weight: 700" not in css and "font-weight: 800" not in css
+        w = MainWindow(ctl)
+        w.resize(1000, 700)
+        w.show()
+        for key in ("games", "progress", "words", "history", "lexo", "keys", "more", "view"):
+            w.show_page(key)
+            qapp.processEvents()
+        assert w.current_page() == "view"
+        img = w.grab().toImage()
+        assert img.pixelColor(img.width() - 30, img.height() - 30).lightness() < 60  # страница тёмная
+        assert img.pixelColor(20, img.height() // 2).lightness() < 60  # и боковая панель
+        assert w.view.theme_seg.value == "dark"
+        w.view.theme_seg.buttons["light"].click()
+        QTest.qWait(30)
+        assert asked == ["light"]
+        w.hide()
+        w.deleteLater()
+        qapp.processEvents()
+    finally:
+        theme.set_mode("light")
+        store.close()
+    assert theme.set_mode("что-то") == "light"  # неизвестное значение из настроек не ломает запуск
+
+
+def test_game_card_one_column_and_no_caps(window, qapp):
+    """Карточка игры: обе выпадашки одной ширины, под названием; подписи разделов без капса; квадратик нейтральный."""
+    from PySide6.QtWidgets import QComboBox, QLabel
+
+    from lexoplay.ui import theme
+    from lexoplay.ui.widgets import tile_color
+
+    w, ctl = window
+    ctl.linked = True
+    w.resize(1000, 700)
+    w.show()
+    w.show_page("games")
+    w.games.refresh()
+    qapp.processEvents()
+    combos = [c for c in w.games.findChildren(QComboBox) if c.isVisible()]
+    assert len(combos) >= 2
+    assert len({c.width() for c in combos}) == 1 and len({c.x() for c in combos}) == 1
+    for page in (w.games, w.lexo, w.view, w.more, w.progress):
+        for lbl in page.findChildren(QLabel):
+            if lbl.objectName() == "section" and len(lbl.text()) > 3:
+                assert lbl.text() != lbl.text().upper(), lbl.text()
+    assert tile_color("a") == tile_color("b") and tile_color("a").name().lower() == theme.TILE.lower()

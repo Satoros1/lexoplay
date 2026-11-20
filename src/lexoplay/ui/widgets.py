@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 
 from PySide6.QtCore import (
     QAbstractAnimation,
@@ -57,7 +56,7 @@ def button(text: str, kind: str | None = None, icon_name: str | None = None) -> 
     if kind:
         b.setObjectName(kind)
     if icon_name:
-        b.setIcon(icon(icon_name, "#FFFFFF" if kind == "primary" else theme.INK, 16))
+        b.setIcon(icon(icon_name, theme.ON_GREEN if kind == "primary" else theme.INK, 16))
         b.setIconSize(QSize(16, 16))
     b.setCursor(Qt.CursorShape.PointingHandCursor)
     return b
@@ -80,10 +79,9 @@ def clear(layout) -> None:  # type: ignore[no-untyped-def]
             clear(item.layout())
 
 
-def tile_color(seed: str) -> QColor:
-    palette = ["#59506F", "#3D5A80", "#8A5A44", "#2F6F62", "#7A4E7E", "#4B6584", "#806A2F"]
-    h = int(hashlib.md5(seed.encode()).hexdigest(), 16)
-    return QColor(palette[h % len(palette)])
+def tile_color(seed: str) -> QColor:  # noqa: ARG001
+    """Квадратик игры нейтральный: цвет в окне несут только акцент и содержимое."""
+    return QColor(theme.TILE)
 
 
 class Tile(QWidget):
@@ -99,10 +97,10 @@ class Tile(QWidget):
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(tile_color(self._seed))
-        p.drawRoundedRect(QRectF(self.rect()), 10, 10)
-        f = theme.ui_font(14, QFont.Weight.Bold)
+        p.drawRoundedRect(QRectF(self.rect()), 8, 8)
+        f = theme.ui_font(13 if self.width() >= 40 else 11.5, QFont.Weight.DemiBold)
         p.setFont(f)
-        p.setPen(QColor("#FFFFFF"))
+        p.setPen(QColor(theme.TILE_INK))
         letter = next((c for c in self._title if c.isalnum()), "?").upper()
         p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, letter)
         p.end()
@@ -376,12 +374,14 @@ def page_shell(title: str, subtitle: str) -> tuple[QScrollArea, QVBoxLayout, QHB
     inner = QWidget()
     inner.setObjectName("page")
     lay = QVBoxLayout(inner)
-    lay.setContentsMargins(32, 28, 32, 28)
+    lay.setContentsMargins(32, 28, 32, 56)  # снизу место под круглую кнопку «наверх»: она не ложится на последнюю строку
     lay.setSpacing(16)
     head = QHBoxLayout()
     col = QVBoxLayout()
     col.setSpacing(2)
     col.addWidget(label(title, "h1"))
+    if subtitle.endswith(".") and ". " not in subtitle and not subtitle.endswith(".."):
+        subtitle = subtitle[:-1]  # подпись из одной фразы без точки, как заголовок
     col.addWidget(label(subtitle, "muted", wrap=True))
     head.addLayout(col, 1)
     actions = QHBoxLayout()
@@ -432,7 +432,7 @@ class Toggle(QCheckBox):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         r = QRectF(0.5, 0.5, self.W - 1, self.H - 1)
-        off, on = QColor("#D6D2C8"), QColor(theme.GREEN)
+        off, on = QColor(theme.SWITCH_OFF), QColor(theme.GREEN)
         t = self._pos
         track = QColor(
             round(off.red() + (on.red() - off.red()) * t),
@@ -448,7 +448,7 @@ class Toggle(QCheckBox):
         x = 3 + (self.W - 6 - knob) * t
         p.setBrush(QColor(0, 0, 0, 28))
         p.drawEllipse(QRectF(x, 4, knob, knob))  # мягкая тень
-        p.setBrush(QColor("#FFFFFF"))
+        p.setBrush(QColor(theme.ON_GREEN if theme.is_dark() and t > 0.5 else theme.KNOB))
         p.drawEllipse(QRectF(x, 3, knob, knob))
         p.end()
 
@@ -462,7 +462,7 @@ def setting_row(title: str, desc: str, control: QWidget, *, last: bool = False) 
     lay.setSpacing(16)
     col = QVBoxLayout()
     col.setSpacing(2)
-    col.addWidget(label(title, "title"))
+    col.addWidget(label(title, "rowTitle"))
     if desc:
         col.addWidget(label(desc, "muted", wrap=True))
     lay.addLayout(col, 1)

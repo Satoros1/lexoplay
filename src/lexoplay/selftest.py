@@ -553,6 +553,27 @@ def _app_flow(out_dir: Path) -> Callable[[], tuple[str, object]]:
             if app.window is not None:
                 app.window.grab().save(str(out_dir / "window-real-app.png"))
                 info["window_ok"] = app.window.isVisible()
+                # тема окна: окно собирается заново на той же вкладке и остаётся на экране
+                from lexoplay.ui import theme as ui_theme
+
+                before = app.window
+                app.window.show_page("view")
+                app.set_theme("dark")
+                for _ in range(10):
+                    app_q.processEvents()
+                shot = app.window.grab().toImage()
+                shot.save(str(out_dir / "window-real-app-dark.png"))
+                info["theme_dark"] = {
+                    "rebuilt": app.window is not before,
+                    "visible": app.window.isVisible(),
+                    "page": app.window.current_page(),
+                    "dark": shot.pixelColor(shot.width() - 30, shot.height() - 30).lightness() < 60,
+                    "saved": app.settings.ui_theme,
+                }
+                app.set_theme("light")
+                for _ in range(5):
+                    app_q.processEvents()
+                info["theme_back"] = ui_theme.MODE == "light" and app.window.current_page() == "view"
                 app.window.hide()
         finally:
             app.shutdown()
@@ -582,6 +603,10 @@ def _app_flow(out_dir: Path) -> Callable[[], tuple[str, object]]:
             and card.get("idempotency_key")
             and end is not None
             and end[1] == f"/desktop/sessions/{session.id}/end"
+            and all((info.get("theme_dark") or {"": False}).values())
+            and (info.get("theme_dark") or {}).get("saved") == "dark"
+            and (info.get("theme_dark") or {}).get("page") == "view"
+            and info.get("theme_back")
         )
         return ("ok" if ok else "fail"), info
 
@@ -1822,6 +1847,23 @@ def _qt_checks(out_dir: Path) -> None:
             w.grab().save(str(out_dir / name))
             saved.append(name)
         w.hide()
+        theme.set_mode("dark")  # те же страницы в тёмной теме: шрифт и стиль Windows свои, смотрим глазами
+        theme.apply_palette(app)
+        try:
+            wd = MainWindow(Ctl())
+            wd.resize(1000, 700)
+            wd.show()
+            for key in ("games", "words", "progress", "view", "more"):
+                wd.show_page(key)
+                for _ in range(5):
+                    app.processEvents()
+                name = f"window-dark-{key}.png"
+                wd.grab().save(str(out_dir / name))
+                saved.append(name)
+            wd.hide()
+        finally:
+            theme.set_mode("light")
+            theme.apply_palette(app)
         store.close()
         return ("ok" if family.startswith("Segoe UI") else "warn"), {"font": family, "display": theme.DISPLAY_FAMILY, "pages": saved}
 

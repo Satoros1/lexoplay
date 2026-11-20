@@ -314,8 +314,10 @@ class RegionPicker(QWidget):
         inner = w - 40
         body_h = QFontMetricsF(body).boundingRect(QRectF(0, 0, inner, 1000), flags, text).height()
         box = QRectF((self.width() - w) / 2, 24, w, 14 + 26 + 8 + body_h + 16)
-        p.setPen(QColor("#3A3D45"))
-        p.setBrush(QColor(18, 21, 27, 240))
+        p.setPen(QColor("#3D3A36"))
+        bg = QColor(STRIP_BG)
+        bg.setAlpha(240)
+        p.setBrush(bg)
         p.drawRoundedRect(box, 12, 12)
         p.setFont(title)
         p.setPen(QColor("#FFFFFF"))

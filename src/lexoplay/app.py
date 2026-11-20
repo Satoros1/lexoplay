@@ -112,6 +112,7 @@ from lexoplay.ui.freeze_frame import FreezeFrame
 from lexoplay.ui.main_window import AccountStatus, MainWindow, UpdateState
 from lexoplay.ui.overlay import HintView, Overlay, PageView
 from lexoplay.ui.region_picker import RegionPicker
+from lexoplay.ui import theme as ui_theme
 from lexoplay.ui.theme import app_icon
 from lexoplay.ui.word_layer import WordLayer
 from lexoplay.usage import OwnUsage
@@ -290,6 +291,8 @@ class App(QObject):
         self.just_updated = updated
         self.qapp = qapp
         self.settings = settings
+        ui_theme.set_mode(settings.ui_theme)  # до первого окна: готовые виджеты сами не перекрасятся
+        ui_theme.apply_palette(qapp)
         self.store = store
         self.bg = bg
         self.bridge = Bridge()
@@ -645,6 +648,31 @@ class App(QObject):
         t0 = time.perf_counter()
         self.window = MainWindow(self)
         log.debug("окно LexoPlay собрано заранее за %.0f мс", (time.perf_counter() - t0) * 1000)
+
+    def set_theme(self, mode: str) -> None:
+        """Тема окна. Палитра меняется сразу, а само окно собирается заново: на той же вкладке,
+        того же размера и на том же месте. Новое показываем раньше, чем прячем старое, без мигания."""
+        if mode not in ui_theme.MODES or mode == self.settings.ui_theme:
+            return
+        self.settings.ui_theme = mode
+        self.settings.save()
+        ui_theme.set_mode(mode)
+        ui_theme.apply_palette(self.qapp)
+        old = self.window
+        if old is None:
+            return
+        old.keys.cancel_capture()
+        fresh = MainWindow(self)
+        fresh.setGeometry(old.geometry())
+        fresh.show_page(old.current_page())
+        self.window = fresh
+        if old.isVisible():
+            fresh.show()
+            fresh.raise_()
+            fresh.activateWindow()
+        old.hide()
+        old.deleteLater()
+        log.info("тема окна: %s", mode)
 
     def show_window(self, page: str | None = None) -> None:
         if self.window is None:

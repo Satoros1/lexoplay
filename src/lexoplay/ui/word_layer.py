@@ -41,7 +41,7 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import QWidget
 
 from lexoplay.geometry import Rect, denormalize, font_px_for, game_text_damp
-from lexoplay.ui.theme import ACCENT, FONT_FAMILY, KNOWN, NAME, RARE, STRIP_BG, TEXT, TEXT_MUTED
+from lexoplay.ui.theme import ACCENT, FONT_FAMILY, KNOWN, NAME, RARE, STRIP_BG, TEXT, TEXT_MUTED, corner
 from lexoplay.wordmode import (
     CardState,
     ExplainState,
@@ -58,7 +58,7 @@ log = logging.getLogger(__name__)
 
 Placer = Callable[[QWidget, Rect], None]
 
-TRANSLATION = QColor("#C3CBD8")
+TRANSLATION = QColor("#D2CBBE")  # тёплый, в тон плашкам
 FIT_STEPS = (1.0, 0.9, 0.8, 0.72)  # во сколько раз мельче карточка, если иначе закрыла бы реплику
 IDLE_MS = 30_000
 PICK_MS = 350  # стрелками: значение слова запрашиваем, когда выбор остановился
@@ -761,7 +761,7 @@ class WordLayer(QWidget):
         bg.setAlphaF(0.96)
         p.setPen(QPen(QColor(255, 255, 255, 40), 1))
         p.setBrush(bg)
-        p.drawRoundedRect(box, h / 2, h / 2)
+        p.drawRoundedRect(box, corner(h), corner(h))
         p.setFont(f)
         p.setPen(TEXT)
         p.drawText(box, int(Qt.AlignmentFlag.AlignCenter), self._notice)
@@ -1022,11 +1022,11 @@ class WordLayer(QWidget):
                 self._retranslate_btn = rect
             bg = QColor(STRIP_BG)
             bg.setAlphaF(0.92)
-            p.setPen(QPen(QColor(NAME) if key == "explain" else QColor(ACCENT), 1.2))
+            p.setPen(QPen(QColor(255, 255, 255, 70) if key == "explain" else QColor(ACCENT), 1.2))
             p.setBrush(bg)
-            p.drawRoundedRect(rect, h / 2, h / 2)
+            p.drawRoundedRect(rect, corner(h), corner(h))
             p.setFont(f)
-            p.setPen(QColor("#D9D4FF") if key == "explain" else QColor("#BDEBDD") if not busy else TEXT_MUTED)
+            p.setPen(TEXT if not busy else TEXT_MUTED)
             p.drawText(rect, int(Qt.AlignmentFlag.AlignCenter), text)
             x += w + px * 0.5
 
@@ -1040,7 +1040,7 @@ class WordLayer(QWidget):
         bg.setAlphaF(0.92)
         p.setPen(QPen(QColor(255, 255, 255, 70), 1.2))
         p.setBrush(bg)
-        p.drawRoundedRect(rect, h / 2, h / 2)
+        p.drawRoundedRect(rect, corner(h), corner(h))
         minus = QRectF(rect.x(), rect.y(), h, h)
         plus = QRectF(rect.right() - h, rect.y(), h, h)
         on = QColor(255, 255, 255, 30)
@@ -1094,7 +1094,7 @@ class WordLayer(QWidget):
         bg.setAlphaF(0.88)
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(bg)
-        p.drawRoundedRect(rect, h / 2, h / 2)
+        p.drawRoundedRect(rect, corner(h), corner(h))
         p.setFont(f)
         p.setPen(QColor("#F2C94C") if self.cursor_locked or self.focus_warning else TEXT_MUTED)
         mid = int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
@@ -1332,14 +1332,14 @@ class WordLayer(QWidget):
                 fill.setAlphaF(0.12)
                 p.setPen(QPen(edge, 1.4))
                 p.setBrush(fill)
-                p.drawRoundedRect(btn.adjusted(0.7, 0.7, -0.7, -0.7), btn_h / 2, btn_h / 2)
+                p.drawRoundedRect(btn.adjusted(0.7, 0.7, -0.7, -0.7), corner(btn_h), corner(btn_h))
                 if self._dwell_on == ("alt", 0):  # курсор держат на кнопке: заполняется до сохранения
                     k = min(1.0, (time.monotonic() - self._dwell_t0) * 1000 / HOVER_ADD_MS)
                     p.save()
                     p.setClipRect(QRectF(btn.x(), btn.y(), btn.width() * k, btn.height()))
                     p.setPen(Qt.PenStyle.NoPen)
                     p.setBrush(QColor(63, 193, 165, 90))
-                    p.drawRoundedRect(btn, btn_h / 2, btn_h / 2)
+                    p.drawRoundedRect(btn, corner(btn_h), corner(btn_h))
                     p.restore()
                 p.setFont(f_btn)
                 p.setPen(edge)
@@ -1355,13 +1355,13 @@ class WordLayer(QWidget):
                     fill.setAlphaF(0.35)
                 p.setPen(Qt.PenStyle.NoPen)
                 p.setBrush(fill)
-                p.drawRoundedRect(btn, btn_h / 2, btn_h / 2)
+                p.drawRoundedRect(btn, corner(btn_h), corner(btn_h))
                 if self._dwell_on == ("add", 0):  # курсор держат на кнопке: заполняется до сохранения
                     k = min(1.0, (time.monotonic() - self._dwell_t0) * 1000 / HOVER_ADD_MS)
                     p.save()
                     p.setClipRect(QRectF(btn.x(), btn.y(), btn.width() * k, btn.height()))
                     p.setBrush(QColor(255, 255, 255, 90))
-                    p.drawRoundedRect(btn, btn_h / 2, btn_h / 2)
+                    p.drawRoundedRect(btn, corner(btn_h), corner(btn_h))
                     p.restore()
                 p.setFont(f_btn)
                 p.setPen(QColor("#06261F"))

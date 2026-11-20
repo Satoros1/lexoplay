@@ -20,7 +20,7 @@ from PySide6.QtWidgets import QWidget
 
 from lexoplay.geometry import Rect, denormalize, font_px_for, game_text_damp, place_strip
 from lexoplay.recall import RecallChip
-from lexoplay.ui.theme import ACCENT, FONT_FAMILY, KNOWN, STRIP_BG, TEXT, TEXT_MUTED
+from lexoplay.ui.theme import ACCENT, FONT_FAMILY, KNOWN, STRIP_BG, TEXT, TEXT_MUTED, corner
 
 Placer = Callable[[QWidget, Rect], None]
 
@@ -760,6 +760,7 @@ class Overlay(QWidget):
         p.setBrush(fill)
         r = min(6.0, key_h * 0.3)
         p.drawRoundedRect(key.adjusted(0.5, 0.5, -0.5, -0.5), r, r)
+        p.drawLine(QPointF(key.left() + r, key.bottom() - 1.5), QPointF(key.right() - r, key.bottom() - 1.5))  # нижняя грань, как у клавиш в окне
         p.setBrush(Qt.BrushStyle.NoBrush)
         p.setFont(key_font)
         p.setPen(TEXT)
@@ -860,7 +861,7 @@ class Overlay(QWidget):
         radius = min(12.0, box.height() / 2)
         if strip.hidden:  # учёба: скругление как у подсказок внутри плюс отступ, углы идут параллельно
             first = recall.chips[0].rect if recall is not None and recall.chips else None
-            radius = box.height() / 2 if first is None else min(box.height() / 2, first.height() / 2 + first.y() - box.y())
+            radius = corner(box.height()) if first is None else min(box.height() / 2, corner(first.height()) + first.y() - box.y())
         p.drawRoundedRect(box, radius, radius)
         p.setClipRect(box)  # пока плашка растёт, новая строка проявляется вместе с ней
         if strip.hidden:
@@ -907,7 +908,7 @@ class Overlay(QWidget):
             line.setAlphaF(0.5)
             p.setPen(QPen(line, 1.0))
             p.setBrush(fill)
-            p.drawRoundedRect(r.adjusted(0.5, 0.5, -0.5, -0.5), r.height() / 2, r.height() / 2)
+            p.drawRoundedRect(r.adjusted(0.5, 0.5, -0.5, -0.5), corner(r.height()), corner(r.height()))
             size = row.font.pixelSize()
             pad = size * 0.7
             x = r.x() + pad
@@ -932,7 +933,7 @@ class Overlay(QWidget):
                 p.setFont(row.font)
             elif c.translation:
                 part = " · " + c.translation
-                p.setPen(QColor("#ECE9E0"))
+                p.setPen(TEXT)
                 p.drawText(QRectF(x, r.y(), max(0.0, r.right() - x), r.height()), left, part)
                 x += fm.horizontalAdvance(part)
             if c.count:
@@ -1038,11 +1039,11 @@ class Overlay(QWidget):
         bg.setAlphaF(0.88)
         p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(bg)
-        p.drawRoundedRect(box, min(hh / 2, 16.0), min(hh / 2, 16.0))
+        p.drawRoundedRect(box, corner(hh), corner(hh))
         p.setBrush(ACCENT)
         p.drawEllipse(QRectF(box.x() + pad_x, box.y() + pad_y + fm.ascent() / 2 - dot / 4, dot, dot))
         p.setFont(font)
-        p.setPen(QColor("#D3D1C7"))
+        p.setPen(TEXT)
         p.drawText(
             QRectF(box.x() + pad_x + dot * 1.6, box.y() + pad_y, br.width() + 1, br.height()),
             int(Qt.TextFlag.TextWordWrap),

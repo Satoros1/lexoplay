@@ -26,7 +26,6 @@ from lexoplay.recap import BLANK, Question, Rare
 from lexoplay.ui import theme
 from lexoplay.ui.widgets import button, label
 
-WRONG = "#A8452E"
 WORDS = ("слово", "слова", "слов")
 
 
@@ -40,7 +39,7 @@ def _filled_html(q: Question, color: str) -> str:
     word = html.escape(q.sentence[q.start : q.end])
     return (
         f"{html.escape(q.sentence[: q.start])}"
-        f'<span style="color:{color}; font-weight:700;">{word}</span>'
+        f'<span style="color:{color}; font-weight:600;">{word}</span>'
         f"{html.escape(q.sentence[q.end :])}"
     )
 
@@ -149,8 +148,8 @@ class RecapDialog(QDialog):
             if q.options[i] == q.answer:
                 b.setStyleSheet(f"{base} background: {theme.GREEN_SOFT}; border-color: {theme.GREEN}; color: {theme.GREEN_INK};")
             elif i == n:
-                b.setStyleSheet(f"{base} border-color: {WRONG}; color: {WRONG};")
-        self.sentence.setText(_filled_html(q, theme.GREEN if correct else WRONG))
+                b.setStyleSheet(f"{base} border-color: {theme.DANGER}; color: {theme.DANGER};")
+        self.sentence.setText(_filled_html(q, theme.GREEN if correct else theme.DANGER))
         self.meaning.setText(f"{q.answer} · {q.meaning}")
         self.meaning.show()
         self.translation.setText(q.translation)

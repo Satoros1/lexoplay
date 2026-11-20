@@ -91,6 +91,7 @@ class Settings:
     source_lang: str = "en"
     magpie_mode: str = "auto"  # auto | always | never
     font_scale: float = 1.0
+    ui_theme: str = "light"  # light | dark: тема окна LexoPlay
     strip_opacity: float = 0.84
     context_lines: int = 12  # сколько прошлых реплик видит модель: имена, пол, «ты/вы»
     debug: bool = False

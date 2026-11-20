@@ -46,7 +46,7 @@ from lexoplay.timeline import (
 )
 from lexoplay.translate import tidy_saved
 from lexoplay.ui import theme
-from lexoplay.ui.explainbox import HIGHLIGHT, explain_box, row_tool
+from lexoplay.ui.explainbox import explain_box, row_tool
 from lexoplay.ui.pages import copy_text
 from lexoplay.ui.theme import icon
 from lexoplay.ui.widgets import Tile, button, clear, fade_in, label, page_shell
@@ -58,7 +58,6 @@ ROWS_STEP = 3
 SCROLL_AFTER_MS = 180  # раскрытая сессия к этому времени достроена: можно докрутить к ней
 LINES_PAGE = 40  # и сколько добавляет «Показать раньше»
 AUTO_OPEN = 3  # при поиске сразу раскрываем столько сессий с совпадениями
-STAR = "#D99A1E"
 
 
 def rich(text: str, query: str = "") -> str:
@@ -70,7 +69,7 @@ def rich(text: str, query: str = "") -> str:
     out, i = [], 0
     while (j := low.find(q, i)) >= 0:
         out.append(html.escape(text[i:j]))
-        out.append(f'<span style="background-color:{HIGHLIGHT}">{html.escape(text[j : j + len(q)])}</span>')
+        out.append(f'<span style="background-color:{theme.MARK}">{html.escape(text[j : j + len(q)])}</span>')
         i = j + len(q)
     out.append(html.escape(text[i:]))
     return "".join(out).replace("\n", "<br>")
@@ -302,8 +301,8 @@ class SessionCard(QFrame):
                 "star",
                 "Убрать из избранного" if starred else "В избранное",
                 lambda: self.page.star_line(line, not starred),
-                STAR if starred else theme.MUTED,
-                STAR if starred else "none",
+                theme.STAR if starred else theme.MUTED,
+                theme.STAR if starred else "none",
             )
         )
         if page.can_explain:
@@ -330,7 +329,7 @@ class SessionCard(QFrame):
             lay.addWidget(label("Перевожу заново…", "muted"))
         else:
             lang = getattr(getattr(page.ctl, "settings", None), "target_lang", "ru")
-            lay.addWidget(text_label(tidy_saved(line.translation, line.speaker, target_lang=lang), "title", query))
+            lay.addWidget(text_label(tidy_saved(line.translation, line.speaker, target_lang=lang), "rowTitle", query))
         note = page.notes.get(line.id)
         if note:
             lay.addWidget(label(note[1], "ok" if note[0] else "error", wrap=True))
@@ -416,7 +415,7 @@ class HistoryPage(QWidget):
         self.star_btn = QPushButton(" Избранное")
         self.star_btn.setObjectName("filterChip")
         self.star_btn.setCheckable(True)
-        self.star_btn.setIcon(icon("star", STAR, 16, fill=STAR))
+        self.star_btn.setIcon(icon("star", theme.STAR, 16, fill=theme.STAR))
         self.star_btn.setIconSize(QSize(16, 16))
         self.star_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.star_btn.setToolTip("Только реплики со звёздочкой")
@@ -521,7 +520,7 @@ class HistoryPage(QWidget):
         for i, s in enumerate(sessions[: self.shown]):
             if s.day != prev_day:
                 prev_day = s.day
-                head = label(day_title(s.day, today).upper(), "section")
+                head = label(day_title(s.day, today), "section")
                 head.setContentsMargins(2, 6 if i else 0, 0, 0)
                 self.list_lay.addWidget(head)
             opened = s.key in self.opened or (auto_open and i < open_first)

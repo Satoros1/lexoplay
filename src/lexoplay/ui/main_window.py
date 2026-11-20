@@ -7,6 +7,8 @@ LexoPlay продолжает работать, пока его не закро�
 
 from __future__ import annotations
 
+import html
+
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Protocol
@@ -62,7 +64,7 @@ from lexoplay.ui.history_page import HistoryPage
 from lexoplay.ui.hotkey_edit import HotkeyEdit
 from lexoplay.ui.novel_dialog import NovelDialog, card_text, novel_view
 from lexoplay.ui.pages import GameNotesDialog, GlossaryDialog, WordsPage
-from lexoplay.ui.progress_page import ProgressPage
+from lexoplay.ui.progress_page import ProgressPage, Segments
 from lexoplay.ui.theme import app_icon, draw_logo, icon
 
 RELEASES_URL = "https://github.com/Satoros1/lexoplay/releases/latest"
@@ -125,6 +127,7 @@ class Controller(Protocol):
     def make_report(self) -> str | None: ...
     def open_logs(self) -> None: ...
     def window_hidden(self) -> None: ...
+    def set_theme(self, mode: str) -> None: ...
     def usage_summary(self) -> str: ...
     def check_key(self, key: str, done: Callable[[str | None], None]) -> None: ...
     def history(self, exe: str | None = None, query: str = "", limit: int = 100, offset: int = 0) -> list[StoredLine]: ...
@@ -182,7 +185,7 @@ class GamesPage(QWidget):
     def __init__(self, ctl: Controller, decks: DeckState) -> None:
         super().__init__()
         self.ctl, self.decks = ctl, decks
-        scroll, lay, actions = page_shell("Игры", "Перевод и слова работают в играх из этого списка.")
+        scroll, lay, actions = page_shell("Игры", "Перевод и слова работают в играх из этого списка")
         add = button(" Добавить игру", "primary", "plus")
         add.clicked.connect(self.add_game)
         actions.addWidget(add)
@@ -201,11 +204,11 @@ class GamesPage(QWidget):
         lay.addWidget(self.banner)
 
         self.list = QVBoxLayout()
-        self.list.setSpacing(10)
+        self.list.setSpacing(12)
         lay.addLayout(self.list)
 
         lay.addSpacing(6)
-        lay.addWidget(label("КАК ПОЛЬЗОВАТЬСЯ", "section"))
+        lay.addWidget(label("Как пользоваться", "section"))
         self.howto, self.howto_lay = card()
         lay.addWidget(self.howto)
         lay.addStretch(1)
@@ -270,30 +273,43 @@ class GamesPage(QWidget):
             )
         )
 
+    FIELD_W = 264  # обе выпадашки карточки одной ширины и в одну колонку
+
     def _game_card(self, g: Game, active: bool, linked: bool) -> QFrame:
+        """Карточка игры: шапка (квадратик, название, состояние, действия), под ней то, что LexoPlay
+        сейчас видит в игре, и две настройки в одну колонку. Всё ниже шапки выровнено по названию."""
         frame = QFrame()
         frame.setObjectName("cardActive" if active else "card")
-        row = QHBoxLayout(frame)
-        row.setContentsMargins(16, 14, 16, 14)
-        row.setSpacing(14)
-        row.addWidget(Tile(g.title, g.exe))
+        outer = QVBoxLayout(frame)
+        outer.setContentsMargins(16, 16, 16, 16)
+        outer.setSpacing(12)
+        row = QHBoxLayout()
+        row.setSpacing(12)
+        row.addWidget(Tile(g.title, g.exe, 40), 0, Qt.AlignmentFlag.AlignTop)
         col = QVBoxLayout()
-        col.setSpacing(3)
-        top = QHBoxLayout()
-        top.setSpacing(8)
+        col.setSpacing(2)
         name = label(g.title, "title", wrap=True)  # длинное название переносится, а не растягивает окно
         name.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        top.addWidget(name, 1)
-        if active:
-            top.addWidget(label("сейчас в игре", "chip"), 0, Qt.AlignmentFlag.AlignTop)
-        col.addLayout(top)
+        col.addWidget(name)
+        live = f'<span style="color:{theme.GREEN}">●</span>&nbsp;Сейчас в игре · ' if active else ""
         if g.region is not None:
             what = "область текста выделена" if g.page else "окно диалога выделено"
-            state = label(f"{g.exe} · {what}", "muted")
+            state = label(f"{live}{html.escape(g.exe)} · {what}", "muted")
         else:
-            state = label(f"{g.exe} · окно диалога ещё не выделено: открой игру и нажми {self.ctl.settings.hotkeys.translate}", "warn")
+            state = label(
+                f"{live}{html.escape(g.exe)} · окно диалога ещё не выделено: открой игру и нажми "
+                f"{self.ctl.settings.hotkeys.translate}",
+                "warn",
+            )
+        state.setTextFormat(Qt.TextFormat.RichText)
         state.setWordWrap(True)
         col.addWidget(state)
+        row.addLayout(col, 1)
+        outer.addLayout(row)
+
+        body = QVBoxLayout()
+        body.setContentsMargins(52, 0, 0, 0)  # квадратик 40 + отступ 12: по линии названия
+        body.setSpacing(12)
         if g.region is not None and g.name_region is None and self._names_missing(g.exe):
             tip = label(
                 "Совет: имя говорящего почти не читается. Если в игре оно в отдельной рамке, нажми «Выделить окно "
@@ -301,39 +317,40 @@ class GamesPage(QWidget):
                 "version",
                 wrap=True,
             )
-            col.addWidget(tip)
+            body.addWidget(tip)
         read = self.ctl.get_last_read(g.exe) if g.region is not None else None
         if read is not None:
-            col.addLayout(self._last_read(read))
-        mode_row = QHBoxLayout()
-        mode_row.setSpacing(8)
-        mode_row.addWidget(label("Текст в игре", "muted"))
-        mode_row.addWidget(self._mode_combo(g), 0)
-        mode_row.addStretch(1)
-        col.addLayout(mode_row)
+            body.addWidget(self._last_read(read))
+        form = QGridLayout()
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(8)
+        form.setColumnStretch(2, 1)
+        line = 0
+        mode = self._mode_combo(g)
+        mode.setFixedWidth(self.FIELD_W)
+        form.addWidget(label("Текст в игре", "muted"), line, 0)
+        form.addWidget(mode, line, 1)
+        line += 1
+        if linked:
+            deck = self._deck_combo(g)
+            deck.setFixedWidth(self.FIELD_W)
+            form.addWidget(label("Слова в колоду", "muted"), line, 0)
+            form.addWidget(deck, line, 1)
+            line += 1
         view = novel_view(self.ctl, g.exe)
         if view is not None:
-            novel_row = QHBoxLayout()
-            novel_row.setSpacing(8)
             words = QPushButton("Слова новеллы…")
             words.setObjectName("novelButton")
             words.setToolTip("Сложные слова и выражения новеллы: отметь знакомые, остальные лягут в колоду на паузу")
             words.clicked.connect(lambda: self._novel(g))
-            novel_row.addWidget(words, 0)
+            words.setFixedWidth(self.FIELD_W)
+            form.addWidget(label("Новелла", "muted"), line, 0)
+            form.addWidget(words, line, 1)
             text, style = card_text(view)
             if text:
-                novel_row.addWidget(label(text, style, wrap=True), 1)
-            else:
-                novel_row.addStretch(1)
-            col.addLayout(novel_row)
-        if linked:
-            deck_row = QHBoxLayout()
-            deck_row.setSpacing(8)
-            deck_row.addWidget(label("Слова в колоду", "muted"))
-            deck_row.addWidget(self._deck_combo(g), 0)
-            deck_row.addStretch(1)
-            col.addLayout(deck_row)
-        row.addLayout(col, 1)
+                form.addWidget(label(text, style, wrap=True), line, 2)
+        body.addLayout(form)
+        outer.addLayout(body)
 
         pick = button(" Выделить окно диалога", None, "scan")
         pick.setToolTip("Откроет игру и даст заново обвести окно диалога")
@@ -372,29 +389,33 @@ class GamesPage(QWidget):
             return False
         return total >= 15 and named <= total * 0.1
 
-    def _last_read(self, read) -> QHBoxLayout:  # type: ignore[no-untyped-def]
-        """Что LexoPlay последний раз прочитал в окне диалога: сразу видно, туда ли выделено."""
-        row = QHBoxLayout()
-        row.setSpacing(10)
+    def _last_read(self, read) -> QFrame:  # type: ignore[no-untyped-def]
+        """Что LexoPlay последний раз прочитал в окне диалога: сразу видно, туда ли выделено.
+        Единственное «живое» место карточки: кадр из игры и реплика, остальное вокруг тихое."""
+        box = QFrame()
+        box.setObjectName("inset")
+        row = QHBoxLayout(box)
+        row.setContentsMargins(12, 12, 12, 12)
+        row.setSpacing(12)
         img = read.image.convert("RGB")
         qimg = QImage(img.tobytes("raw", "RGB"), img.width, img.height, img.width * 3, QImage.Format.Format_RGB888).copy()
         pix = QPixmap.fromImage(qimg).scaled(
-            150, 46, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
+            152, 44, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
         )
         shot = QLabel()
         shot.setObjectName("preview")
         shot.setPixmap(pix)
         shot.setToolTip("Последний кадр окна диалога")
-        row.addWidget(shot, 0, Qt.AlignmentFlag.AlignTop)
+        row.addWidget(shot, 0, Qt.AlignmentFlag.AlignVCenter)
         text = read.text.strip() or "текста не нашлось"
         if len(text) > 140:
             text = text[:140].rstrip() + "…"
         col = QVBoxLayout()
-        col.setSpacing(1)
-        col.addWidget(label(f"Прочитано: {text}", "muted", wrap=True))
-        col.addWidget(label(f"Распознавание: {read.mode_name}, подобрано само", "version", wrap=True))
+        col.setSpacing(2)
+        col.addWidget(label(text, wrap=True))
+        col.addWidget(label(f"Прочитано в игре · распознавание: {read.mode_name}, подобрано само", "version", wrap=True))
         row.addLayout(col, 1)
-        return row
+        return box
 
     def _glossary(self, g: Game) -> None:
         GlossaryDialog(self.ctl, g, self.window()).exec()
@@ -521,12 +542,12 @@ class LexoPage(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(scroll)
 
-        lay.addWidget(label("АККАУНТ", "section"))
+        lay.addWidget(label("Аккаунт", "section"))
         self.account, self.account_lay = card()
         lay.addWidget(self.account)
 
         head = QHBoxLayout()
-        head.addWidget(label("КОЛОДЫ", "section"))
+        head.addWidget(label("Колоды", "section"))
         head.addStretch(1)
         self.reload_btn = button(" Обновить", None, "refresh")
         self.reload_btn.clicked.connect(self.reload_decks)
@@ -540,7 +561,7 @@ class LexoPage(QWidget):
         self.table_lay.setContentsMargins(0, 6, 0, 6)
         lay.addWidget(self.table)
 
-        lay.addWidget(label("СЛОВА ИЗ НОВЫХ ИГР", "section"))
+        lay.addWidget(label("Слова из новых игр", "section"))
         dflt, dl = card()
         row = QHBoxLayout()
         row.addWidget(label("Куда класть слова игры, для которой колода не выбрана"), 1)
@@ -742,15 +763,15 @@ class LexoPage(QWidget):
         lay = QHBoxLayout(row)
         lay.setContentsMargins(18, 9, 18, 9)
         name = "section" if header else None
-        t = label(title.upper() if header else title, name)
+        t = label(title, name)
         t.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         lay.addWidget(t, 1)
-        for text, color in ((new, "#2B6CB0"), (due, theme.GREEN), (total, theme.MUTED)):
-            cell = label(text.upper() if header else text, name)
+        for text, color in ((new, theme.INFO), (due, theme.GREEN), (total, theme.MUTED)):
+            cell = label(text, name)
             cell.setFixedWidth(84)
             cell.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             if not header:
-                cell.setStyleSheet(f"color: {color if text != '0' else '#B0ADA4'}; font-weight: 700;")
+                cell.setStyleSheet(f"color: {color if text != '0' else theme.DISABLED}; font-weight: 600;")
             lay.addWidget(cell)
         return row
 
@@ -802,7 +823,7 @@ class KeysPage(QWidget):
             col = QVBoxLayout()
             col.setSpacing(2)
             title, desc = HOTKEY_LABELS[name]
-            col.addWidget(label(title, "title"))
+            col.addWidget(label(title, "rowTitle"))
             if desc:
                 col.addWidget(label(desc, "muted", wrap=True))
             note = label("", "warn", wrap=True)
@@ -823,7 +844,7 @@ class KeysPage(QWidget):
         rl.setContentsMargins(18, 12, 18, 12)
         col = QVBoxLayout()
         col.setSpacing(2)
-        col.addWidget(label("Показать, пока держишь", "title"))
+        col.addWidget(label("Показать, пока держишь", "rowTitle"))
         col.addWidget(
             label(
                 "Учёба: виден перевод реплики. Текст на весь экран: виден оригинал под переводом. "
@@ -951,11 +972,11 @@ class StripPreview(QWidget):
         top = strip.y() + px * 0.6
         if oh:
             p.setFont(of)
-            p.setPen(QColor("#9A988F"))
+            p.setPen(theme.TEXT_MUTED)
             p.drawText(QRectF(strip.x() + px * 0.9, top, inner_w, oh), int(Qt.TextFlag.TextWordWrap), original)
             top += oh
         p.setFont(sf)
-        p.setPen(QColor("#FFFFFF"))
+        p.setPen(theme.TEXT)
         p.drawText(QRectF(strip.x() + px * 0.9, top, inner_w, th + 2), int(Qt.TextFlag.TextWordWrap), text)
         p.end()
 
@@ -965,12 +986,12 @@ class ViewPage(QWidget):
         super().__init__()
         self.ctl = ctl
         s = ctl.settings
-        scroll, lay, _actions = page_shell("Вид", "Как перевод выглядит поверх игры.")
+        scroll, lay, _actions = page_shell("Вид", "Как выглядят перевод поверх игры и окно LexoPlay")
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(scroll)
 
-        lay.addWidget(label("СТРОКА ПЕРЕВОДА", "section"))
+        lay.addWidget(label("Строка перевода", "section"))
         box, bl = card_list()
         prev_wrap = QWidget()
         pw = QVBoxLayout(prev_wrap)
@@ -1028,7 +1049,7 @@ class ViewPage(QWidget):
         self.original.toggled.connect(self._original)
         lay.addWidget(box)
 
-        lay.addWidget(label("РЕЖИМ СЛОВ", "section"))
+        lay.addWidget(label("Режим слов", "section"))
         hover_box, hl_ = card_list()
         self.freeze = QComboBox()
         for code, text in (("auto", "Только где нужно"), ("always", "Всегда"), ("never", "Никогда")):
@@ -1072,7 +1093,7 @@ class ViewPage(QWidget):
         )
         lay.addWidget(hover_box)
 
-        lay.addWidget(label("ПЕРЕВОД", "section"))
+        lay.addWidget(label("Перевод", "section"))
         auto_box, al = card_list()
         self.recall = Toggle(s.recall_words)
         self.recall.toggled.connect(self._recall)
@@ -1109,7 +1130,7 @@ class ViewPage(QWidget):
         )
         lay.addWidget(auto_box)
 
-        lay.addWidget(label("УЧЁБА", "section"))
+        lay.addWidget(label("Учёба", "section"))
         study_box, stl = card_list()
         self.study = Toggle(s.study_mode)
         self.study.toggled.connect(self._study)
@@ -1167,7 +1188,7 @@ class ViewPage(QWidget):
         self._save_timer.setInterval(250)
         self._save_timer.timeout.connect(self.ctl.settings_changed)
 
-        lay.addWidget(label("РАСТЯНУТА ЛИ ИГРА", "section"))
+        lay.addWidget(label("Растянута ли игра", "section"))
         modes = QHBoxLayout()
         modes.setSpacing(10)
         self.group = QButtonGroup(self)
@@ -1198,7 +1219,26 @@ class ViewPage(QWidget):
                 wrap=True,
             )
         )
+
+        lay.addSpacing(8)
+        lay.addWidget(label("Окно LexoPlay", "section"))
+        box, bl = card_list()
+        self.theme_seg = Segments([("light", "Светлая"), ("dark", "Тёмная")], self._theme)
+        self.theme_seg.buttons[theme.MODE].setChecked(True)
+        bl.addWidget(
+            setting_row(
+                "Тема окна",
+                "Тёмная в тон плашкам поверх игры: удобнее, когда играешь вечером. Окно перерисуется сразу.",
+                self.theme_seg,
+                last=True,
+            )
+        )
+        lay.addWidget(box)
         lay.addStretch(1)
+
+    def _theme(self, mode: str) -> None:
+        # окно собирается заново, поэтому уходим из обработчика нажатия: кнопка, по которой щёлкнули, исчезнет
+        QTimer.singleShot(0, lambda: self.ctl.set_theme(mode))
 
     def _sliders(self) -> None:
         self.ctl.settings.font_scale = self.size.value() / 100
@@ -1298,7 +1338,7 @@ class MorePage(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(scroll)
 
-        lay.addWidget(label("СВОЙ КЛЮЧ ANTHROPIC", "section"))
+        lay.addWidget(label("Свой ключ Anthropic", "section"))
         box, bl = card()
         bl.addWidget(
             label(
@@ -1352,7 +1392,7 @@ class MorePage(QWidget):
         bl.addWidget(self.usage)
         lay.addWidget(box)
 
-        lay.addWidget(label("ЗАПУСК И ОБНОВЛЕНИЯ", "section"))
+        lay.addWidget(label("Запуск и обновления", "section"))
         box4, b4 = card_list()
         supported = ctl.autostart_supported()
         self.autostart = Toggle(supported and ctl.autostart_enabled())
@@ -1398,7 +1438,7 @@ class MorePage(QWidget):
         b4.addWidget(upd_row)
         lay.addWidget(box4)
 
-        lay.addWidget(label("СЕРВЕР", "section"))
+        lay.addWidget(label("Сервер", "section"))
         box2, b2 = card()
         row = QHBoxLayout()
         row.addWidget(label("Адрес сервера Lexo"))
@@ -1408,7 +1448,7 @@ class MorePage(QWidget):
         b2.addLayout(row)
         lay.addWidget(box2)
 
-        lay.addWidget(label("ПОМОЩЬ", "section"))
+        lay.addWidget(label("Помощь", "section"))
         box3, b3 = card_list()
         self.debug = Toggle(s.debug)
         self.debug.toggled.connect(self._debug)
@@ -1553,7 +1593,7 @@ class UpdateBar(QFrame):
         lay = QHBoxLayout(self)
         lay.setContentsMargins(32, 8, 24, 8)
         lay.setSpacing(12)
-        self.text = label("", "title", wrap=True)
+        self.text = label("", "updateText", wrap=True)
         lay.addWidget(self.text, 1)
         self.bar = QProgressBar()
         self.bar.setTextVisible(False)
@@ -1618,17 +1658,17 @@ class MainWindow(QWidget):
         side.setObjectName("sidebar")
         side.setFixedWidth(212)
         sl = QVBoxLayout(side)
-        sl.setContentsMargins(14, 18, 14, 16)
-        sl.setSpacing(4)
+        sl.setContentsMargins(12, 16, 12, 16)
+        sl.setSpacing(2)
         brand = QHBoxLayout()
         brand.setSpacing(10)
         logo = QLabel()
-        logo.setPixmap(draw_logo(30))
+        logo.setPixmap(draw_logo(28))
         brand.addWidget(logo)
         brand.addWidget(label("LexoPlay", "brand"))
         brand.addStretch(1)
         sl.addLayout(brand)
-        sl.addSpacing(18)
+        sl.addSpacing(20)
 
         self.stack = QStackedWidget()
         self.pages: dict[str, QWidget] = {}
@@ -1669,7 +1709,7 @@ class MainWindow(QWidget):
             b = QPushButton(f"  {text}")
             b.setObjectName("nav")
             b.setCheckable(True)
-            b.setIcon(icon(icon_name, theme.INK, 18))
+            b.setIcon(theme.toggle_icon(icon_name, theme.MUTED, theme.GREEN_INK, 18))
             b.setIconSize(QSize(18, 18))
             b.setCursor(Qt.CursorShape.PointingHandCursor)
             b.clicked.connect(lambda _c=False, k=key: self.show_page(k))
@@ -1741,8 +1781,13 @@ class MainWindow(QWidget):
         self._pill_anim.setEndValue(target)
         self._pill_anim.start()
 
+    def current_page(self) -> str:
+        return next((k for k, w in self.pages.items() if w is self.stack.currentWidget()), "games")
+
     def showEvent(self, e: QShowEvent) -> None:  # noqa: N802
         super().showEvent(e)
+        if theme.is_dark():
+            theme.dark_titlebar(self)
         QTimer.singleShot(0, lambda: self._move_pill(animated=False))  # кнопки уже разложены
 
     def resizeEvent(self, e: QResizeEvent) -> None:  # noqa: N802
