@@ -14,6 +14,7 @@ import re
 from dataclasses import dataclass
 
 from lexoplay.lexo import Sense
+from lexoplay.synonym import simple_hint
 from lexoplay.translate import TranslationError, friendly_error, lang_name, no_dash, usage_of
 
 log = logging.getLogger(__name__)
@@ -26,13 +27,14 @@ Clicked: "{selection}"
  "pos": "<part of speech in English: noun, verb, adj, adv, phrase...>",
  "ipa": "<IPA transcription of the lemma, without slashes>",
  "senses": ["<meaning in {tgt} of the clicked word as used in this sentence: the same word the sentence translation above uses for it, when it has one>", "<another common meaning, optional>"],
+ "simple": "<a simpler {src} word or short phrase of 2 to 5 very common words that a learner at level A2 to B1 already knows and that means the same here, e.g. rebuttal: \"argument against\", reluctant: \"not wanting to\", eerie: \"strange and scary\"; never the same word or a word of the same root; an empty string if the clicked word is itself a common, simple word or nothing simple fits>",
  "marked_translation": "<the sentence translation above with the clicked word's translation wrapped in **double asterisks**, or empty if no translation was given>",
  "phrase": "<if the clicked word is part of a longer expression in this sentence that a learner should learn as a whole (an idiom, a phrasal verb, a set phrase or a fixed collocation whose meaning doesn't simply add up from its words), that expression exactly as it stands in the sentence; an empty string if the word stands on its own or the clicked words already are the whole expression>",
  "phrase_lemma": "<dictionary form of that expression, with sb, sth or one's in the open slots, e.g. \\"beat around the bush\\", \\"have the mind to do sth\\">",
  "phrase_meaning": "<meaning of that expression in {tgt} in this sentence>",
  "phrase_first": <true if the clicked word alone means little here and the expression is what to learn, false if the word is worth learning on its own too>}}
-Short meanings, a word or a short phrase each, at most 3. No em dash characters."""
-LOOKUP_VERSION = 2  # 2: значение слова вместе с выражением вокруг него (phrase)
+Short meanings, a word or a short phrase each, at most 3. Each meaning must point back to this exact word: avoid a {tgt} word whose usual translation into {src} is a different, more common word (rebuttal is опровержение, контраргумент; возражение would be read as objection). No em dash characters."""
+LOOKUP_VERSION = 3  # 2: выражение вокруг слова (phrase); 3: простой синоним (simple) и значения без двусмысленности
 
 
 
@@ -67,6 +69,7 @@ def parse_sense(raw: str, selection: str) -> Sense:
         phrase_lemma=phrase_lemma,
         phrase_meaning=phrase_meaning,
         phrase_first=bool(phrase and data.get("phrase_first") is True),
+        simple=simple_hint(str(data.get("simple") or ""), lemma),
     )
 
 
@@ -94,6 +97,7 @@ def sense_json(s: Sense) -> str:
             "phrase_lemma": s.phrase_lemma,
             "phrase_meaning": s.phrase_meaning,
             "phrase_first": s.phrase_first,
+            "simple": s.simple,
         },
         ensure_ascii=False,
     )

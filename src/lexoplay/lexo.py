@@ -91,6 +91,7 @@ class Sense:
     phrase_lemma: str = ""  # словарная форма, с sb/sth
     phrase_meaning: str = ""
     phrase_first: bool = False  # само слово тут почти ничего не значит: учить выражение
+    simple: str = ""  # простой английский синоним или пояснение («argument against»), уже проверенный на простоту
 
     @property
     def translation(self) -> str:
@@ -313,6 +314,8 @@ class LexoClient:
             },
             timeout=12,
         )
+        from lexoplay.synonym import simple_hint
+
         return Sense(
             lemma=str(data.get("lemma") or selection),
             pos=str(data.get("pos") or ""),
@@ -325,6 +328,7 @@ class LexoClient:
             phrase_lemma=str(data.get("phrase_lemma") or ""),
             phrase_meaning=str(data.get("phrase_meaning") or ""),
             phrase_first=bool(data.get("phrase_first")),
+            simple=simple_hint(str(data.get("simple") or ""), str(data.get("lemma") or selection)),
         )
 
     async def explain(

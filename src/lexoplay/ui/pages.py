@@ -114,7 +114,7 @@ def word_matches(w: SavedWord, query: str) -> bool:
     if not q:
         return True
     hay = " \n".join(
-        x or "" for x in (w.word, w.selection, w.translation, w.sentence, w.sentence_translation, w.game)
+        x or "" for x in (w.word, w.selection, w.translation, w.sentence, w.sentence_translation, w.game, w.simple)
     )
     return q in fold(hay)
 
@@ -427,7 +427,8 @@ class WordsPage(QWidget):
         # всё остальное одной надписью: так длинный список строится в разы быстрее
         parts: list[str] = []
         if w.translation:
-            parts.append(f"<div>{marked_html(w.translation, [], q)}</div>")
+            simple = f'<span style="color:{theme.MUTED}"> · ≈ {html.escape(w.simple)}</span>' if w.simple else ""
+            parts.append(f"<div>{marked_html(w.translation, [], q)}{simple}</div>")
         if w.sentence:
             example = marked_html(w.sentence, word_spans(w.sentence, w.selection, w.lemma), q)
             parts.append(f'<div style="color:{theme.MUTED}; margin-top:3px">{example}</div>')

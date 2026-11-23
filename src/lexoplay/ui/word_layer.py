@@ -1270,6 +1270,8 @@ class WordLayer(QWidget):
             blocks += [("skeleton", 0.7), ("skeleton", 0.45)]
         for i, s in enumerate(card.senses[:3]):
             blocks.append(("text", f_main if i == 0 else f_more, s, TEXT if i == 0 else TEXT_MUTED))
+        if card.simple and card.phase != "loading":
+            blocks.append(("text", f_more, f"≈ {card.simple}", TEXT_MUTED))  # простой английский синоним
         if card.note:
             blocks.append(("text", f_note, card.note, ACCENT if card.phase == "saved" else TEXT_MUTED))
         if card.button:

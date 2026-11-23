@@ -248,6 +248,7 @@ class SavedWord:
     seen: int = 0  # сколько раз снова встретилось в репликах после сохранения
     seen_at: float = 0.0
     novel: bool = False  # из списка «Слова новеллы»: в Lexo ждёт на паузе, пример написала модель
+    simple: str = ""  # простой английский синоним («argument against»)
 
     @property
     def word(self) -> str:
@@ -330,6 +331,8 @@ class Store:
             self._db.execute("ALTER TABLE words ADD COLUMN seen_at REAL NOT NULL DEFAULT 0")
         if "novel" not in word_cols:  # до 0.6.53: слов из списков новелл не было
             self._db.execute("ALTER TABLE words ADD COLUMN novel INTEGER NOT NULL DEFAULT 0")
+        if "simple" not in word_cols:  # до 0.6.61: без простого синонима
+            self._db.execute("ALTER TABLE words ADD COLUMN simple TEXT NOT NULL DEFAULT ''")
         self._db.execute("CREATE INDEX IF NOT EXISTS words_exe_time ON words (exe, created_at)")
         vocab_cols = {r[1] for r in self._db.execute("PRAGMA table_info(vocab)").fetchall()}
         if "translation" not in vocab_cols:  # до 0.6.27: слова Lexo без перевода
@@ -749,20 +752,21 @@ class Store:
     # ------------------------------------------------------------------ words: сохранённые слова
     _WORD_COLS = (
         "id, exe, game, selection, lemma, translation, ipa, pos, sentence, sentence_translation, created_at, lexo, "
-        "seen, seen_at, novel"
+        "seen, seen_at, novel, simple"
     )
 
     @staticmethod
     def _word(r: tuple) -> SavedWord:
         return SavedWord(
-            *r[1:11], lexo=bool(r[11]), id=r[0], seen=int(r[12] or 0), seen_at=float(r[13] or 0), novel=bool(r[14])
+            *r[1:11], lexo=bool(r[11]), id=r[0], seen=int(r[12] or 0), seen_at=float(r[13] or 0), novel=bool(r[14]),
+            simple=r[15] or "",
         )
 
     def word_add(self, w: SavedWord) -> int:
         with self._lock:
             cur = self._db.execute(
                 "INSERT INTO words (exe, game, selection, lemma, translation, ipa, pos, sentence, "
-                "sentence_translation, created_at, lexo, novel) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "sentence_translation, created_at, lexo, novel, simple) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     w.exe,
                     w.game,
@@ -776,6 +780,7 @@ class Store:
                     w.created_at or time.time(),
                     int(w.lexo),
                     int(w.novel),
+                    w.simple or "",
                 ),
             )
             self._db.commit()

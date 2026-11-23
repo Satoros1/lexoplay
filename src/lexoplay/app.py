@@ -1257,6 +1257,7 @@ class App(QObject):
                         "deck": "current" if deck_mode == "current" else "game",
                         "deck_id": game.deck_id if game and deck_mode == "deck" else None,
                         **({"parked": True} if w.novel else {}),
+                        **self._simple_field(w.simple),
                     },
                 )
             if novel:
@@ -4151,6 +4152,7 @@ class App(QObject):
         ipa: str | None,
         pos: str | None,
         marked: str | None = None,
+        simple: str | None = None,
     ) -> None:
         """Сохранить слово или фразу из реплики: локально всегда, в Lexo, если ПК привязан."""
         record = ctx.line.record
@@ -4158,6 +4160,7 @@ class App(QObject):
             ctx.exe, ctx.title, ctx.session_id,
             selection=selection, lemma=lemma, translation=translation, ipa=ipa, pos=pos,
             sentence=ctx.line.sentence, sentence_translation=record.translation if record else None, marked=marked,
+            simple=simple,
         )
         self.sessions.word_added(ctx.exe)
         ctx.views = self._line_views(ctx.line)
@@ -4214,8 +4217,10 @@ class App(QObject):
         sentence_translation: str | None,
         marked: str | None = None,
         parked: bool = False,
+        simple: str | None = None,
     ) -> None:
-        """parked: слово из списка новеллы. В Lexo ляжет на паузу (ждёт «Учить»), в счёт слов дня не идёт."""
+        """parked: слово из списка новеллы. В Lexo ляжет на паузу (ждёт «Учить»), в счёт слов дня не идёт.
+        simple: простой английский синоним, уже проверенный (synonym.simple_hint)."""
         sentence, sentence_translation = self._clean_example(exe, sentence, sentence_translation)
         game = self.store.get_game(exe)
         linked = self.client.linked
@@ -4233,6 +4238,7 @@ class App(QObject):
                 created_at=time.time(),
                 lexo=linked,
                 novel=parked,
+                simple=(simple or "")[:80],
             )
         )
         if linked:
@@ -4252,6 +4258,7 @@ class App(QObject):
                     "deck": "current" if deck_mode == "current" else "game",
                     "deck_id": game.deck_id if game and deck_mode == "deck" else None,
                     **({"parked": True} if parked else {}),
+                    **self._simple_field(simple),
                 },
             )
         word = lemma or selection
@@ -4261,6 +4268,12 @@ class App(QObject):
         self.vocab.add(word, translations={word.strip().lower(): translation} if parked and translation else None)
         if not parked:
             self._stat(exe, words=1)
+
+    def _simple_field(self, simple: str | None) -> dict[str, str]:
+        """Синоним в карточку Lexo, если сервер его понимает (старый сервер отверг бы незнакомое поле)."""
+        if simple and "simple_hint" in self.client.server_features:
+            return {"simple": simple[:80]}
+        return {}
 
     def _set_card(self, card: CardState | None) -> None:
         ctx = self.word_ctx
@@ -4281,7 +4294,10 @@ class App(QObject):
                 "ready", sense.phrase_lemma, "", "выражение", [sense.phrase_meaning], local=local,
                 phrase_first=True, alt_label="само слово", alt_title=sense.lemma, alt_meaning=first,
             )  # fmt: skip
-        card = CardState("ready", sense.lemma, sense.ipa, sense.pos, list(sense.senses), in_deck=sense.in_deck, local=local)
+        card = CardState(
+            "ready", sense.lemma, sense.ipa, sense.pos, list(sense.senses), in_deck=sense.in_deck, local=local,
+            simple=sense.simple,
+        )  # fmt: skip
         if sense.phrase_lemma:
             card.alt_label, card.alt_title, card.alt_meaning = "в выражении", sense.phrase_lemma, sense.phrase_meaning
         return card
@@ -4370,7 +4386,7 @@ class App(QObject):
         if phrase and sense is not None and sense.phrase_lemma:
             return {
                 "selection": sense.phrase, "lemma": sense.phrase_lemma, "translation": sense.phrase_meaning,
-                "ipa": None, "pos": "phrase", "marked": None,
+                "ipa": None, "pos": "phrase", "marked": None, "simple": None,
             }  # fmt: skip
         return {
             "selection": ctx.selection,
@@ -4379,6 +4395,7 @@ class App(QObject):
             "ipa": sense.ipa if sense else None,
             "pos": sense.pos if sense else None,
             "marked": (sense.marked_translation or None) if sense else None,
+            "simple": (sense.simple or None) if sense else None,
         }
 
     def _on_word_add(self) -> None:

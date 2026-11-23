@@ -248,6 +248,7 @@ class CardState:
     alt_title: str = ""
     alt_meaning: str = ""
     alt_saved: bool = False
+    simple: str = ""  # простой синоним («≈ argument against»): опора на знакомое слово
 
     @property
     def alt_button(self) -> str | None:
