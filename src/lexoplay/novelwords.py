@@ -19,7 +19,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from lexoplay import rarity
+from lexoplay import formulas, rarity
 from lexoplay.config import data_dir
 from lexoplay.novel import Script
 from lexoplay.words import IRREGULAR, STOPWORDS
@@ -27,6 +27,9 @@ from lexoplay.words import IRREGULAR, STOPWORDS
 log = logging.getLogger(__name__)
 
 VERSION = 3  # 3: фразовые глаголы, порядок появления, уровни слов от модели
+# что ещё считается при разборе текста; файл с меньшим числом читается, а новелла пересчитывается сама,
+# без потери «уже знаю» и отправленных. 1: разговорные формулы (formulas.py)
+FEATURES = 1
 LEVELS = ("A1", "A2", "B1", "B2", "C1", "C2")
 NOT_WORD = ("NAME", "X")  # имя или не слово: не учим и считаем «понятным»
 USER_LEVEL = {"a2": "A2", "b1": "B1", "b2": "B2", "c1": "C1"}  # study_level -> CEFR
@@ -56,7 +59,7 @@ class PartStat:
     tokens: int  # слов в части (без имён)
     base: int  # из них самых частых (rank < rarity.COMMON) и междометий: их знает любой уровень
     counts: dict[str, int]  # остальные: словарная форма -> сколько раз
-    phrases: dict[str, int] = field(default_factory=dict)  # фразовые глаголы: «end up» -> сколько раз
+    phrases: dict[str, int] = field(default_factory=dict)  # фразовые глаголы и формулы: «end up», «no way» -> сколько раз
 
 
 @dataclass(slots=True)
@@ -73,6 +76,7 @@ class Novel:
     levels: dict[str, str] = field(default_factory=dict)  # оценка модели: A1..C2, NAME, X
     taken: set[str] = field(default_factory=set)  # уже отправлены в колоду отсюда
     skipped: set[str] = field(default_factory=set)  # «уже знаю»
+    features: int = FEATURES  # см. FEATURES: меньше значит, что текст разобран старой версией
     rev: int = field(default=0, compare=False)  # растёт с каждым save: по нему видно, что данные поменялись
     _totals: dict[str, int] | None = field(default=None, repr=False, compare=False)
 
@@ -185,6 +189,10 @@ def count(script: Script) -> tuple[list[PartStat], dict[str, int]]:
         phrases: Counter[str] = Counter()
         for row in rows:
             prev: str | None = None
+            start = pos + 1
+            for f, at in formulas.find(row):  # разговорные формулы: «no way», «what's the point of»
+                phrases[f] += 1
+                order.setdefault(f, start + at)
             for w, broken in row:
                 pos += 1
                 if not word_ok(w):
@@ -368,6 +376,7 @@ def _save(path: Path, novel: Novel) -> None:
             "levels": novel.levels,
             "taken": sorted(novel.taken),
             "skipped": sorted(novel.skipped),
+            "features": novel.features,
             "parts": [
                 {"title": p.title, "tokens": p.tokens, "base": p.base, "counts": p.counts, "phrases": p.phrases}
                 for p in novel.parts
@@ -413,6 +422,7 @@ def _load(path: Path) -> Novel | None:
             levels={str(k): str(v) for k, v in data.get("levels", {}).items()},
             taken=set(data.get("taken", [])),
             skipped=set(data.get("skipped", [])),
+            features=int(data.get("features", 0)),
         )
     except FileNotFoundError:
         return None

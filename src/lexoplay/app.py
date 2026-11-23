@@ -345,6 +345,7 @@ class App(QObject):
         self._novel_progress: dict[str, str] = {}
         self._novel_messages: dict[str, str] = {}
         self._novel_detecting: set[str] = set()  # движок определяется в фоне
+        self._novel_upgraded: set[str] = set()  # новеллы, пересчитанные под новую версию за этот запуск
         # «модель уже оценила все слова»: проверка идёт по всему списку, держим ответ, пока новелла та же
         self._novel_leveled: dict[str, tuple[tuple[int, int], bool]] = {}
         self._novel_engines: dict[str, novel.Engine] = {}
@@ -2558,6 +2559,12 @@ class App(QObject):
         if busy == "scan":
             return novelwords.NovelView("scanning", folder=folder, busy=busy)
         nv = novelwords.load(exe)
+        if nv is not None and nv.features < novelwords.FEATURES and exe not in self._novel_upgraded and not busy:
+            # разобран прошлой версией (без разговорных формул): пересчитываем сами, «уже знаю» и отправленные
+            # остаются. Один раз за запуск: если папки уже нет, список остаётся каким был
+            self._novel_upgraded.add(exe)
+            if self.scan_novel(exe, ""):
+                return novelwords.NovelView("scanning", folder=folder, busy="scan")
         if nv is not None:
             key = (id(nv), nv.rev)
             hit = self._novel_leveled.get(exe)

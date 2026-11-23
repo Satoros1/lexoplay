@@ -29,12 +29,13 @@ Clicked: "{selection}"
  "senses": ["<meaning in {tgt} of the clicked word as used in this sentence: the same word the sentence translation above uses for it, when it has one>", "<another common meaning, optional>"],
  "simple": "<a simpler {src} word or short phrase of 2 to 5 very common words that a learner at level A2 to B1 already knows and that means the same here, e.g. rebuttal: \"argument against\", reluctant: \"not wanting to\", eerie: \"strange and scary\"; never the same word or a word of the same root; an empty string if the clicked word is itself a common, simple word or nothing simple fits>",
  "marked_translation": "<the sentence translation above with the clicked word's translation wrapped in **double asterisks**, or empty if no translation was given>",
- "phrase": "<if the clicked word is part of a longer expression in this sentence that a learner should learn as a whole (an idiom, a phrasal verb, a set phrase or a fixed collocation whose meaning doesn't simply add up from its words), that expression exactly as it stands in the sentence; an empty string if the word stands on its own or the clicked words already are the whole expression>",
+ "phrase": "<if the clicked word is part of a longer expression in this sentence that a learner should learn as a whole (an idiom, a phrasal verb, a set phrase, a fixed collocation whose meaning doesn't simply add up from its words, or a conversational formula people say as a whole, like \"no way\", \"I can't help but\", \"what's the point of\"), that expression exactly as it stands in the sentence; an empty string if the word stands on its own or the clicked words already are the whole expression>",
  "phrase_lemma": "<dictionary form of that expression, with sb, sth or one's in the open slots, e.g. \\"beat around the bush\\", \\"have the mind to do sth\\">",
  "phrase_meaning": "<meaning of that expression in {tgt} in this sentence>",
  "phrase_first": <true if the clicked word alone means little here and the expression is what to learn, false if the word is worth learning on its own too>}}
 Short meanings, a word or a short phrase each, at most 3. Each meaning must point back to this exact word: avoid a {tgt} word whose usual translation into {src} is a different, more common word (rebuttal is опровержение, контраргумент; возражение would be read as objection). No em dash characters."""
-LOOKUP_VERSION = 3  # 2: выражение вокруг слова (phrase); 3: простой синоним (simple) и значения без двусмысленности
+LOOKUP_VERSION = 4  # 2: выражение вокруг слова (phrase); 3: простой синоним (simple), значения без двусмысленности;
+# 4: разговорные формулы тоже выражения
 
 
 
@@ -222,7 +223,7 @@ class AnthropicLookup:
 # v2: сначала смысл реплики целиком (тон, подтекст), «дословно», если помогает увидеть
 # устройство фразы, и только 0–3 настоящих трудных выражения целиком. v1 резал реплику на
 # кусочки по слову-два, и разбор читался как словарь, а не объяснение.
-EXPLAIN_VERSION = 2
+EXPLAIN_VERSION = 3  # 3: разговорные формулы среди пунктов разбора
 MAX_ITEMS = 3
 
 EXPLAIN_PROMPT = """A learner whose native language is {tgt} is playing the video game "{game}" in {src} and wants to understand one line of its dialogue.
@@ -231,7 +232,7 @@ EXPLAIN_PROMPT = """A learner whose native language is {tgt} is playing the vide
 {{"meaning": "<one or two sentences in {tgt}: what this line really means here, its tone and subtext, what or whom it refers to>",
  "literal": "<a word-for-word rendering in {tgt} that shows how the {src} sentence is built, or empty if it would read the same as the translation>",
  "items": [{{"phrase": "<a whole expression copied exactly from the line>", "base": "<its dictionary form if it differs, e.g. \\"jump to conclusions\\", \\"be reluctant to do something\\">", "meaning": "<what it means here, in {tgt}, a few words>", "note": "<one short sentence in {tgt}: how it is used or why it is tricky>"}}]}}
-Items: 0 to {max_items}, only what a learner would not get from the words alone: idioms, phrasal verbs, set phrases, slang, a tricky grammar construction, a reference to the game or its culture. Each item is a complete expression, never a single everyday word and never a random piece of the sentence. If nothing is tricky, return an empty list. Write everything except "phrase" and "base" in {tgt}. Never use the em dash character."""
+Items: 0 to {max_items}, only what a learner would not get from the words alone or would want to say himself: idioms, phrasal verbs, set phrases, conversational formulas people say as a whole (no way, I can't help but, what's the point of), slang, a tricky grammar construction, a reference to the game or its culture. Each item is a complete expression, never a single everyday word and never a random piece of the sentence. If nothing is tricky, return an empty list. Write everything except "phrase" and "base" in {tgt}. Never use the em dash character."""
 
 
 @dataclass(frozen=True, slots=True)
