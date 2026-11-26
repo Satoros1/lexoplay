@@ -708,9 +708,17 @@ def _app_vs_game(out_dir: Path) -> Callable[[], tuple[str, object]]:
         app = None
         ghwnd = 0
         try:
-            if not pump(lambda: bool(game_state().get("hwnd")), 20):
+            st: dict = {}
+
+            def game_up() -> bool:
+                # то же чтение, по которому решили, что игра готова: поддельная игра переписывает
+                # файл состояния, и второе чтение могло попасть на пустой (KeyError: 'hwnd' в CI)
+                nonlocal st
+                st = game_state()
+                return bool(st.get("hwnd") and st.get("pid"))
+
+            if not pump(game_up, 20):
                 return "fail", {"error": "поддельная игра не запустилась", "exit": proc.poll()}
-            st = game_state()
             ghwnd, gpid = int(st["hwnd"]), int(st["pid"])
             store = Store(Path(tmp) / "local.db")
             game = store.save_game(Game("selftest.exe", "Selftest", region=Rect(0.05, 0.75, 0.9, 0.2)))
