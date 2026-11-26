@@ -123,6 +123,28 @@ def _junk(w: str) -> bool:
     )
 
 
+SPOKEN_TOP = 3000  # формы самых ходовых слов (около 1500 слов): без них не поговорить
+SPOKEN_OFTEN = 7000  # частые: звучат в обычном разговоре
+
+
+def freq(token: str) -> str:
+    """Насколько слово ходовое: 'top' очень частое, 'often' частое, 'rare' редкое (нет в списке),
+    '' между ними, а также фраза или не слово. Чтобы видеть, что стоит учить ради речи."""
+    w = norm(token)
+    if not w or " " in w or "-" in w or _junk(w):
+        return ""
+    r = rank(w)
+    if r is None:
+        return "" if len(w) < 4 or "'" in w else "rare"
+    return "top" if r < SPOKEN_TOP else "often" if r < SPOKEN_OFTEN else ""
+
+
+def line_freq(token: str) -> str:
+    """То же для слов реплики: самые простые слова (their, house) игрок и так знает, их не отмечаем."""
+    r = rank(norm(token))
+    return "" if r is not None and r < COMMON else freq(token)
+
+
 def tier(token: str, level: str | None) -> str:
     """'rare' (уровня level и выше), 'common' (из самых частых) или '' (обычное либо подсветка выключена)."""
     if level not in LEVELS:

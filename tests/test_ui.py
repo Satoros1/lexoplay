@@ -967,6 +967,57 @@ def test_word_layer_highlights_rare_words_with_legend(qapp):
     qapp.processEvents()
 
 
+def test_word_layer_marks_frequent_words_and_the_card_says_how_common(qapp):
+    """F3: ходовые в речи слова подчёркнуты голубым, а карточка слова пишет, насколько оно частое
+    (шкала из трёх делений, как в Lexo). Раньше в глаза бросались редкие слова, и учились они."""
+    from PySide6.QtCore import QRect
+
+    from lexoplay.ui.word_layer import FREQ, FREQ_LABEL
+    from lexoplay.wordmode import CardState, reader_views
+
+    line = "Honestly, it was awkward and excruciating, but I can't afford to hesitate."
+    views = reader_views(line, lambda w: False, level="b2")
+    by = {v.text.strip(".,"): v for v in views}
+    layer = WordLayer()
+    layer.rare_label = "B2+"
+    layer.open(Rect(0, 0, 1000, 700), Rect(0.05, 0.8, 0.9, 0.15), views)
+    qapp.processEvents()
+    img = layer.grab().toImage()
+
+    def blue(c):  # type: ignore[no-untyped-def]
+        return c.blue() > 140 and c.blue() - c.red() > 40 and c.green() > c.red()  # и приглушённое «частое»
+
+    def rose(c):  # type: ignore[no-untyped-def]
+        return c.red() > 140 and c.blue() > 70 and c.green() < c.red() - 50
+
+    def word_box(v):  # type: ignore[no-untyped-def]
+        r = layer.views[v.index].rect
+        return QRect(int(r.x * img.width()) - 4, int(r.y * img.height()) - 4, int(r.w * img.width()) + 8, int(r.h * img.height()) + 10)
+
+    assert _count(img, blue, word_box(by["afford"])) > 5 and _count(img, blue, word_box(by["awkward"])) > 5
+    assert _count(img, blue, word_box(by["excruciating"])) == 0
+    # редкое слово подчёркнуто розовым, но уже не залито маркером на всю высоту
+    box = word_box(by["excruciating"])
+    assert 5 < _count(img, rose, box) < box.width() * 6
+    above = QRect(0, max(0, int(layer.panel.y()) - 80), img.width(), 80)
+    assert _count(img, blue, above) > 0, "«частые в речи» в подсказке над панелью"
+
+    # карточка: с оценкой частоты она выше на одну строку, и в ней есть шкала
+    def card_height(freq):  # type: ignore[no-untyped-def]
+        layer.select([by["afford"].index])
+        layer.set_card(CardState("ready", "afford", "əˈfɔːd", "verb", ["позволить себе"], freq=freq))
+        qapp.processEvents()
+        layer.grab()
+        return layer._card_rect.height()
+
+    plain = card_height("")
+    assert card_height("top") > plain and card_height("rare") > plain
+    assert FREQ.name().lower() == "#7cc7ff" and set(FREQ_LABEL) == {"top", "often", "rare"}
+    layer.close()
+    layer.deleteLater()
+    qapp.processEvents()
+
+
 def test_overlay_strip_muted_under_word_mode(qapp):
     ov = Overlay()
     ov.fade = False

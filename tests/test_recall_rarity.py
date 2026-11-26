@@ -32,6 +32,29 @@ def test_tiers_by_level_and_junk():
     assert set(LEVELS) == {"b1", "b2", "c1"}
 
 
+def test_spoken_frequency_tiers():
+    """Насколько слово ходовое в речи: по нему в F3 видно, что стоит учить, а что только для чтения."""
+    from lexoplay.rarity import freq, line_freq
+
+    assert freq("actually") == "top" and freq("afford") == "top"
+    assert freq("awkward") == "often" and freq("embarrassing") == "often"
+    assert freq("stubborn") == "" and freq("reluctant") == ""  # в списке, но не из ходовых
+    assert freq("walloping") == "rare" and freq("excruciating,") == "rare" and freq("unclouded") == "rare"
+    # не слово, фраза, составное: не оцениваем
+    assert freq("figure out") == "" and freq("half-eerie") == "" and freq("3000") == ""
+    # в реплике самые простые слова не отмечаем: игрок их и так знает
+    assert line_freq("actually") == "" and line_freq("house") == ""
+    assert line_freq("afford") == "top" and line_freq("awkward") == "often" and line_freq("walloping") == "rare"
+
+
+def test_reader_views_carry_frequency_only_with_highlighting_on():
+    line = "Honestly, it was awkward and excruciating, but I can't afford to hesitate, Makoto."
+    by = {v.text.strip(".,"): v for v in reader_views(line, lambda w: w.startswith("hesitat"), level="b2", names={"Makoto"})}
+    assert by["afford"].freq == "top" and by["awkward"].freq == "often" and by["excruciating"].freq == "rare"
+    assert by["Makoto"].freq == "" and by["was"].freq == "" and by["to"].freq == ""
+    assert all(v.freq == "" for v in reader_views(line, level=None)), "подсветка выключена: нет и этой"
+
+
 def test_reader_views_mark_rare_words_but_not_names():
     names = game_names(
         ["Welcome to Hope's Peak Academy, Makoto.", "I hope you like it.", "Talk to Monokuma later."],

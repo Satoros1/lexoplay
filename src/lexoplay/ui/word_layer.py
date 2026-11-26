@@ -59,6 +59,8 @@ log = logging.getLogger(__name__)
 Placer = Callable[[QWidget, Rect], None]
 
 TRANSLATION = QColor("#D2CBBE")  # тёплый, в тон плашкам
+FREQ = QColor("#7CC7FF")  # ходовое в речи слово: спокойный голубой, не спорит с жёлтым «твои слова»
+FREQ_LABEL = {"top": "очень частое в речи", "often": "частое в речи", "rare": "редкое в речи"}
 FIT_STEPS = (1.0, 0.9, 0.8, 0.72)  # во сколько раз мельче карточка, если иначе закрыла бы реплику
 IDLE_MS = 30_000
 PICK_MS = 350  # стрелками: значение слова запрашиваем, когда выбор остановился
@@ -846,13 +848,6 @@ class WordLayer(QWidget):
                 p.setPen(Qt.PenStyle.NoPen)
                 p.setBrush(QColor(255, 255, 255, 34))
                 p.drawRoundedRect(r.adjusted(-3, -2, 3, 2), 4, 4)
-            elif self._rare(v) and v.index not in explained:  # трудное слово: как маркером
-                x0, x1 = self._core_span(v.text, r, fm)
-                fill = QColor(RARE)
-                fill.setAlphaF(0.16)
-                p.setPen(Qt.PenStyle.NoPen)
-                p.setBrush(fill)
-                p.drawRoundedRect(QRectF(x0 - 1.5, r.y() - 1, x1 - x0 + 3, r.height() + 2), 3, 3)  # соседние не сливаются
             p.setFont(f_text)
             p.setPen(TEXT)
             p.drawText(QPointF(r.x(), r.y() + fm.ascent()), v.text)
@@ -864,7 +859,11 @@ class WordLayer(QWidget):
             x0, x1 = self._core_span(v.text, r, fm)  # под самим словом, без запятой и кавычек
             if v.known:
                 pen = QPen(KNOWN, line_w * 1.2)
-            elif self._rare(v):
+            elif v.freq in ("top", "often"):  # ходовое в речи слово: его стоит выучить в первую очередь
+                c = QColor(FREQ)
+                c.setAlphaF(1.0 if v.freq == "top" else 0.7)
+                pen = QPen(c, line_w * (1.5 if v.freq == "top" else 1.1))
+            elif self._rare(v):  # редкое: видно, но в глаза не бросается (раньше было залито маркером)
                 pen = QPen(RARE, line_w * 1.3)
             else:
                 c = QColor(ACCENT)
@@ -917,6 +916,21 @@ class WordLayer(QWidget):
         if self._notice:
             self._paint_notice(p, bounds, px)
         p.end()
+
+    # ------------------------------------------------------------ насколько слово ходовое в речи
+    def _paint_freq_block(self, p: QPainter, freq: str, x: float, y: float, h: float, px: float, f_note: QFont) -> None:
+        """Три деления и подпись, как шкалы над карточкой в Lexo: насколько слово ходовое в речи."""
+        n = {"top": 3, "often": 2, "rare": 1}[freq]
+        fm = QFontMetricsF(f_note)
+        bw, bh, gap = px * 0.5, px * 0.42, px * 0.16
+        by = y + (h - bh) / 2
+        p.setPen(Qt.PenStyle.NoPen)
+        for i in range(3):
+            p.setBrush(QColor(255, 255, 255, 190 if i < n else 46))
+            p.drawRoundedRect(QRectF(x + i * (bw + gap), by, bw, bh), 2, 2)
+        p.setFont(f_note)
+        p.setPen(TEXT_MUTED)
+        p.drawText(QPointF(x + 3 * (bw + gap) + px * 0.3, y + (h + fm.ascent() - fm.descent()) / 2), FREQ_LABEL[freq])
 
     def _fit(
         self, measure: Callable[[float], tuple[float, float] | None], sel: Rect, bounds: Rect, px: float, avoids: list[Rect]
@@ -1079,7 +1093,10 @@ class WordLayer(QWidget):
         if not (self.cursor_locked or self.focus_warning):
             if any(v.known and v.clickable and not v.stop for v in self._views):
                 legend.append((KNOWN, "твои"))
-            if any(self._rare(v) for v in self._views):
+            if any(v.freq and not v.known for v in self._views):
+                legend.append((FREQ, "частые в речи"))
+            # розовым подчёркнуты только те трудные слова, что не оказались частыми
+            if any(self._rare(v) and (v.known or not v.freq) for v in self._views):
                 legend.append((RARE, f"редкие {self.rare_label}".strip()))
         swatch, gap = px * 0.9, px * 0.35
         legend_w = sum(swatch + gap + fm.horizontalAdvance(label) + px * 0.8 for _c, label in legend)
@@ -1266,6 +1283,8 @@ class WordLayer(QWidget):
         blocks: list[tuple] = [("text", f_title, card.title, TEXT)]
         if card.subtitle:
             blocks.append(("text", f_sub, card.subtitle, TEXT_MUTED))
+        if card.freq and card.phase != "loading":
+            blocks.append(("freq",))
         if card.phase == "loading":
             blocks += [("skeleton", 0.7), ("skeleton", 0.45)]
         for i, s in enumerate(card.senses[:3]):
@@ -1297,6 +1316,8 @@ class WordLayer(QWidget):
                 heights.append(height(b[1], b[2]))
             elif b[0] == "skeleton":
                 heights.append(px * 0.75)
+            elif b[0] == "freq":
+                heights.append(px * 1.0)
             else:
                 heights.append(btn_h + px * 0.25)
         card_h = sum(heights) + gap * (len(blocks) - 1) + 2 * pad
@@ -1319,6 +1340,8 @@ class WordLayer(QWidget):
                 p.setFont(b[1])
                 p.setPen(b[3])
                 p.drawText(QRectF(x, y, inner, h + 1), flags, b[2])
+            elif b[0] == "freq":
+                self._paint_freq_block(p, card.freq, x, y, h, px, f_note)
             elif b[0] == "skeleton":
                 p.setPen(Qt.PenStyle.NoPen)
                 p.setBrush(QColor(255, 255, 255, 30))
