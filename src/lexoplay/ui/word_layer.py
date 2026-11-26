@@ -32,6 +32,7 @@ from PySide6.QtGui import (
     QGuiApplication,
     QKeyEvent,
     QMouseEvent,
+    QPainterPath,
     QPainter,
     QPaintEvent,
     QPen,
@@ -59,6 +60,10 @@ log = logging.getLogger(__name__)
 Placer = Callable[[QWidget, Rect], None]
 
 TRANSLATION = QColor("#D2CBBE")  # тёплый, в тон плашкам
+FREQ = QColor("#7CC7FF")  # ходовое в речи слово: спокойный голубой, не спорит с жёлтым «твои слова»
+FREQ_LABEL = {"top": "очень частое в речи", "often": "частое в речи", "rare": "редкое в речи"}
+FREQ_STYLE = "bolt"  # как показать в карточке: 'bolt' | 'chip' | 'meter' (варианты на выбор)
+FREQ_LINE = True  # отмечать ходовые слова и в самой реплике
 FIT_STEPS = (1.0, 0.9, 0.8, 0.72)  # во сколько раз мельче карточка, если иначе закрыла бы реплику
 IDLE_MS = 30_000
 PICK_MS = 350  # стрелками: значение слова запрашиваем, когда выбор остановился
@@ -846,7 +851,7 @@ class WordLayer(QWidget):
                 p.setPen(Qt.PenStyle.NoPen)
                 p.setBrush(QColor(255, 255, 255, 34))
                 p.drawRoundedRect(r.adjusted(-3, -2, 3, 2), 4, 4)
-            elif self._rare(v) and v.index not in explained:  # трудное слово: как маркером
+            elif self._rare(v) and v.index not in explained and not FREQ_LINE:  # трудное слово: как маркером
                 x0, x1 = self._core_span(v.text, r, fm)
                 fill = QColor(RARE)
                 fill.setAlphaF(0.16)
@@ -864,6 +869,13 @@ class WordLayer(QWidget):
             x0, x1 = self._core_span(v.text, r, fm)  # под самим словом, без запятой и кавычек
             if v.known:
                 pen = QPen(KNOWN, line_w * 1.2)
+            elif v.freq in ("top", "often") and FREQ_LINE:  # ходовое слово: стоит выучить ради речи
+                c = QColor(FREQ)
+                c.setAlphaF(1.0 if v.freq == "top" else 0.7)
+                pen = QPen(c, line_w * (1.5 if v.freq == "top" else 1.1))
+                if v.freq == "top" and FREQ_STYLE == "bolt":
+                    bh = fm.ascent() * 0.5
+                    self._bolt(p, x0 - bh * 0.62 - 1, r.y() - bh * 0.15, bh, c)
             elif self._rare(v):
                 pen = QPen(RARE, line_w * 1.3)
             else:
@@ -917,6 +929,95 @@ class WordLayer(QWidget):
         if self._notice:
             self._paint_notice(p, bounds, px)
         p.end()
+
+    # ------------------------------------------------------------ насколько слово ходовое в речи
+    @staticmethod
+    def _bolt(p: QPainter, x: float, y: float, h: float, color: QColor, *, filled: bool = True) -> float:
+        """Маленькая молния высотой h, левый верхний угол в (x, y). Возвращает её ширину."""
+        w = h * 0.62
+        pts = [(0.62, 0.0), (0.06, 0.58), (0.44, 0.58), (0.34, 1.0), (0.94, 0.40), (0.56, 0.40)]
+        path = QPainterPath()
+        path.moveTo(x + pts[0][0] * w, y + pts[0][1] * h)
+        for px_, py_ in pts[1:]:
+            path.lineTo(x + px_ * w, y + py_ * h)
+        path.closeSubpath()
+        if filled:
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(color)
+        else:
+            pen = QPen(color, max(1.0, h * 0.09))
+            pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            p.setPen(pen)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawPath(path)
+        return w
+
+    def _paint_title_freq(
+        self, p: QPainter, freq: str, x: float, y: float, h: float, inner: float, px: float, f_title: QFont,
+        f_sub: QFont, title: str,
+    ) -> None:  # fmt: skip
+        """Вариант «молния»: слово подчёркнуто, рядом молния и подпись. Редкое только подписано."""
+        fm = QFontMetricsF(f_title)
+        tw = min(inner, fm.horizontalAdvance(title))
+        label = FREQ_LABEL[freq]
+        p.setFont(f_sub)
+        fs = QFontMetricsF(f_sub)
+        if freq == "rare":
+            p.setPen(TEXT_MUTED)
+            p.drawText(QPointF(x + tw + px * 0.6, y + fm.ascent() - (fm.ascent() - fs.ascent()) * 0.2), label)
+            return
+        color = QColor(FREQ)
+        if freq == "often":
+            color.setAlphaF(0.75)
+        pen = QPen(color, max(1.5, px * (0.13 if freq == "top" else 0.09)))
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        p.setPen(pen)
+        uy = y + fm.ascent() + fm.descent() * 0.75
+        p.drawLine(QPointF(x, uy), QPointF(x + tw, uy))
+        bh = fm.ascent() * 0.72
+        bx = x + tw + px * 0.5
+        bw = self._bolt(p, bx, y + fm.ascent() - bh, bh, color, filled=freq == "top")
+        p.setFont(f_sub)
+        p.setPen(color)
+        p.drawText(QPointF(bx + bw + px * 0.35, y + fm.ascent()), label)
+
+    def _paint_freq_block(self, p: QPainter, freq: str, x: float, y: float, h: float, px: float, f_note: QFont) -> None:
+        label = FREQ_LABEL[freq]
+        fm = QFontMetricsF(f_note)
+        p.setFont(f_note)
+        if FREQ_STYLE == "meter":  # три деления, как шкалы над карточкой в Lexo
+            n = {"top": 3, "often": 2, "rare": 1}[freq]
+            bw, bh, gap = px * 0.5, px * 0.42, px * 0.16
+            by = y + (h - bh) / 2
+            for i in range(3):
+                c = QColor(255, 255, 255, 190 if i < n else 46)
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(c)
+                p.drawRoundedRect(QRectF(x + i * (bw + gap), by, bw, bh), 2, 2)
+            p.setPen(TEXT_MUTED)
+            p.drawText(QPointF(x + 3 * (bw + gap) + px * 0.3, y + (h + fm.ascent() - fm.descent()) / 2), label)
+            return
+        # «метка»: плашка с молнией
+        rare = freq == "rare"
+        color = QColor(TEXT_MUTED) if rare else QColor(FREQ)
+        bh = fm.ascent() * 0.95
+        bolt_w = 0.0 if rare else bh * 0.62 + px * 0.3
+        w = fm.horizontalAdvance(label) + bolt_w + px * 1.1
+        chip = QRectF(x, y + px * 0.1, w, h - px * 0.2)
+        fill = QColor(color)
+        fill.setAlphaF(0.10 if rare else (0.16 if freq == "top" else 0.0))
+        edge = QColor(color)
+        edge.setAlphaF(0.0 if freq == "top" else 0.45)
+        p.setPen(QPen(edge, 1) if edge.alpha() else Qt.PenStyle.NoPen)
+        p.setBrush(fill)
+        p.drawRoundedRect(chip, chip.height() / 2, chip.height() / 2)
+        tx = chip.x() + px * 0.55
+        if not rare:
+            self._bolt(p, tx, chip.center().y() - bh / 2, bh, color, filled=freq == "top")
+            tx += bolt_w
+        p.setFont(f_note)
+        p.setPen(color)
+        p.drawText(QPointF(tx, chip.center().y() + (fm.ascent() - fm.descent()) / 2), label)
 
     def _fit(
         self, measure: Callable[[float], tuple[float, float] | None], sel: Rect, bounds: Rect, px: float, avoids: list[Rect]
@@ -1266,6 +1367,8 @@ class WordLayer(QWidget):
         blocks: list[tuple] = [("text", f_title, card.title, TEXT)]
         if card.subtitle:
             blocks.append(("text", f_sub, card.subtitle, TEXT_MUTED))
+        if card.freq and card.phase != "loading" and FREQ_STYLE in ("chip", "meter"):
+            blocks.append(("freq",))
         if card.phase == "loading":
             blocks += [("skeleton", 0.7), ("skeleton", 0.45)]
         for i, s in enumerate(card.senses[:3]):
@@ -1297,6 +1400,8 @@ class WordLayer(QWidget):
                 heights.append(height(b[1], b[2]))
             elif b[0] == "skeleton":
                 heights.append(px * 0.75)
+            elif b[0] == "freq":
+                heights.append(px * (1.45 if FREQ_STYLE == "chip" else 1.0))
             else:
                 heights.append(btn_h + px * 0.25)
         card_h = sum(heights) + gap * (len(blocks) - 1) + 2 * pad
@@ -1319,6 +1424,10 @@ class WordLayer(QWidget):
                 p.setFont(b[1])
                 p.setPen(b[3])
                 p.drawText(QRectF(x, y, inner, h + 1), flags, b[2])
+                if b[1] is f_title and card.freq and card.phase != "loading" and FREQ_STYLE == "bolt":
+                    self._paint_title_freq(p, card.freq, x, y, h, inner, px, f_title, f_sub, card.title)
+            elif b[0] == "freq":
+                self._paint_freq_block(p, card.freq, x, y, h, px, f_note)
             elif b[0] == "skeleton":
                 p.setPen(Qt.PenStyle.NoPen)
                 p.setBrush(QColor(255, 255, 255, 30))

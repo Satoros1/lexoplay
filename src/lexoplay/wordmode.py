@@ -14,7 +14,7 @@ from typing import Literal
 
 from lexoplay.geometry import Rect
 from lexoplay.ocr_model import OcrResult
-from lexoplay.rarity import rank
+from lexoplay.rarity import line_freq, rank
 from lexoplay.rarity import tier as rarity_tier
 from lexoplay.words import clean, is_stopword, is_word
 
@@ -30,6 +30,7 @@ class WordView:
     stop: bool = False  # служебное слово: не подчёркиваем, но кликнуть можно
     clickable: bool = True
     tier: str = ""  # 'rare' трудное, 'common' из самых частых, 'name' имя; '' обычное (или подсветка выключена)
+    freq: str = ""  # 'top' очень частое в речи, 'often' частое: такие стоит учить (см. rarity.freq)
 
 
 def build_views(ocr: OcrResult, known: Callable[[str], bool] = lambda _w: False) -> list[WordView]:
@@ -128,6 +129,7 @@ def reader_views(
                 stop=stop,
                 clickable=word,
                 tier=tier,
+                freq=line_freq(token) if word and not stop and tier != "name" else "",
             )
         )
     return out
@@ -249,6 +251,7 @@ class CardState:
     alt_meaning: str = ""
     alt_saved: bool = False
     simple: str = ""  # простой синоним («≈ argument against»): опора на знакомое слово
+    freq: str = ""  # 'top' | 'often' | 'rare': насколько слово ходовое в речи (rarity.freq)
 
     @property
     def alt_button(self) -> str | None:

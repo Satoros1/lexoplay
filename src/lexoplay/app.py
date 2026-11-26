@@ -92,6 +92,7 @@ from lexoplay.study import (
     underline_rects,
 )
 from lexoplay.study import plan as study_plan
+from lexoplay.rarity import freq as word_freq
 from lexoplay.textproc import Paragraph, Utterance, page_text, paragraphs, strip_speaker, to_utterance
 from lexoplay.translate import (
     NOTES_MAX_CHARS,
@@ -4309,7 +4310,7 @@ class App(QObject):
             )  # fmt: skip
         card = CardState(
             "ready", sense.lemma, sense.ipa, sense.pos, list(sense.senses), in_deck=sense.in_deck, local=local,
-            simple=sense.simple,
+            simple=sense.simple, freq=word_freq(sense.lemma),
         )  # fmt: skip
         if sense.phrase_lemma:
             card.alt_label, card.alt_title, card.alt_meaning = "в выражении", sense.phrase_lemma, sense.phrase_meaning
