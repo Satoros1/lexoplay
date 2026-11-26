@@ -310,6 +310,21 @@ def test_speaker_name_without_colon_is_cut():
     assert drop_speaker_name("Я не могу.", "Makoto Naegi") == "Я не могу."
 
 
+def test_known_speaker_is_cut_when_the_line_has_no_speaker():
+    """Имя приклеилось к реплике: из оригинала его убрали по списку говорящих игры, а в переводе
+    оставалось («Аои Асахина Ладно! ...») и попадало в пример к слову в Lexo."""
+    from lexoplay.translate import drop_known_speaker
+
+    speakers = ["Makoto Naegi", "Aoi Asahina", "Aoi", "Monokuma"]
+    raw = "Аои Асахина Ладно! У меня есть идеальное средство, чтобы такой, как ты, был бодр и здоров!"
+    assert drop_known_speaker(raw, speakers).startswith("Ладно! У меня")
+    assert drop_known_speaker("Монокума Упупупу!", speakers) == "Упупупу!"
+    # обычная фраза, имя внутри неё и пустой список: как есть
+    assert drop_known_speaker("Ладно! У меня есть средство.", speakers) == "Ладно! У меня есть средство."
+    assert drop_known_speaker("Аои Асахина пришла первой.", speakers) == "Аои Асахина пришла первой."
+    assert drop_known_speaker(raw, []) == raw
+
+
 def test_old_translations_with_speaker_name_are_not_reused(tmp_path):
     """0.6.16: реплика читалась с именем, и перевод был с именем. Та же реплика без имени похожа
     на неё больше чем на 92%, и кеш отдавал старый перевод с «Токо Фукава» впереди."""

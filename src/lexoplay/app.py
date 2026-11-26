@@ -104,6 +104,7 @@ from lexoplay.translate import (
     TranslationError,
     Translator,
     check_key,
+    drop_known_speaker,
     drop_label,
     pick_source,
     tidy_saved,
@@ -149,6 +150,7 @@ WORDS_REPEAT = {"words_left", "words_right", "words_up", "words_down", "words_sh
 WORDS_VKS = {0x1B, 0x0D, 0x25, 0x26, 0x27, 0x28, 0x52, 0x31, 0x32, 0x33, 0x34, 0x35, 0x10, 0xA0, 0xA1}
 # игры, которые ловят клик мыши даже без фокуса: на время режима слов их сворачиваем (настройка «Сам решает»)
 KNOWN_CLICK_GRABBERS = {"dr1_us.exe", "dr2_us.exe"}
+EXAMPLES_CLEAN = "2"  # какая по счёту чистка примеров от имён говорящих уже сделана (см. _clean_examples)
 FREEZE_GRACE_S = 1.5  # сколько после сворачивания игры фокус может прыгать сам (в окне)
 FREEZE_GRACE_FULL_S = 3.5  # полноэкранной: она ещё меняет режим экрана
 PAGE_REGION_H = 0.45  # выделили больше стольких по высоте и ширине 0.5: похоже на текст на весь экран (NVL)
@@ -4175,12 +4177,16 @@ class App(QObject):
 
     def _clean_example(self, exe: str, sentence: str, translation: str | None) -> tuple[str, str | None]:
         """Пример к слову без имени говорящего («Byakuya Togami So, you...») ни в оригинале, ни в переводе."""
-        clean = strip_speaker(sentence, self.store.line_speakers(exe, 300) if exe else [])
-        return clean, drop_label(translation, clean) if translation else translation
+        speakers = self.store.line_speakers(exe, 300) if exe else []
+        clean = strip_speaker(sentence, speakers)
+        if translation:
+            translation = drop_known_speaker(drop_label(translation, clean), speakers)
+        return clean, translation
 
     def _clean_examples(self) -> None:
-        """Слова, сохранённые до 0.6.14: в примерах бывало имя говорящего. Чистим один раз."""
-        if self.store.get_meta("examples_clean") == "1":
+        """В примерах к словам бывало имя говорящего: до 0.6.14 в оригинале, до 0.6.63 в переводе
+        («Аои Асахина Ладно! ...»). Чистим один раз на каждую такую правку."""
+        if self.store.get_meta("examples_clean") == EXAMPLES_CLEAN:
             return
         fixed = 0
         try:
@@ -4191,7 +4197,7 @@ class App(QObject):
                 if (sentence, translation) != (w.sentence, w.sentence_translation):
                     self.store.word_set_example(w.id, sentence, translation)
                     fixed += 1
-            self.store.set_meta("examples_clean", "1")
+            self.store.set_meta("examples_clean", EXAMPLES_CLEAN)
         except Exception:
             log.exception("не получилось почистить примеры к словам")
         if fixed:

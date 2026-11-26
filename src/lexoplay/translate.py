@@ -560,6 +560,27 @@ def drop_speaker_name(translation: str, speaker: str | None) -> str:
     return translation
 
 
+def drop_known_speaker(translation: str, speakers: list[str] | tuple[str, ...] | set[str]) -> str:
+    """То же, когда говорящий реплики не распознан, но имена игры известны: «Аои Асахина Ладно! ...».
+
+    Имя приклеилось к реплике при распознавании, из оригинала его убрали по списку говорящих,
+    а в переводе оно осталось. Длинные имена первыми: «Аои Асахина» раньше, чем «Аои»."""
+    from difflib import SequenceMatcher
+
+    names = sorted({s.strip() for s in speakers if s and s.strip()}, key=len, reverse=True)
+    parts = {re.sub(r"[^a-z]", "", w.lower()) for name in names for w in name.split()} - {""}
+    for name in names:
+        out = drop_speaker_name(translation, name)
+        if out == translation:
+            continue
+        # «Аои Асахина пришла первой» при говорящем «Aoi»: дальше идёт фамилия, а не новая фраза
+        first = _latin(out.split(" ", 1)[0])
+        if first and any(SequenceMatcher(None, first, p).ratio() >= 0.75 for p in parts):
+            continue
+        return out
+    return translation
+
+
 _CORRECTION = re.compile(
     r"\(\s*(?:исправл\w*|поправл\w*|поправк\w*|correct\w*|fix\w*|oops|упс)\s*\)\s*"
     r"|\*\s*(?:исправл\w*|поправл\w*|correct\w*)\s*\*\s*",
