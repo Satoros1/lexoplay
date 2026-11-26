@@ -973,36 +973,43 @@ def test_word_layer_marks_frequent_words_and_the_card_says_how_common(qapp):
     from PySide6.QtCore import QRect
 
     from lexoplay.ui.word_layer import FREQ, FREQ_LABEL
+    from lexoplay.ui.theme import KNOWN, RARE
     from lexoplay.wordmode import CardState, reader_views
 
-    line = "Honestly, it was awkward and excruciating, but I can't afford to hesitate."
-    views = reader_views(line, lambda w: False, level="b2")
-    by = {v.text.strip(".,"): v for v in views}
-    layer = WordLayer()
-    layer.rare_label = "B2+"
-    layer.open(Rect(0, 0, 1000, 700), Rect(0.05, 0.8, 0.9, 0.15), views)
-    qapp.processEvents()
-    img = layer.grab().toImage()
-
     def blue(c):  # type: ignore[no-untyped-def]
-        return c.blue() > 140 and c.blue() - c.red() > 40 and c.green() > c.red()  # и приглушённое «частое»
+        return c.blue() - c.green() > 6 and c.blue() - c.red() > 20  # бирюзовый пунктир сюда не попадает
 
     def rose(c):  # type: ignore[no-untyped-def]
         return c.red() > 140 and c.blue() > 70 and c.green() < c.red() - 50
 
-    def word_box(v):  # type: ignore[no-untyped-def]
-        r = layer.views[v.index].rect
-        return QRect(int(r.x * img.width()) - 4, int(r.y * img.height()) - 4, int(r.w * img.width()) + 8, int(r.h * img.height()) + 10)
+    def shot(text, known=lambda w: False, level="b2"):  # type: ignore[no-untyped-def]
+        layer = WordLayer()
+        layer.rare_label = "B2+"
+        layer.open(Rect(0, 0, 1000, 700), Rect(0.05, 0.8, 0.9, 0.15), reader_views(text, known, level=level))
+        qapp.processEvents()
+        img = layer.grab().toImage()
+        panel = layer.panel
+        area = QRect(int(panel.x()), int(panel.y()), int(panel.width()), int(panel.height()))
+        return layer, img, area
 
-    assert _count(img, blue, word_box(by["afford"])) > 5 and _count(img, blue, word_box(by["awkward"])) > 5
-    assert _count(img, blue, word_box(by["excruciating"])) == 0
-    # редкое слово подчёркнуто розовым, но уже не залито маркером на всю высоту
-    box = word_box(by["excruciating"])
-    assert 5 < _count(img, rose, box) < box.width() * 6
-    above = QRect(0, max(0, int(layer.panel.y()) - 80), img.width(), 80)
-    assert _count(img, blue, above) > 0, "«частые в речи» в подсказке над панелью"
+    def plain(text, pick):  # type: ignore[no-untyped-def]
+        """Та же реплика без подсветки: сколько таких точек даёт сам текст (сглаживание шрифта
+        на Windows окрашивает края букв), чтобы считать только подчёркивания."""
+        layer, img, area = shot(text, level=None)
+        n = _count(img, pick, area)
+        assert layer._legend_items() == []
+        layer.close()
+        layer.deleteLater()
+        return n
 
-    # карточка: с оценкой частоты она выше на одну строку, и в ней есть шкала
+    # частые слова есть: в панели появился голубой; в пояснении цветов «частые» идут первыми
+    line = "I can't afford awkward silence."
+    layer, img, area = shot(line, lambda w: w.startswith("silence"))
+    assert _count(img, blue, area) - plain(line, blue) > 20
+    assert [(c.name(), label) for c, label in layer._legend_items()] == [(FREQ.name(), "частые"), (KNOWN.name(), "твои")]
+    by = {v.text.strip(".,"): v for v in layer.views}
+
+    # карточка: с оценкой частоты она выше на одну строку (шкала с подписью)
     def card_height(freq):  # type: ignore[no-untyped-def]
         layer.select([by["afford"].index])
         layer.set_card(CardState("ready", "afford", "əˈfɔːd", "verb", ["позволить себе"], freq=freq))
@@ -1010,11 +1017,20 @@ def test_word_layer_marks_frequent_words_and_the_card_says_how_common(qapp):
         layer.grab()
         return layer._card_rect.height()
 
-    plain = card_height("")
-    assert card_height("top") > plain and card_height("rare") > plain
-    assert FREQ.name().lower() == "#7cc7ff" and set(FREQ_LABEL) == {"top", "often", "rare"}
+    bare = card_height("")
+    assert card_height("top") > bare and card_height("rare") > bare
     layer.close()
     layer.deleteLater()
+
+    # только редкие слова: голубого не прибавилось, розовое подчёркивание есть, но слово уже не залито маркером
+    line = "The eerie walloping."
+    layer, img, area = shot(line)
+    assert _count(img, blue, area) == plain(line, blue)
+    assert 5 < _count(img, rose, area) - plain(line, rose) < area.width() * 4
+    assert [(c.name(), label) for c, label in layer._legend_items()] == [(RARE.name(), "редкие B2+")]
+    layer.close()
+    layer.deleteLater()
+    assert FREQ.name().lower() == "#7cc7ff" and set(FREQ_LABEL) == {"top", "often", "rare"}
     qapp.processEvents()
 
 

@@ -859,7 +859,7 @@ class WordLayer(QWidget):
             x0, x1 = self._core_span(v.text, r, fm)  # под самим словом, без запятой и кавычек
             if v.known:
                 pen = QPen(KNOWN, line_w * 1.2)
-            elif v.freq in ("top", "often"):  # ходовое в речи слово: его стоит выучить в первую очередь
+            elif self._frequent(v):  # ходовое в речи слово: его стоит выучить в первую очередь
                 c = QColor(FREQ)
                 c.setAlphaF(1.0 if v.freq == "top" else 0.7)
                 pen = QPen(c, line_w * (1.5 if v.freq == "top" else 1.1))
@@ -955,6 +955,23 @@ class WordLayer(QWidget):
     @staticmethod
     def _rare(v: WordView) -> bool:
         return v.tier == "rare" and v.clickable and not v.stop and not v.known
+
+    @staticmethod
+    def _frequent(v: WordView) -> bool:
+        """Ходовое в речи слово, которого ещё нет в словаре: подчёркнуто голубым."""
+        return v.freq in ("top", "often") and v.clickable and not v.stop and not v.known
+
+    def _legend_items(self) -> list[tuple[QColor, str]]:
+        """Что значат цвета подчёркиваний: только те, что есть в этой реплике, главное первым."""
+        out: list[tuple[QColor, str]] = []
+        if any(self._frequent(v) for v in self._views):
+            out.append((FREQ, "частые"))
+        if any(v.known and v.clickable and not v.stop for v in self._views):
+            out.append((KNOWN, "твои"))
+        # розовым остаются только те трудные слова, что не оказались ходовыми
+        if any(self._rare(v) and not self._frequent(v) for v in self._views):
+            out.append((RARE, f"редкие {self.rare_label}".strip()))
+        return out
 
     @staticmethod
     def _core_span(text: str, r: QRectF, fm: QFontMetricsF) -> tuple[float, float]:
@@ -1088,20 +1105,16 @@ class WordLayer(QWidget):
         room = right - x - px * 0.6
         if room < px * 8:
             return
-        # что значат цвета: только те, что есть в этой реплике
-        legend: list[tuple[QColor, str]] = []
-        if not (self.cursor_locked or self.focus_warning):
-            if any(v.known and v.clickable and not v.stop for v in self._views):
-                legend.append((KNOWN, "твои"))
-            if any(v.freq and not v.known for v in self._views):
-                legend.append((FREQ, "частые в речи"))
-            # розовым подчёркнуты только те трудные слова, что не оказались частыми
-            if any(self._rare(v) and (v.known or not v.freq) for v in self._views):
-                legend.append((RARE, f"редкие {self.rare_label}".strip()))
+        legend = [] if self.cursor_locked or self.focus_warning else self._legend_items()
         swatch, gap = px * 0.9, px * 0.35
-        legend_w = sum(swatch + gap + fm.horizontalAdvance(label) + px * 0.8 for _c, label in legend)
-        if legend and room - legend_w < px * 10:
-            legend, legend_w = [], 0.0  # не влезает: подсказка важнее
+
+        def width(items: list[tuple[QColor, str]]) -> float:
+            return sum(swatch + gap + fm.horizontalAdvance(label) + px * 0.8 for _c, label in items)
+
+        # не влезает: подсказка важнее, пояснения цветов уходят с конца по одному
+        while legend and room - width(legend) < px * 10:
+            legend.pop()
+        legend_w = width(legend)
         text = fm.elidedText(text, Qt.TextElideMode.ElideRight, room - px * 1.4 - legend_w)
         text_w = fm.horizontalAdvance(text)
         w = text_w + px * 1.4 + legend_w
