@@ -252,7 +252,7 @@ class CardState:
     alt_meaning: str = ""
     alt_saved: bool = False
     simple: str = ""  # простой синоним («≈ argument against»): опора на знакомое слово
-    freq: str = ""  # 'top' | 'often' | 'rare': насколько слово ходовое в речи (rarity.freq)
+    freq: str = ""  # 'top' | 'often' | 'mid' | 'rare': насколько слово ходовое в речи (rarity.freq)
 
     @property
     def alt_button(self) -> str | None:

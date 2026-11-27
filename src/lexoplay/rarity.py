@@ -128,15 +128,19 @@ SPOKEN_OFTEN = 7000  # частые: звучат в обычном разгов
 
 
 def freq(token: str) -> str:
-    """Насколько слово ходовое: 'top' очень частое, 'often' частое, 'rare' редкое (нет в списке),
-    '' между ними, а также фраза или не слово. Чтобы видеть, что стоит учить ради речи."""
+    """Насколько слово ходовое: 'top' очень частое, 'often' частое, 'mid' нечастое (в списке, но
+    далеко), 'rare' редкое (нет в списке); '' только для фразы и не слова: о них список молчит.
+    Чтобы видеть, что стоит учить ради речи. Оценка есть у каждого отдельного слова: без неё
+    у части карточек шкалы не было, и это читалось как поломка."""
     w = norm(token)
     if not w or " " in w or "-" in w or _junk(w):
         return ""
     r = rank(w)
     if r is None:
-        return "" if len(w) < 4 or "'" in w else "rare"
-    return "top" if r < SPOKEN_TOP else "often" if r < SPOKEN_OFTEN else ""
+        # имя («Makoto») в список не входит, но и «редким словом» его не назвать
+        named = token.strip("\"'«“(")[:1].isupper()
+        return "" if len(w) < 4 or "'" in w or named else "rare"
+    return "top" if r < SPOKEN_TOP else "often" if r < SPOKEN_OFTEN else "mid"
 
 
 def line_freq(token: str) -> str:

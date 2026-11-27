@@ -60,7 +60,12 @@ Placer = Callable[[QWidget, Rect], None]
 
 TRANSLATION = QColor("#D2CBBE")  # тёплый, в тон плашкам
 FREQ = QColor("#7CC7FF")  # ходовое в речи слово: спокойный голубой, не спорит с жёлтым «твои слова»
-FREQ_LABEL = {"top": "очень частое в речи", "often": "частое в речи", "rare": "редкое в речи"}
+FREQ_LABEL = {
+    "top": "очень частое в речи",
+    "often": "частое в речи",
+    "mid": "нечастое в речи",
+    "rare": "редкое в речи",
+}
 FIT_STEPS = (1.0, 0.9, 0.8, 0.72)  # во сколько раз мельче карточка, если иначе закрыла бы реплику
 IDLE_MS = 30_000
 PICK_MS = 350  # стрелками: значение слова запрашиваем, когда выбор остановился
@@ -920,7 +925,7 @@ class WordLayer(QWidget):
     # ------------------------------------------------------------ насколько слово ходовое в речи
     def _paint_freq_block(self, p: QPainter, freq: str, x: float, y: float, h: float, px: float, f_note: QFont) -> None:
         """Три деления и подпись, как шкалы над карточкой в Lexo: насколько слово ходовое в речи."""
-        n = {"top": 3, "often": 2, "rare": 1}[freq]
+        n = {"top": 3, "often": 2, "mid": 1, "rare": 0}[freq]
         fm = QFontMetricsF(f_note)
         bw, bh, gap = px * 0.5, px * 0.42, px * 0.16
         by = y + (h - bh) / 2

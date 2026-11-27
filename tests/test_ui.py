@@ -1018,7 +1018,8 @@ def test_word_layer_marks_frequent_words_and_the_card_says_how_common(qapp):
         return layer._card_rect.height()
 
     bare = card_height("")
-    assert card_height("top") > bare and card_height("rare") > bare
+    # шкала есть у каждого слова, какой бы частоты оно ни было
+    assert all(card_height(f) > bare for f in ("top", "often", "mid", "rare"))
     layer.close()
     layer.deleteLater()
 
@@ -1030,7 +1031,7 @@ def test_word_layer_marks_frequent_words_and_the_card_says_how_common(qapp):
     assert [(c.name(), label) for c, label in layer._legend_items()] == [(RARE.name(), "редкие B2+")]
     layer.close()
     layer.deleteLater()
-    assert FREQ.name().lower() == "#7cc7ff" and set(FREQ_LABEL) == {"top", "often", "rare"}
+    assert FREQ.name().lower() == "#7cc7ff" and set(FREQ_LABEL) == {"top", "often", "mid", "rare"}
     qapp.processEvents()
 
 

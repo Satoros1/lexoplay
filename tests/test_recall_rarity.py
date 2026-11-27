@@ -38,8 +38,9 @@ def test_spoken_frequency_tiers():
 
     assert freq("actually") == "top" and freq("afford") == "top"
     assert freq("awkward") == "often" and freq("embarrassing") == "often"
-    assert freq("stubborn") == "" and freq("reluctant") == ""  # в списке, но не из ходовых
+    assert freq("stubborn") == "mid" and freq("reluctant") == "mid"  # в списке, но не из ходовых
     assert freq("walloping") == "rare" and freq("excruciating,") == "rare" and freq("unclouded") == "rare"
+    assert freq("Makoto") == "" and freq("Monokuma") == ""  # имя не «редкое слово»
     # не слово, фраза, составное: не оцениваем
     assert freq("figure out") == "" and freq("half-eerie") == "" and freq("3000") == ""
     # в реплике самые простые слова не отмечаем: игрок их и так знает
